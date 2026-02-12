@@ -6,6 +6,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import projectsRouter from './routes/projects.js';
 import runsRouter from './routes/runs.js';
+import submodulesRouter from './routes/submodules.js';
+import { loadModules } from './services/moduleLoader.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -22,6 +24,10 @@ app.use(express.static(clientBuildPath));
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 app.use('/api/projects', projectsRouter);
 app.use('/api/runs', runsRouter);
+app.use('/api/submodules', submodulesRouter);
+
+// Load submodule manifests from MODULES_PATH
+loadModules();
 
 // SPA fallback — serve React app for non-API routes
 app.get('*', (req, res, next) => {

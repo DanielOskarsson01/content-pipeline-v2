@@ -49,6 +49,7 @@ export async function apiFetch<T>(
 import type {
   Project, CreateProjectInput, CreateProjectResponse,
   RunWithStages, PipelineStage, StepApproveResponse, StepSkipResponse,
+  CategoryGroups,
 } from '../types/step';
 
 export const api = {
@@ -71,4 +72,8 @@ export const api = {
     apiFetch<StepApproveResponse>(`/api/runs/${runId}/steps/${stepIndex}/approve`, { method: 'POST' }),
   skipStep: (runId: string, stepIndex: number) =>
     apiFetch<StepSkipResponse>(`/api/runs/${runId}/steps/${stepIndex}/skip`, { method: 'POST' }),
+
+  // Submodules
+  getSubmodules: (stepIndex: number) =>
+    apiFetch<CategoryGroups>(`/api/submodules?step=${stepIndex}`),
 };

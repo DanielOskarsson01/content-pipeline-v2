@@ -61,3 +61,33 @@ export interface StepSkipResponse {
   step_skipped: number;
   next_step: number | null;
 }
+
+// Submodule types (from manifest.json)
+export interface SubmoduleManifest {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  cost: 'cheap' | 'medium' | 'expensive';
+  data_operation_default: 'add' | 'remove' | 'transform';
+  requires_columns: string[];
+  item_key: string;
+  options: SubmoduleOption[];
+  options_defaults: Record<string, unknown>;
+  output_schema: Record<string, string>;
+}
+
+export interface SubmoduleOption {
+  name: string;
+  type: 'boolean' | 'number' | 'text' | 'select' | 'textarea';
+  label: string;
+  description: string;
+  default: unknown;
+  min?: number;
+  max?: number;
+  values?: string[];
+  maxLength?: number;
+}
+
+// CategoryGroups: Record<categoryName, SubmoduleManifest[]>
+export type CategoryGroups = Record<string, SubmoduleManifest[]>;

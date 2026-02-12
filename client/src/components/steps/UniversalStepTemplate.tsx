@@ -1,4 +1,6 @@
 import type { PipelineStage } from '../../types/step';
+import { useStepSubmodules } from '../../hooks/useSubmodules';
+import { CategoryCardGrid } from '../shared/CategoryCardGrid';
 import { StepSummary } from '../shared/StepSummary';
 import { StepApprovalFooter } from '../shared/StepApprovalFooter';
 
@@ -11,18 +13,21 @@ interface UniversalStepTemplateProps {
 }
 
 export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, isSkipping }: UniversalStepTemplateProps) {
-  const isActive = stage.status === 'active';
   const isCompleted = stage.status === 'completed';
+  const { data: categories, isLoading: submodulesLoading } = useStepSubmodules(stage.step_index);
 
   return (
     <div>
-      {/* CategoryCardGrid area — Phase 4 will populate this */}
-      <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center mb-4">
-        <p className="text-gray-400 text-sm">No submodules available</p>
-        <p className="text-gray-300 text-xs mt-1">Submodules will appear here once modules are discovered (Phase 4)</p>
-      </div>
+      {/* CategoryCardGrid — real manifest data */}
+      {submodulesLoading ? (
+        <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center mb-4">
+          <p className="text-gray-400 text-sm">Loading submodules...</p>
+        </div>
+      ) : (
+        <CategoryCardGrid categories={categories || {}} />
+      )}
 
-      {/* StepSummary — empty for now */}
+      {/* StepSummary — empty for now (populated when submodules have runs) */}
       <div className="mb-4">
         <StepSummary submodules={[]} />
       </div>
@@ -37,8 +42,8 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
         </div>
       )}
 
-      {/* Approval footer — only for active steps */}
-      {(isActive || isCompleted || stage.status === 'skipped') && (
+      {/* Approval footer */}
+      {(stage.status === 'active' || isCompleted || stage.status === 'skipped') && (
         <StepApprovalFooter
           status={stage.status as 'active' | 'completed' | 'skipped'}
           canApprove={false}
