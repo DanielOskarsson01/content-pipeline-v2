@@ -49,7 +49,7 @@ export async function apiFetch<T>(
 import type {
   Project, CreateProjectInput, CreateProjectResponse,
   RunWithStages, PipelineStage, StepApproveResponse, StepSkipResponse,
-  CategoryGroups,
+  CategoryGroups, SubmoduleConfig,
 } from '../types/step';
 
 export const api = {
@@ -76,4 +76,13 @@ export const api = {
   // Submodules
   getSubmodules: (stepIndex: number) =>
     apiFetch<CategoryGroups>(`/api/submodules?step=${stepIndex}`),
+
+  // Submodule config
+  getSubmoduleConfig: (runId: string, stepIndex: number, submoduleId: string) =>
+    apiFetch<SubmoduleConfig>(`/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/config`),
+  saveSubmoduleConfig: (runId: string, stepIndex: number, submoduleId: string, config: Partial<SubmoduleConfig>) =>
+    apiFetch<SubmoduleConfig>(`/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/config`, {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    }),
 };

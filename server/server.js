@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import projectsRouter from './routes/projects.js';
 import runsRouter from './routes/runs.js';
 import submodulesRouter from './routes/submodules.js';
+import submoduleConfigRouter from './routes/submoduleConfig.js';
 import { loadModules } from './services/moduleLoader.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -25,6 +26,7 @@ app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 app.use('/api/projects', projectsRouter);
 app.use('/api/runs', runsRouter);
 app.use('/api/submodules', submodulesRouter);
+app.use('/api/runs/:runId/steps/:stepIndex/submodules/:submoduleId/config', submoduleConfigRouter);
 
 // Load submodule manifests from MODULES_PATH
 loadModules();

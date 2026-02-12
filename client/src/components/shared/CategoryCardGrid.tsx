@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { CategoryGroups, SubmoduleManifest } from '../../types/step';
+import { usePanelStore } from '../../stores/panelStore';
 
 const DATA_OP_ICONS: Record<string, string> = {
   add: '➕',
@@ -9,10 +10,10 @@ const DATA_OP_ICONS: Record<string, string> = {
 
 interface CategoryCardGridProps {
   categories: CategoryGroups;
-  onSubmoduleClick?: (submodule: SubmoduleManifest) => void;
 }
 
-export function CategoryCardGrid({ categories, onSubmoduleClick }: CategoryCardGridProps) {
+export function CategoryCardGrid({ categories }: CategoryCardGridProps) {
+  const { openSubmodulePanel } = usePanelStore();
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
 
   const categoryEntries = Object.entries(categories);
@@ -26,7 +27,7 @@ export function CategoryCardGrid({ categories, onSubmoduleClick }: CategoryCardG
   }
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+    <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
       {categoryEntries.map(([catKey, submodules]) => {
         const isExpanded = expandedCategory === catKey;
 
@@ -35,7 +36,7 @@ export function CategoryCardGrid({ categories, onSubmoduleClick }: CategoryCardG
             key={catKey}
             className={`rounded-lg border transition-all ${
               isExpanded
-                ? 'border-dashed border-2 border-sky-400 bg-white col-span-2 md:col-span-4'
+                ? 'border-dashed border-2 border-sky-400 bg-white'
                 : 'border-gray-200 bg-white hover:border-gray-300'
             }`}
           >
@@ -63,7 +64,8 @@ export function CategoryCardGrid({ categories, onSubmoduleClick }: CategoryCardG
                     <SubmoduleRow
                       key={sub.id}
                       submodule={sub}
-                      onClick={onSubmoduleClick}
+                      categoryKey={catKey}
+                      onOpen={openSubmodulePanel}
                     />
                   ))}
                 </div>
@@ -78,17 +80,19 @@ export function CategoryCardGrid({ categories, onSubmoduleClick }: CategoryCardG
 
 function SubmoduleRow({
   submodule,
-  onClick,
+  categoryKey,
+  onOpen,
 }: {
   submodule: SubmoduleManifest;
-  onClick?: (sub: SubmoduleManifest) => void;
+  categoryKey: string;
+  onOpen: (submoduleId: string, categoryKey: string) => void;
 }) {
   const opIcon = DATA_OP_ICONS[submodule.data_operation_default] || '＝';
 
   return (
     <div
       className="flex items-center justify-between p-2 rounded hover:bg-gray-50 cursor-pointer group"
-      onClick={() => onClick?.(submodule)}
+      onClick={() => onOpen(submodule.id, categoryKey)}
     >
       <div className="flex items-center gap-2">
         <span className="text-sm w-5 text-center" title={submodule.data_operation_default}>

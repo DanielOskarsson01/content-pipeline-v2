@@ -1,6 +1,10 @@
-import type { PipelineStage } from '../../types/step';
+import { useMemo } from 'react';
+import type { PipelineStage, SubmoduleManifest } from '../../types/step';
 import { useStepSubmodules } from '../../hooks/useSubmodules';
+import { useSubmoduleConfig, useSaveSubmoduleConfig } from '../../hooks/useSubmoduleConfig';
+import { usePanelStore } from '../../stores/panelStore';
 import { CategoryCardGrid } from '../shared/CategoryCardGrid';
+import { SubmodulePanel } from '../shared/SubmodulePanel';
 import { StepSummary } from '../shared/StepSummary';
 import { StepApprovalFooter } from '../shared/StepApprovalFooter';
 
@@ -15,6 +19,29 @@ interface UniversalStepTemplateProps {
 export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, isSkipping }: UniversalStepTemplateProps) {
   const isCompleted = stage.status === 'completed';
   const { data: categories, isLoading: submodulesLoading } = useStepSubmodules(stage.step_index);
+  const { activeSubmoduleId } = usePanelStore();
+
+  // Flatten categories to find active submodule by ID
+  const activeSubmodule: SubmoduleManifest | null = useMemo(() => {
+    if (!activeSubmoduleId || !categories) return null;
+    for (const subs of Object.values(categories)) {
+      const found = subs.find((s) => s.id === activeSubmoduleId);
+      if (found) return found;
+    }
+    return null;
+  }, [activeSubmoduleId, categories]);
+
+  // Submodule config — persisted via API
+  const { data: savedConfig } = useSubmoduleConfig(stage.run_id, stage.step_index, activeSubmoduleId);
+  const saveConfig = useSaveSubmoduleConfig(stage.run_id, stage.step_index, activeSubmoduleId);
+
+  const currentDataOp = savedConfig?.data_operation
+    || activeSubmodule?.data_operation_default
+    || 'add';
+
+  const handleDataOpChange = (op: 'add' | 'remove' | 'transform') => {
+    saveConfig.mutate({ data_operation: op });
+  };
 
   return (
     <div>
@@ -53,6 +80,15 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
           isSkipping={isSkipping}
         />
       )}
+
+      {/* SubmodulePanel — slides from left when submodule row clicked */}
+      <SubmodulePanel
+        stepName={stage.step_name}
+        submoduleName={activeSubmodule?.name || ''}
+        submoduleDescription={activeSubmodule?.description || ''}
+        dataOperation={currentDataOp}
+        onDataOperationChange={handleDataOpChange}
+      />
     </div>
   );
 }

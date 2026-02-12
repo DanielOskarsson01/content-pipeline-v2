@@ -91,3 +91,15 @@ export interface SubmoduleOption {
 
 // CategoryGroups: Record<categoryName, SubmoduleManifest[]>
 export type CategoryGroups = Record<string, SubmoduleManifest[]>;
+
+// Persisted submodule configuration per run/step/submodule
+export interface SubmoduleConfig {
+  id?: string;
+  run_id: string;
+  step_index: number;
+  submodule_id: string;
+  input_config: unknown;
+  options: Record<string, unknown> | null;
+  data_operation: 'add' | 'remove' | 'transform' | null;
+  updated_at?: string;
+}

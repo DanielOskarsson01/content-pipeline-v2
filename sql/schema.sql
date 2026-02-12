@@ -41,3 +41,16 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_stages_run_id ON pipeline_stages(run_id);
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_project_id ON pipeline_runs(project_id);
+
+-- Phase 5: Submodule configuration per run/step/submodule
+CREATE TABLE IF NOT EXISTS run_submodule_config (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id UUID NOT NULL REFERENCES pipeline_runs(id),
+  step_index INTEGER NOT NULL,
+  submodule_id TEXT NOT NULL,
+  input_config JSONB,
+  options JSONB,
+  data_operation TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(run_id, step_index, submodule_id)
+);
