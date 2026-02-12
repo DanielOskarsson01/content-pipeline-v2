@@ -50,3 +50,14 @@ export interface CreateProjectResponse {
   project: Project;
   run: PipelineRun;
 }
+
+export interface StepApproveResponse {
+  step_completed: number;
+  next_step: number | null;
+  items_forwarded: number;
+}
+
+export interface StepSkipResponse {
+  step_skipped: number;
+  next_step: number | null;
+}

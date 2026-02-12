@@ -20,10 +20,3 @@ export function useCreateProject() {
   });
 }
 
-export function useRun(runId: string | undefined) {
-  return useQuery({
-    queryKey: ['run', runId],
-    queryFn: () => api.getRun(runId!),
-    enabled: !!runId,
-  });
-}

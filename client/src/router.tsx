@@ -5,6 +5,7 @@ import { AppHeader } from './components/layout/AppHeader';
 import { Toast } from './components/layout/Toast';
 import { NewProject } from './components/pages/NewProject';
 import { ProjectsList } from './components/pages/ProjectsList';
+import { RunView } from './components/pages/RunView';
 
 function RootLayout() {
   return (
@@ -24,14 +25,6 @@ function TemplatesPage() {
   return (
     <div className="rounded-lg border border-dashed border-gray-300 p-12 text-center">
       <p className="text-gray-400 text-sm">No templates yet</p>
-    </div>
-  );
-}
-
-function RunViewPage() {
-  return (
-    <div className="text-center py-12 text-gray-500">
-      Run View — Phase 3
     </div>
   );
 }
@@ -56,7 +49,7 @@ export const router = createBrowserRouter([
       { path: 'new', element: <NewProject /> },
       { path: 'projects', element: <ProjectsList /> },
       { path: 'templates', element: <TemplatesPage /> },
-      { path: 'projects/:projectId/runs/:runId', element: <RunViewPage /> },
+      { path: 'projects/:projectId/runs/:runId', element: <RunView /> },
       { path: '*', element: <NotFoundPage /> },
     ],
   },

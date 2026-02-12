@@ -46,11 +46,15 @@ export async function apiFetch<T>(
 }
 
 // API methods
-import type { Project, CreateProjectInput, CreateProjectResponse, RunWithStages } from '../types/step';
+import type {
+  Project, CreateProjectInput, CreateProjectResponse,
+  RunWithStages, PipelineStage, StepApproveResponse, StepSkipResponse,
+} from '../types/step';
 
 export const api = {
   // Projects
   getProjects: () => apiFetch<Project[]>('/api/projects'),
+  getProject: (id: string) => apiFetch<Project>(`/api/projects/${id}`),
   createProject: (data: CreateProjectInput) =>
     apiFetch<CreateProjectResponse>('/api/projects', {
       method: 'POST',
@@ -59,4 +63,12 @@ export const api = {
 
   // Runs
   getRun: (id: string) => apiFetch<RunWithStages>(`/api/runs/${id}`),
+
+  // Steps
+  getStep: (runId: string, stepIndex: number) =>
+    apiFetch<PipelineStage>(`/api/runs/${runId}/steps/${stepIndex}`),
+  approveStep: (runId: string, stepIndex: number) =>
+    apiFetch<StepApproveResponse>(`/api/runs/${runId}/steps/${stepIndex}/approve`, { method: 'POST' }),
+  skipStep: (runId: string, stepIndex: number) =>
+    apiFetch<StepSkipResponse>(`/api/runs/${runId}/steps/${stepIndex}/skip`, { method: 'POST' }),
 };
