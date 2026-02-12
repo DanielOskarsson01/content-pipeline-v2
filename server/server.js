@@ -8,6 +8,7 @@ import projectsRouter from './routes/projects.js';
 import runsRouter from './routes/runs.js';
 import submodulesRouter from './routes/submodules.js';
 import submoduleConfigRouter from './routes/submoduleConfig.js';
+import stepContextRouter from './routes/stepContext.js';
 import { loadModules } from './services/moduleLoader.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -27,6 +28,7 @@ app.use('/api/projects', projectsRouter);
 app.use('/api/runs', runsRouter);
 app.use('/api/submodules', submodulesRouter);
 app.use('/api/runs/:runId/steps/:stepIndex/submodules/:submoduleId/config', submoduleConfigRouter);
+app.use('/api/runs/:runId/steps/:stepIndex/context', stepContextRouter);
 
 // Load submodule manifests from MODULES_PATH
 loadModules();

@@ -54,3 +54,15 @@ CREATE TABLE IF NOT EXISTS run_submodule_config (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(run_id, step_index, submodule_id)
 );
+
+-- Phase 6: Shared step context (CSV upload storage)
+CREATE TABLE IF NOT EXISTS step_context (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id UUID NOT NULL REFERENCES pipeline_runs(id),
+  step_index INTEGER NOT NULL,
+  entities JSONB NOT NULL,
+  filename TEXT,
+  source_submodule TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(run_id, step_index)
+);

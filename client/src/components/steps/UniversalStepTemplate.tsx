@@ -43,6 +43,10 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
     saveConfig.mutate({ data_operation: op });
   };
 
+  const handleSaveConfig = (config: Partial<typeof savedConfig>) => {
+    saveConfig.mutate(config);
+  };
+
   return (
     <div>
       {/* CategoryCardGrid — real manifest data */}
@@ -84,10 +88,13 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
       {/* SubmodulePanel — slides from left when submodule row clicked */}
       <SubmodulePanel
         stepName={stage.step_name}
-        submoduleName={activeSubmodule?.name || ''}
-        submoduleDescription={activeSubmodule?.description || ''}
+        submodule={activeSubmodule}
+        runId={stage.run_id}
+        stepIndex={stage.step_index}
         dataOperation={currentDataOp}
         onDataOperationChange={handleDataOpChange}
+        savedConfig={savedConfig}
+        onSaveConfig={handleSaveConfig}
       />
     </div>
   );
