@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+
+# Environment variables (contains secrets)
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Build output
+dist/
+build/
+public-react/
+
+# Vite
+*.local
+.vite/
+
+# Test coverage
+coverage/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Package manager locks (optional - some teams commit these)
+# package-lock.json
+
+# Secrets and credentials
+*.pem
+*.key
+credentials.json
+secrets.json

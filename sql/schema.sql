@@ -1,0 +1,2 @@
+-- Content Pipeline v2 — Database Schema
+-- Populated in Phase 2
