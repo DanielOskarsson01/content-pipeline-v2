@@ -731,11 +731,12 @@ This STEP_CONFIG is copied verbatim from SKELETON_SPEC_v2.md Part 5. It is the s
 5. **Results accordion:**
    - Polling: GET /api/submodule-runs/:id every 2s while running
    - Progress display during execution
-   - On completion: render results using ContentRenderer
-   - Item-level checkboxes (all checked by default)
-   - Column filtering (TanStack Table)
-   - Summary line: total, approved, rejected counts
-   - Per-row data operation icon (read-only indicator)
+   - On completion: render results using ContentRenderer (pass-through from output_data + output_render_schema)
+   - The skeleton does NOT add checkboxes or selection UI — ContentRenderer reads `selectable` from render_schema
+   - If `selectable: true` in render_schema → ContentRenderer renders checkboxes + Select all/Deselect all
+   - If `selectable: false` or absent → results are read-only, APPROVE means approve all
+   - Summary line: total count (+ approved/rejected counts when selectable)
+   - Per-row data operation icon only when selectable (read-only indicator)
 
 6. **Approval flow** (spec Part 16 + Part 17):
    - APPROVE button → POST /api/submodule-runs/:id/approve
@@ -746,8 +747,9 @@ This STEP_CONFIG is copied verbatim from SKELETON_SPEC_v2.md Part 5. It is the s
    - Panel closes, card updates
 
 7. **Re-approval flow:**
-   - Reopen approved submodule → see previous results with checkboxes
-   - Modify selections → APPROVE again → updates pool
+   - Reopen approved submodule → see previous results via ContentRenderer
+   - If `selectable: true`: checkboxes reflect previous approval states, user can modify and re-approve
+   - If `selectable: false`: results shown read-only, user can [Try again] to re-run
 
 8. **decision_log table** (from spec Part 10)
 
@@ -772,7 +774,9 @@ This STEP_CONFIG is copied verbatim from SKELETON_SPEC_v2.md Part 5. It is the s
 - [ ] decision_log table created in Supabase
 - [ ] RUN TASK → BullMQ job → worker executes → results appear
 - [ ] Progress updates during execution
-- [ ] Results render with checkboxes
+- [ ] Results render via ContentRenderer (pass-through from output_render_schema)
+- [ ] Selectable mode works when render_schema declares selectable: true
+- [ ] Non-selectable mode: APPROVE sends all item keys
 - [ ] APPROVE updates working pool
 - [ ] Re-approval works
 - [ ] Decision log entries created

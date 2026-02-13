@@ -4,9 +4,9 @@ import { usePanelStore } from '../../stores/panelStore';
 import { useStepContext } from '../../hooks/useStepContext';
 import { useSubmoduleRun, useExecuteSubmodule, useApproveSubmoduleRun, useLatestSubmoduleRuns } from '../../hooks/useSubmoduleRuns';
 import { useAppStore } from '../../stores/appStore';
-import type { SubmoduleManifest, SubmoduleConfig, SubmoduleRun } from '../../types/step';
+import type { SubmoduleManifest, SubmoduleConfig } from '../../types/step';
 import { CsvUploadInput, type UploadResult } from '../primitives/CsvUploadInput';
-import { ContentRenderer } from '../primitives/ContentRenderer';
+import { ContentRenderer, type RenderSchema } from '../primitives/ContentRenderer';
 import { SubmoduleOptions } from '../primitives/SubmoduleOptions';
 
 type AccordionVariant = 'blue' | 'teal' | 'pink';
@@ -126,10 +126,11 @@ export function SubmodulePanel({
   const executeMutation = useExecuteSubmodule();
   const approveMutation = useApproveSubmoduleRun();
 
-  // --- Checked items state (for Results accordion) ---
-  const [checkedKeys, setCheckedKeys] = useState<Set<string>>(new Set());
+  // --- Render schema and selectable flag ---
+  const renderSchema = submoduleRun?.output_render_schema as RenderSchema | null;
+  const isSelectable = renderSchema?.selectable === true;
 
-  // Flatten results into a single list of items with entity_name
+  // --- Flatten results into a single list of items with entity_name ---
   const flatItems = useMemo(() => {
     if (!submoduleRun?.output_data?.results) return [];
     const items: Array<Record<string, unknown> & { entity_name: string }> = [];
@@ -143,9 +144,12 @@ export function SubmodulePanel({
 
   const itemKey = submodule?.item_key || 'url';
 
-  // Initialize checked keys when results arrive or when loading an approved run
+  // --- Checked items state (only used when selectable) ---
+  const [checkedKeys, setCheckedKeys] = useState<Set<string>>(new Set());
+
+  // Initialize checked keys when results arrive — only for selectable mode
   useEffect(() => {
-    if (flatItems.length === 0) return;
+    if (flatItems.length === 0 || !isSelectable) return;
 
     if (submoduleRun?.status === 'approved' && submoduleRun.approved_items) {
       // Re-approval: restore previous checkbox state
@@ -155,7 +159,7 @@ export function SubmodulePanel({
       const allKeys = flatItems.map((item) => String(item[itemKey] ?? '')).filter(Boolean);
       setCheckedKeys(new Set(allKeys));
     }
-  }, [flatItems, submoduleRun?.status, submoduleRun?.approved_items, itemKey]);
+  }, [flatItems, submoduleRun?.status, submoduleRun?.approved_items, itemKey, isSelectable]);
 
   // Local options state — initialized from savedConfig or manifest defaults
   const manifestDefaults = useMemo(() => {
@@ -241,8 +245,6 @@ export function SubmodulePanel({
   };
 
   // --- Execution state ---
-  // Server does auto-resolution: saved config → previous step output → step_context.
-  // For steps > 0, previous step output may be available even without step_context.
   const hasInput = hasStepContext || stepIndex > 0;
   const isRunning = submoduleRun?.status === 'pending' || submoduleRun?.status === 'running';
   const isCompleted = submoduleRun?.status === 'completed' || submoduleRun?.status === 'approved';
@@ -267,7 +269,16 @@ export function SubmodulePanel({
 
   const handleApprove = () => {
     if (!activeSubmoduleRunId) return;
-    const approvedKeys = Array.from(checkedKeys);
+
+    let approvedKeys: string[];
+    if (isSelectable) {
+      // Selectable: send only checked keys
+      approvedKeys = Array.from(checkedKeys);
+    } else {
+      // Non-selectable: approve ALL items
+      approvedKeys = flatItems.map((item) => String(item[itemKey] ?? '')).filter(Boolean);
+    }
+
     approveMutation.mutate(
       { submoduleRunId: activeSubmoduleRunId, approvedItemKeys: approvedKeys },
       {
@@ -279,31 +290,20 @@ export function SubmodulePanel({
     );
   };
 
-  // --- Results checkbox handlers ---
-  const toggleItem = (key: string) => {
-    setCheckedKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
-
-  const selectAll = () => {
-    const allKeys = flatItems.map((item) => String(item[itemKey] ?? '')).filter(Boolean);
-    setCheckedKeys(new Set(allKeys));
-  };
-
-  const deselectAll = () => {
-    setCheckedKeys(new Set());
-  };
-
   // --- Results badge ---
   const resultsBadge = isRunning
     ? 'running'
     : isCompleted
-      ? `${checkedKeys.size}/${flatItems.length}`
+      ? isSelectable
+        ? `${checkedKeys.size}/${flatItems.length}`
+        : `${flatItems.length} items`
       : undefined;
+
+  // --- Results summary label ---
+  const summary = submoduleRun?.output_data?.summary;
+  const resultsLabel = summary
+    ? `${summary.total_items} items across ${summary.total_entities} entities`
+    : undefined;
 
   return (
     <div className="fixed inset-0 z-50">
@@ -420,7 +420,7 @@ export function SubmodulePanel({
             </div>
           </PanelAccordionItem>
 
-          {/* --- RESULTS ACCORDION --- */}
+          {/* --- RESULTS ACCORDION (pass-through via ContentRenderer) --- */}
           <PanelAccordionItem
             title="Results"
             badge={resultsBadge}
@@ -428,15 +428,16 @@ export function SubmodulePanel({
             onToggle={() => setPanelAccordion(panelAccordion === 'results' ? null : 'results')}
             variant="pink"
           >
-            <ResultsAccordionContent
+            <ResultsContent
               submoduleRun={submoduleRun ?? null}
               flatItems={flatItems}
+              renderSchema={renderSchema}
               itemKey={itemKey}
               dataOperation={dataOperation}
               checkedKeys={checkedKeys}
-              onToggleItem={toggleItem}
-              onSelectAll={selectAll}
-              onDeselectAll={deselectAll}
+              onCheckedKeysChange={isSelectable ? setCheckedKeys : undefined}
+              summary={summary}
+              resultsLabel={resultsLabel}
             />
           </PanelAccordionItem>
         </div>
@@ -490,26 +491,28 @@ export function SubmodulePanel({
 }
 
 
-// --- Results Accordion Content ---
+// --- Results Content (skeleton container + ContentRenderer pass-through) ---
 
-function ResultsAccordionContent({
+function ResultsContent({
   submoduleRun,
   flatItems,
+  renderSchema,
   itemKey,
   dataOperation,
   checkedKeys,
-  onToggleItem,
-  onSelectAll,
-  onDeselectAll,
+  onCheckedKeysChange,
+  summary,
+  resultsLabel,
 }: {
-  submoduleRun: SubmoduleRun | null;
+  submoduleRun: { status: string; progress: { current: number; total: number; message: string } | null; error: string | null } | null;
   flatItems: Array<Record<string, unknown> & { entity_name: string }>;
+  renderSchema: RenderSchema | null;
   itemKey: string;
   dataOperation: string;
   checkedKeys: Set<string>;
-  onToggleItem: (key: string) => void;
-  onSelectAll: () => void;
-  onDeselectAll: () => void;
+  onCheckedKeysChange?: (keys: Set<string>) => void;
+  summary: { total_entities: number; total_items: number; errors: string[] } | undefined;
+  resultsLabel: string | undefined;
 }) {
   // No run yet
   if (!submoduleRun) {
@@ -562,67 +565,34 @@ function ResultsAccordionContent({
     );
   }
 
-  // Completed or Approved — show results with checkboxes
+  // Completed or Approved — pass-through to ContentRenderer
   if (flatItems.length === 0) {
     return <p className="text-sm text-gray-400">No results returned.</p>;
   }
 
-  const opIcon = DATA_OP_ICONS[dataOperation] || '\uFF1D';
-  const columns = Object.keys(flatItems[0]).filter((k) => k !== 'entity_name');
-  const summary = submoduleRun.output_data?.summary;
-
   return (
-    <div className="flex flex-col gap-3 h-full">
+    <div className="flex flex-col gap-2 h-full">
       {/* Summary */}
       {summary && (
         <div className="flex-shrink-0 text-xs text-gray-600">
-          {summary.total_items} items across {summary.total_entities} entities
+          {resultsLabel}
           {summary.errors.length > 0 && (
             <span className="text-red-500 ml-2">{summary.errors.length} errors</span>
           )}
         </div>
       )}
 
-      {/* Bulk actions */}
-      <div className="flex items-center gap-3 flex-shrink-0">
-        <button onClick={onSelectAll} className="text-xs text-[#0891B2] hover:underline">
-          Select all
-        </button>
-        <button onClick={onDeselectAll} className="text-xs text-[#0891B2] hover:underline">
-          Deselect all
-        </button>
-        <span className="text-xs text-gray-400 ml-auto">
-          {checkedKeys.size} approved \u00b7 {flatItems.length - checkedKeys.size} rejected
-        </span>
-      </div>
-
-      {/* Item list with checkboxes */}
-      <div className="flex-1 min-h-0 overflow-y-auto border border-gray-200 rounded">
-        {flatItems.map((item, idx) => {
-          const key = String(item[itemKey] ?? `row-${idx}`);
-          const isChecked = checkedKeys.has(key);
-
-          return (
-            <div
-              key={key}
-              className={`flex items-center gap-2 px-3 py-1.5 text-xs border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${
-                isChecked ? '' : 'opacity-50'
-              }`}
-              onClick={() => onToggleItem(key)}
-            >
-              <input
-                type="checkbox"
-                checked={isChecked}
-                onChange={() => onToggleItem(key)}
-                className="w-3.5 h-3.5 rounded border-gray-300 text-[#0891B2] focus:ring-[#0891B2] cursor-pointer"
-                onClick={(e) => e.stopPropagation()}
-              />
-              <span className="w-4 text-center text-[10px]" title={dataOperation}>{opIcon}</span>
-              <span className="truncate flex-1 text-gray-700" title={key}>{key}</span>
-              <span className="text-gray-400 truncate max-w-[120px]">{String(item.entity_name)}</span>
-            </div>
-          );
-        })}
+      {/* ContentRenderer — drives all rendering from render_schema */}
+      <div className="flex-1 min-h-0">
+        <ContentRenderer
+          entities={flatItems}
+          renderSchema={renderSchema}
+          itemKey={itemKey}
+          dataOperation={dataOperation}
+          checkedKeys={checkedKeys}
+          onCheckedKeysChange={onCheckedKeysChange}
+          fullHeight
+        />
       </div>
     </div>
   );

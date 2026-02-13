@@ -111,7 +111,7 @@ export interface SubmoduleRun {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'approved';
   progress: { current: number; total: number; message: string } | null;
   output_data: SubmoduleOutput | null;
-  output_render_schema: Record<string, string> | null;
+  output_render_schema: { display_type?: string; selectable?: boolean; [field: string]: unknown } | null;
   approved_items: string[] | null;
   error: string | null;
   started_at: string | null;

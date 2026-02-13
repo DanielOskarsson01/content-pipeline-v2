@@ -469,37 +469,64 @@ Opens automatically when RUN TASK is clicked. Shows progress from `submodule_run
 
 #### Results: After completion
 
+**The Results accordion is a pass-through container.** The skeleton does not own the content inside it. All result rendering is driven by `output_render_schema` (from the submodule's manifest `output_schema`) via ContentRenderer — the same component used in the Input content preview. The skeleton renders whatever the submodule returns, exactly as described by its schema.
+
+**What the skeleton owns inside Results:**
+- The pink accordion header (expand/collapse) + item count badge
+- The summary line (total count, plus approved/rejected counts when selectable)
+- The action buttons below results: [Change Input], [Change Options], [Download], [Try again]
+
+**What the skeleton does NOT own inside Results:**
+- How items are displayed (table, url_list, content_cards, file_list — all driven by `display_type` in render_schema)
+- Whether checkboxes appear (driven by `selectable` in render_schema)
+- Column headers, row layout, filtering — all driven by render_schema fields
+
+**The `selectable` field in output_schema:**
+
+The submodule's manifest declares `selectable: true` in its `output_schema` when item-level approval is needed. When `selectable` is true, ContentRenderer wraps each row with a checkbox and renders [Select all] / [Deselect all] controls. When `selectable` is false or absent, results render as read-only and APPROVE means "approve all items."
+
+Default convention (submodule authors follow this, skeleton does not enforce it):
+- ➕ add submodules → `selectable: false` (approve all discovered items)
+- ➖ remove submodules → `selectable: true` (user picks what to filter out)
+- ＝ transform submodules → `selectable: false` (approve all transformed items)
+
+These are conventions, not rules. A ➕ submodule CAN declare `selectable: true` if it makes sense for its use case. The skeleton reads the schema and renders accordingly.
+
 ```
+Example: selectable: false (Step 1 Discovery — ➕ add)
 ┌─────────────────────────────────────────────────────┐
-│ Summary: 623 URLs found across 5 entities            │
+│ 623 URLs found across sitemap.xml                    │
 │ ─────────────────────────────────────────────────── │
-│                                                      │
-│ [Filter columns ▼]  [Select all]  [Deselect all]    │
+│ https://stripe.com/payments            Stripe        │
+│ https://stripe.com/billing             Stripe        │
+│ https://stripe.com/connect             Stripe        │
+│ https://paypal.com/business            PayPal        │
+│ ... (scrollable, paginated)                          │
+│ ─────────────────────────────────────────────────── │
+│ Showing 1-50 of 623                                  │
+│ [Change Input] [Change Options] [Download] [Try again]│
+└─────────────────────────────────────────────────────┘
+
+Example: selectable: true (Step 2 Validation — ➖ remove)
+┌─────────────────────────────────────────────────────┐
+│ 623 URLs checked · 3 flagged for removal             │
+│ ─────────────────────────────────────────────────── │
+│ [Select all]  [Deselect all]                         │
 │                                                      │
 │ ☑ https://stripe.com/payments     Stripe       ➕   │
 │ ☑ https://stripe.com/billing      Stripe       ➕   │
-│ ☑ https://stripe.com/connect      Stripe       ➕   │
 │ ☐ https://stripe.com/404          Stripe       ➖   │
 │ ☑ https://paypal.com/business     PayPal       ➕   │
 │ ... (scrollable, paginated)                          │
-│                                                      │
 │ ─────────────────────────────────────────────────── │
 │ Showing 1-50 of 623 · 620 approved · 3 rejected     │
-│ [Download]  [Try again]                              │
+│ [Change Input] [Change Options] [Download] [Try again]│
 └─────────────────────────────────────────────────────┘
 ```
 
-**Item-level approval (Part 17 mechanics, rendered here):**
+**Per-row data operation icon (when selectable: true):** Each row shows ➕ or ➖ or ＝ matching the pane's data operation setting. This is a read-only visual indicator — not a per-item toggle. It reminds the user what will happen to these items when approved.
 
-The `execute()` function returns results grouped by entity (see Part 14). The skeleton flattens these into a single list for display — each row includes the entity name as a column so the user can filter by entity. The grouping is for the submodule developer's convenience; the UI is always a flat table.
-
-Each result row has a checkbox. Checked = approved for this submodule run, unchecked = rejected. All items start checked by default (optimistic — user rejects the bad ones rather than approving the good ones).
-
-**Bulk filter-and-approve:** Column filtering (via TanStack Table or equivalent) lets the user narrow the visible rows. [Select all] / [Deselect all] apply to currently visible (filtered) rows only. This handles high-volume results: filter to a pattern, deselect those, clear filter, repeat.
-
-**Per-row data operation icon:** Each row shows ➕ or ➖ or ＝ matching the pane's data operation setting. This is a read-only visual indicator — not a per-item toggle. It reminds the user what will happen to these items when approved: ➕ = "this item will be added to the pool", ➖ = "only approved items will remain in the pool", ＝ = "this item replaces its counterpart in the pool".
-
-**Summary line:** Bottom of results. Shows total count, approved count, rejected count. Updates live as user checks/unchecks.
+**Summary line:** Bottom of results. When `selectable: true`: shows total, approved, rejected counts (updates live as user checks/unchecks). When `selectable: false`: shows total count only.
 
 **Actions below results:**
 - [Change Input] — Opens/scrolls to Input accordion. User can upload new data or modify entities.
@@ -512,10 +539,11 @@ Each result row has a checkbox. Checked = approved for this submodule run, unche
 #### Results: Reopening a completed submodule
 
 When the user clicks a submodule row that was already run and approved:
-- Results accordion shows the previous run's data, already populated
-- Checkboxes reflect previous approval states
+- Results accordion shows the previous run's data via ContentRenderer (same render_schema)
+- If `selectable: true`: checkboxes reflect previous approval states
+- If `selectable: false`: results shown as read-only (same as first view)
 - Previous Run Summary bar shows at top
-- User can review, modify selections, or click [Try again] to re-run
+- User can click [Try again] to re-run
 
 ---
 
@@ -532,18 +560,19 @@ Three buttons, always visible at the bottom. Sequential activation.
 **Disabled state:** Gray background, gray text, cursor not-allowed.
 
 **After APPROVE:**
-1. `POST /api/submodule-runs/:id/approve` with approved item IDs
-2. Server updates `submodule_runs.status` → "approved", stores `approved_items`
-3. Server updates `pipeline_stages.working_pool` based on data operation (➕➖＝)
-4. Decision logged automatically
-5. Panel closes
-6. Submodule row in CategoryCardGrid updates: checkbox checked, result count shown
-7. StepSummary updates with new totals
+1. If `selectable: true` → `POST /api/submodule-runs/:id/approve` with checked item keys
+2. If `selectable: false` (or absent) → `POST /api/submodule-runs/:id/approve` with ALL item keys (approve everything)
+3. Server updates `submodule_runs.status` → "approved", stores `approved_items`
+4. Server updates `pipeline_stages.working_pool` based on data operation (➕➖＝)
+5. Decision logged automatically
+6. Panel closes
+7. Submodule row in CategoryCardGrid updates: checkbox checked, result count shown
+8. StepSummary updates with new totals
 
 **REJECT (implicit):** There is no explicit REJECT button. The user either:
 - Clicks [Try again] in Results to re-run (creates new submodule_run, previous preserved)
 - Closes the panel without approving (submodule stays in "completed" state, not "approved")
-- Unchecks items individually and then approves (partial approval)
+- When `selectable: true`: unchecks items individually and then approves (partial approval)
 
 **CategoryCardGrid display by status:**
 - `pending` — No indicator. Row is clickable.
@@ -1011,7 +1040,10 @@ Each option has:
 
 **item_key** — Which field(s) in output items uniquely identify a result. Used for: (1) tracking across re-runs — matching new results to previously approved/rejected items, (2) deduplication when merging into the working pool. Uniqueness is scoped to the step's working pool — two submodules in the same step producing the same `item_key` value means the later approval overwrites the earlier one. Can be a single field name (string) or an array for composite keys.
 
-**output_schema** — Describes the shape of each result item plus a `display_type` field. The `display_type` tells the skeleton's `ContentRenderer` how to visualize the data: `"table"` (columnar), `"url_list"` (one URL per row), `"content_cards"` (article/document cards), `"file_list"` (filename + size + timestamp). Falls back to `"table"` if omitted. See Part 6 for the exhaustive display_type list. Field definitions are used for results display column headers and for `render_schema` passed downstream. Not enforced at runtime in v1.
+**output_schema** — Describes the shape of each result item plus rendering instructions for ContentRenderer. Key fields:
+- `display_type` — How to visualize: `"table"` (columnar), `"url_list"` (one URL per row), `"content_cards"` (article/document cards), `"file_list"` (filename + size + timestamp). Falls back to `"table"` if omitted. See Part 6 for the exhaustive display_type list.
+- `selectable` — Boolean. When `true`, ContentRenderer adds item-level checkboxes + Select all/Deselect all controls. When `false` or absent, results render as read-only and APPROVE means "approve all items." Convention: ➖ remove submodules set `selectable: true`, ➕ add and ＝ transform submodules leave it `false`.
+- Field definitions — Used for results display column headers and for `render_schema` passed downstream. Not enforced at runtime in v1.
 
 ### What the manifest does NOT include
 

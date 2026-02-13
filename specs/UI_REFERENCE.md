@@ -161,12 +161,12 @@ Contents:
 
 Before run: "No results yet. Configure input and click RUN TASK."
 During run: Progress bar + entity counter (polls every 2s)
-After run:
+After run (content driven by output_render_schema via ContentRenderer):
 - Summary line (from module output)
-- [Select all] / [Deselect all]
-- Item list with checkboxes (item-level approval)
-- Per-row data operation icon (read-only, matches pane setting)
-- Pagination + counts (total/approved/rejected)
+- If render_schema has `selectable: true`: [Select all] / [Deselect all] + checkboxes per row
+- If `selectable: false` or absent: read-only list (APPROVE means approve all)
+- Per-row data operation icon only when selectable (read-only, matches pane setting)
+- Pagination + counts (total, and approved/rejected when selectable)
 - **Action CTAs at bottom of results:**
   - [Change Input] → opens Input accordion
   - [Change Options] → opens Options accordion
@@ -195,8 +195,8 @@ After run:
 | Panel header, description, data op indicator | ✅ | Manifest fields |
 | Input accordion (upload, preview, auto-resolve) | ✅ | — |
 | Options accordion container | ✅ | React component OR options[] |
-| Results accordion (list, checkboxes, pagination) | ✅ via ContentRenderer | Data + output_schema |
-| Results action CTAs | ✅ | — |
+| Results accordion container + action CTAs | ✅ | — |
+| Results accordion content (rendering, selection) | ContentRenderer (pass-through) | Data + output_schema (incl. selectable) |
 | CTA footer | ✅ | — |
 
 ---
