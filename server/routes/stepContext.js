@@ -52,6 +52,7 @@ router.post('/', upload.single('file'), async (req, res) => {
       skip_empty_lines: true,
       trim: true,
       bom: true,
+      relax_column_count: true,
     });
   } catch (err) {
     return res.status(400).json({ error: `CSV parse error: ${err.message}` });

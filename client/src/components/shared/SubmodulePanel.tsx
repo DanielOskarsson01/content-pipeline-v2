@@ -228,33 +228,37 @@ export function SubmodulePanel({
             onToggle={() => setPanelAccordion(panelAccordion === 'input' ? null : 'input')}
             variant="blue"
           >
-            <div className="space-y-3">
+            <div className="flex flex-col gap-3 h-full">
               {/* Shared context banner */}
               {hasStepContext && stepContext!.filename && (
-                <div className="bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-700">
+                <div className="bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-700 flex-shrink-0">
                   Shared step data: <span className="font-medium">{stepContext!.filename}</span>
                   {' \u2014 '}{stepContext!.entities.length} entities
                 </div>
               )}
 
               {/* CSV upload zone */}
-              <CsvUploadInput
-                uploadUrl={uploadUrl}
-                submoduleId={submodule.id}
-                onUploadComplete={handleUploadComplete}
-                onError={handleUploadError}
-                currentFileName={stepContext?.filename || null}
-                currentEntityCount={stepContext?.entities?.length || 0}
-                requiredColumns={submodule.requires_columns || []}
-              />
-
-              {/* Content preview (ContentRenderer) */}
-              {hasStepContext && (
-                <ContentRenderer
-                  entities={stepContext!.entities}
-                  maxHeight={240}
-                  label={`${stepContext!.entities.length} entities \u00d7 ${Object.keys(stepContext!.entities[0] || {}).length} columns`}
+              <div className="flex-shrink-0">
+                <CsvUploadInput
+                  uploadUrl={uploadUrl}
+                  submoduleId={submodule.id}
+                  onUploadComplete={handleUploadComplete}
+                  onError={handleUploadError}
+                  currentFileName={stepContext?.filename || null}
+                  currentEntityCount={stepContext?.entities?.length || 0}
+                  requiredColumns={submodule.requires_columns || []}
                 />
+              </div>
+
+              {/* Content preview (ContentRenderer) — fills remaining space */}
+              {hasStepContext && (
+                <div className="flex-1 min-h-0">
+                  <ContentRenderer
+                    entities={stepContext!.entities}
+                    fullHeight
+                    label={`${stepContext!.entities.length} entities \u00d7 ${Object.keys(stepContext!.entities[0] || {}).length} columns`}
+                  />
+                </div>
               )}
             </div>
           </PanelAccordionItem>
