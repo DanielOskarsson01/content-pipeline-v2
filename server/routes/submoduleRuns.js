@@ -56,33 +56,50 @@ executeRouter.post('/run', async (req, res) => {
     }
 
     // 4. Resolve input — auto-resolution priority:
-    //    saved input_config → previous step output → step_context
+    //    0. Request body entities (sent directly from client — no DB roundtrip)
+    //    1. Saved input_config (textarea entities or csv reference)
+    //    2. Previous step output (step_index > 0)
+    //    3. step_context (shared CSV upload, may exist without explicit save)
     let inputData = null;
 
-    // Check saved input_config
-    const { data: savedConfig } = await db
-      .from('run_submodule_config')
-      .select('input_config')
-      .eq('run_id', runId)
-      .eq('step_index', stepIdx)
-      .eq('submodule_id', submoduleId)
-      .maybeSingle();
+    // Priority 0: Entities sent directly in request body (most reliable — no save-then-read)
+    if (req.body?.entities?.length > 0) {
+      inputData = { entities: req.body.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+    }
 
-    if (savedConfig?.input_config?.source === 'step_context') {
-      // Load from step_context
-      const { data: ctx } = await db
-        .from('step_context')
-        .select('entities')
+    // Priority 1: Check saved input_config (user explicitly saved via SAVE INPUT)
+    if (!inputData) {
+      const { data: savedConfig } = await db
+        .from('run_submodule_config')
+        .select('input_config')
         .eq('run_id', runId)
         .eq('step_index', stepIdx)
+        .eq('submodule_id', submoduleId)
         .maybeSingle();
 
-      if (ctx?.entities) {
-        inputData = { entities: ctx.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+      if (savedConfig?.input_config) {
+        const inputConfig = savedConfig.input_config;
+
+        if (inputConfig.source === 'textarea' && inputConfig.entities?.length > 0) {
+          // Textarea: entities stored directly in input_config
+          inputData = { entities: inputConfig.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+        } else if (inputConfig.source === 'csv') {
+          // CSV: load parsed entities from step_context
+          const { data: ctx } = await db
+            .from('step_context')
+            .select('entities')
+            .eq('run_id', runId)
+            .eq('step_index', stepIdx)
+            .maybeSingle();
+
+          if (ctx?.entities) {
+            inputData = { entities: ctx.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+          }
+        }
       }
     }
 
-    // Fallback: previous step output
+    // Priority 2: Previous step output
     if (!inputData && stepIdx > 0) {
       const { data: prevStage } = await db
         .from('pipeline_stages')
@@ -96,7 +113,7 @@ executeRouter.post('/run', async (req, res) => {
       }
     }
 
-    // Fallback: step_context (shared CSV upload)
+    // Priority 3: step_context (shared CSV upload — may exist without SAVE INPUT)
     if (!inputData) {
       const { data: ctx } = await db
         .from('step_context')

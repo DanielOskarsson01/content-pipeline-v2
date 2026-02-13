@@ -36,8 +36,8 @@ export function useExecuteSubmodule() {
   const showToast = useAppStore((s) => s.showToast);
 
   return useMutation({
-    mutationFn: ({ runId, stepIndex, submoduleId }: { runId: string; stepIndex: number; submoduleId: string }) =>
-      api.executeSubmodule(runId, stepIndex, submoduleId),
+    mutationFn: ({ runId, stepIndex, submoduleId, entities }: { runId: string; stepIndex: number; submoduleId: string; entities?: Record<string, unknown>[] }) =>
+      api.executeSubmodule(runId, stepIndex, submoduleId, entities?.length ? { entities } : undefined),
     onSuccess: (_data, vars) => {
       // Invalidate latest runs so CategoryCardGrid updates
       queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', vars.runId, vars.stepIndex] });

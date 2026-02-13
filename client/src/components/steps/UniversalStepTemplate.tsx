@@ -1,9 +1,12 @@
-import { useMemo } from 'react';
+import { useMemo, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import type { PipelineStage, SubmoduleManifest } from '../../types/step';
 import { useStepSubmodules } from '../../hooks/useSubmodules';
-import { useSubmoduleConfig, useSaveSubmoduleConfig } from '../../hooks/useSubmoduleConfig';
+import { useSubmoduleConfig, useSubmoduleConfigs, useSaveSubmoduleConfig } from '../../hooks/useSubmoduleConfig';
 import { useLatestSubmoduleRuns } from '../../hooks/useSubmoduleRuns';
 import { usePanelStore } from '../../stores/panelStore';
+import { useAppStore } from '../../stores/appStore';
+import { api } from '../../api/client';
 import { CategoryCardGrid } from '../shared/CategoryCardGrid';
 import { SubmodulePanel } from '../shared/SubmodulePanel';
 import { StepSummary } from '../shared/StepSummary';
@@ -18,10 +21,15 @@ interface UniversalStepTemplateProps {
 }
 
 export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, isSkipping }: UniversalStepTemplateProps) {
+  const queryClient = useQueryClient();
+  const showToast = useAppStore((s) => s.showToast);
   const isCompleted = stage.status === 'completed';
   const { data: categories, isLoading: submodulesLoading } = useStepSubmodules(stage.step_index);
   const { activeSubmoduleId } = usePanelStore();
   const { data: latestRuns } = useLatestSubmoduleRuns(stage.run_id, stage.step_index);
+
+  // All submodule configs for this step — used by CategoryCardGrid for data op display
+  const { data: configMap } = useSubmoduleConfigs(stage.run_id, stage.step_index);
 
   // Flatten categories to find active submodule by ID
   const activeSubmodule: SubmoduleManifest | null = useMemo(() => {
@@ -33,7 +41,7 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
     return null;
   }, [activeSubmoduleId, categories]);
 
-  // Submodule config — persisted via API
+  // Submodule config — persisted via API (for active submodule panel)
   const { data: savedConfig } = useSubmoduleConfig(stage.run_id, stage.step_index, activeSubmoduleId);
   const saveConfig = useSaveSubmoduleConfig(stage.run_id, stage.step_index, activeSubmoduleId);
 
@@ -42,12 +50,33 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
     || 'add';
 
   const handleDataOpChange = (op: 'add' | 'remove' | 'transform') => {
-    saveConfig.mutate({ data_operation: op });
+    saveConfig.mutate({ data_operation: op }, {
+      onSuccess: () => {
+        // Also invalidate the batch configs query so CategoryCardGrid updates
+        queryClient.invalidateQueries({ queryKey: ['submoduleConfigs', stage.run_id, stage.step_index] });
+      },
+    });
   };
 
   const handleSaveConfig = (config: Partial<typeof savedConfig>) => {
-    saveConfig.mutate(config);
+    saveConfig.mutate(config, {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ['submoduleConfigs', stage.run_id, stage.step_index] });
+      },
+    });
   };
+
+  // CategoryCardGrid data op toggle — saves for any submodule (not just the active one)
+  const handleGridDataOpChange = useCallback(async (submoduleId: string, op: 'add' | 'remove' | 'transform') => {
+    try {
+      await api.saveSubmoduleConfig(stage.run_id, stage.step_index, submoduleId, { data_operation: op });
+      queryClient.invalidateQueries({ queryKey: ['submoduleConfigs', stage.run_id, stage.step_index] });
+      // Also invalidate the per-submodule config in case the panel is open for this submodule
+      queryClient.invalidateQueries({ queryKey: ['submoduleConfig', stage.run_id, stage.step_index, submoduleId] });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to save data operation', 'error');
+    }
+  }, [stage.run_id, stage.step_index, queryClient, showToast]);
 
   return (
     <div>
@@ -57,7 +86,12 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
           <p className="text-gray-400 text-sm">Loading submodules...</p>
         </div>
       ) : (
-        <CategoryCardGrid categories={categories || {}} latestRuns={latestRuns} />
+        <CategoryCardGrid
+          categories={categories || {}}
+          latestRuns={latestRuns}
+          configMap={configMap}
+          onDataOperationChange={handleGridDataOpChange}
+        />
       )}
 
       {/* StepSummary — empty for now (populated when submodules have runs) */}

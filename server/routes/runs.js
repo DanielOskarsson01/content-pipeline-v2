@@ -53,6 +53,30 @@ router.get('/:runId/steps/:stepIndex', async (req, res, next) => {
 });
 
 /**
+ * GET /api/runs/:runId/steps/:stepIndex/submodule-configs
+ * Returns all saved submodule configs for this step as a map { submoduleId: config }.
+ */
+router.get('/:runId/steps/:stepIndex/submodule-configs', async (req, res, next) => {
+  try {
+    const { runId, stepIndex } = req.params;
+
+    const { data, error } = await db
+      .from('run_submodule_config')
+      .select('*')
+      .eq('run_id', runId)
+      .eq('step_index', parseInt(stepIndex));
+
+    if (error) throw error;
+
+    const map = {};
+    for (const row of data || []) {
+      map[row.submodule_id] = row;
+    }
+    res.json(map);
+  } catch (err) { next(err); }
+});
+
+/**
  * POST /api/runs/:runId/steps/:stepIndex/approve
  * Approve step — basic version (Phase 3)
  * Step 0: just advance. Steps 1-10: require approved submodules (Phase 7+).

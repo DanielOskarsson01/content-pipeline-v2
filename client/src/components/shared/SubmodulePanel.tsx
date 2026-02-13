@@ -1,13 +1,15 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { usePanelStore } from '../../stores/panelStore';
 import { useStepContext } from '../../hooks/useStepContext';
 import { useSubmoduleRun, useExecuteSubmodule, useApproveSubmoduleRun, useLatestSubmoduleRuns } from '../../hooks/useSubmoduleRuns';
 import { useAppStore } from '../../stores/appStore';
+import { api } from '../../api/client';
 import type { SubmoduleManifest, SubmoduleConfig } from '../../types/step';
 import { CsvUploadInput, type UploadResult } from '../primitives/CsvUploadInput';
 import { ContentRenderer, type RenderSchema } from '../primitives/ContentRenderer';
 import { SubmoduleOptions } from '../primitives/SubmoduleOptions';
+import { UrlTextarea, parseTextareaToEntities } from '../primitives/UrlTextarea';
 
 type AccordionVariant = 'blue' | 'teal' | 'pink';
 
@@ -152,14 +154,88 @@ export function SubmodulePanel({
     if (flatItems.length === 0 || !isSelectable) return;
 
     if (submoduleRun?.status === 'approved' && submoduleRun.approved_items) {
-      // Re-approval: restore previous checkbox state
       setCheckedKeys(new Set(submoduleRun.approved_items));
     } else if (submoduleRun?.status === 'completed') {
-      // Fresh completion: all checked by default
       const allKeys = flatItems.map((item) => String(item[itemKey] ?? '')).filter(Boolean);
       setCheckedKeys(new Set(allKeys));
     }
   }, [flatItems, submoduleRun?.status, submoduleRun?.approved_items, itemKey, isSelectable]);
+
+  // --- Textarea state (for manual URL/data entry) ---
+  const [textareaValue, setTextareaValue] = useState('');
+  // Track which input source is active: 'textarea' | 'csv' | null
+  const [inputSource, setInputSource] = useState<'textarea' | 'csv' | null>(null);
+  const [inputDirty, setInputDirty] = useState(false);
+
+  // Reset input state when switching submodules
+  useEffect(() => {
+    setTextareaValue('');
+    setInputSource(null);
+    setInputDirty(false);
+  }, [submodule?.id]);
+
+  // Textarea parsed entities
+  const primaryColumn = submodule?.requires_columns?.[0] || 'url';
+  const textareaEntities = useMemo(
+    () => (textareaValue.trim() ? parseTextareaToEntities(textareaValue, primaryColumn) : []),
+    [textareaValue, primaryColumn]
+  );
+
+  // Determine which entities to show in content preview
+  const hasStepContext = !!stepContext?.entities && stepContext.entities.length > 0;
+  const previewEntities = inputSource === 'textarea' ? textareaEntities : (hasStepContext ? stepContext!.entities : []);
+  const hasPreviewData = previewEntities.length > 0;
+
+  // Mutual exclusion handlers
+  const handleTextareaChange = useCallback((value: string) => {
+    setTextareaValue(value);
+    setInputSource(value.trim() ? 'textarea' : null);
+    setInputDirty(true);
+  }, []);
+
+  const handleUploadComplete = useCallback((result: UploadResult) => {
+    queryClient.invalidateQueries({ queryKey: ['stepContext', runId, stepIndex] });
+    setTextareaValue(''); // Mutual exclusion: CSV clears textarea
+    setInputSource('csv');
+    setInputDirty(true);
+    showToast(`Uploaded ${result.filename}: ${result.entity_count} entities`, 'success');
+    if (result.columns_missing.length > 0) {
+      showToast(`Missing columns: ${result.columns_missing.join(', ')}`, 'error');
+    }
+  }, [queryClient, runId, stepIndex, showToast]);
+
+  const handleUploadError = (msg: string) => {
+    showToast(msg, 'error');
+  };
+
+  // Download template handler — generates CSV with column headers from requires_columns
+  const handleDownloadTemplate = () => {
+    if (!submodule) return;
+    const cols = submodule.requires_columns.length > 0
+      ? submodule.requires_columns
+      : ['url'];
+    const csv = cols.map((c) => `"${c}"`).join(',') + '\n';
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${submodule.id}-template.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // SAVE INPUT handler
+  const handleSaveInput = () => {
+    if (inputSource === 'textarea') {
+      onSaveConfig({ input_config: { source: 'textarea', raw_text: textareaValue, entities: textareaEntities } });
+    } else if (inputSource === 'csv') {
+      onSaveConfig({ input_config: { source: 'csv', filename: stepContext?.filename || null } });
+    }
+    setInputDirty(false);
+    showToast('Input saved', 'success');
+    // Guided flow: collapse Input, open Options
+    setPanelAccordion('options');
+  };
 
   // Local options state — initialized from savedConfig or manifest defaults
   const manifestDefaults = useMemo(() => {
@@ -216,21 +292,7 @@ export function SubmodulePanel({
     onDataOperationChange(next);
   };
 
-  // --- Input logic ---
-  const hasStepContext = !!stepContext?.entities && stepContext.entities.length > 0;
   const uploadUrl = `/api/runs/${runId}/steps/${stepIndex}/context`;
-
-  const handleUploadComplete = (result: UploadResult) => {
-    queryClient.invalidateQueries({ queryKey: ['stepContext', runId, stepIndex] });
-    showToast(`Uploaded ${result.filename}: ${result.entity_count} entities`, 'success');
-    if (result.columns_missing.length > 0) {
-      showToast(`Missing columns: ${result.columns_missing.join(', ')}`, 'error');
-    }
-  };
-
-  const handleUploadError = (msg: string) => {
-    showToast(msg, 'error');
-  };
 
   // --- Options logic ---
   const handleOptionChange = (name: string, value: unknown) => {
@@ -245,15 +307,44 @@ export function SubmodulePanel({
   };
 
   // --- Execution state ---
-  const hasInput = hasStepContext || stepIndex > 0;
+  // hasInput: content preview has data from ANY source (textarea, CSV, step context, or previous step)
+  const hasInput = hasPreviewData || stepIndex > 0;
   const isRunning = submoduleRun?.status === 'pending' || submoduleRun?.status === 'running';
   const isCompleted = submoduleRun?.status === 'completed' || submoduleRun?.status === 'approved';
 
   // --- CTA handlers ---
-  const handleRunTask = () => {
+
+  // Auto-save dirty input before executing — ensures server has the data
+  const saveInputIfDirty = async () => {
+    if (!inputDirty || !inputSource || !runId || !submodule) return;
+    if (inputSource === 'textarea') {
+      await api.saveSubmoduleConfig(runId, stepIndex, submodule.id, {
+        input_config: { source: 'textarea', raw_text: textareaValue, entities: textareaEntities },
+      });
+    } else if (inputSource === 'csv') {
+      await api.saveSubmoduleConfig(runId, stepIndex, submodule.id, {
+        input_config: { source: 'csv', filename: stepContext?.filename || null },
+      });
+    }
+    setInputDirty(false);
+  };
+
+  const handleRunTask = async () => {
     if (!runId || !submodule) return;
+
+    // Resolve entities to send directly in the request body (no DB roundtrip needed)
+    let entitiesToSend: Record<string, unknown>[] | undefined;
+    if (inputSource === 'textarea' && textareaEntities.length > 0) {
+      entitiesToSend = textareaEntities;
+    } else if (hasPreviewData) {
+      entitiesToSend = previewEntities;
+    }
+
+    // Also persist the input config for future runs (fire-and-forget)
+    saveInputIfDirty().catch(() => { /* non-critical */ });
+
     executeMutation.mutate(
-      { runId, stepIndex, submoduleId: submodule.id },
+      { runId, stepIndex, submoduleId: submodule.id, entities: entitiesToSend },
       {
         onSuccess: (data) => {
           setActiveSubmoduleRunId(data.submodule_run_id);
@@ -272,10 +363,8 @@ export function SubmodulePanel({
 
     let approvedKeys: string[];
     if (isSelectable) {
-      // Selectable: send only checked keys
       approvedKeys = Array.from(checkedKeys);
     } else {
-      // Non-selectable: approve ALL items
       approvedKeys = flatItems.map((item) => String(item[itemKey] ?? '')).filter(Boolean);
     }
 
@@ -289,6 +378,28 @@ export function SubmodulePanel({
       }
     );
   };
+
+  // NEXT button handler — saves dirty options, then runs (handleRunTask sends entities directly)
+  const handleNext = () => {
+    if (optionsDirty) {
+      onSaveConfig({ options: localOptions as Record<string, unknown> });
+      setOptionsDirty(false);
+    }
+    handleRunTask();
+  };
+
+  // Results action CTAs
+  const handleChangeInput = () => setPanelAccordion('input');
+  const handleChangeOptions = () => setPanelAccordion('options');
+  const handleTryAgain = () => {
+    setActiveSubmoduleRunId(null);
+    setPanelAccordion('input');
+  };
+
+  // --- Input badge ---
+  const inputBadge = hasPreviewData
+    ? `${previewEntities.length} entities`
+    : undefined;
 
   // --- Results badge ---
   const resultsBadge = isRunning
@@ -355,40 +466,79 @@ export function SubmodulePanel({
           {/* --- INPUT ACCORDION --- */}
           <PanelAccordionItem
             title="Input"
-            badge={hasStepContext ? `${stepContext!.entities.length} entities` : undefined}
+            badge={inputBadge}
             isOpen={panelAccordion === 'input'}
             onToggle={() => setPanelAccordion(panelAccordion === 'input' ? null : 'input')}
             variant="blue"
           >
             <div className="flex flex-col gap-3 h-full">
-              {hasStepContext && stepContext!.filename && (
-                <div className="bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-700 flex-shrink-0">
-                  Shared step data: <span className="font-medium">{stepContext!.filename}</span>
-                  {' \u2014 '}{stepContext!.entities.length} entities
-                </div>
-              )}
+              {/* UrlTextarea */}
+              <div className="flex-shrink-0">
+                <UrlTextarea
+                  value={textareaValue}
+                  onChange={handleTextareaChange}
+                />
+              </div>
 
+              {/* "or" divider */}
+              <div className="flex items-center gap-3 flex-shrink-0">
+                <div className="flex-1 border-t border-gray-200" />
+                <span className="text-xs text-gray-400">or</span>
+                <div className="flex-1 border-t border-gray-200" />
+              </div>
+
+              {/* CsvUploadInput */}
               <div className="flex-shrink-0">
                 <CsvUploadInput
                   uploadUrl={uploadUrl}
                   submoduleId={submodule.id}
                   onUploadComplete={handleUploadComplete}
                   onError={handleUploadError}
-                  currentFileName={stepContext?.filename || null}
-                  currentEntityCount={stepContext?.entities?.length || 0}
+                  currentFileName={inputSource === 'csv' ? (stepContext?.filename || null) : null}
+                  currentEntityCount={inputSource === 'csv' ? (stepContext?.entities?.length || 0) : 0}
                   requiredColumns={submodule.requires_columns || []}
                 />
               </div>
 
-              {hasStepContext && (
+              {/* Download template link */}
+              {submodule.requires_columns.length > 0 && (
+                <button
+                  onClick={handleDownloadTemplate}
+                  className="text-xs text-[#3B82F6] hover:text-[#3B82F6]/80 flex items-center gap-1 flex-shrink-0"
+                >
+                  <span>{'\u2B07'}</span> Download template
+                </button>
+              )}
+
+              {/* Content preview */}
+              {hasPreviewData && (
                 <div className="flex-1 min-h-0">
                   <ContentRenderer
-                    entities={stepContext!.entities}
+                    entities={previewEntities}
                     fullHeight
-                    label={`${stepContext!.entities.length} entities \u00d7 ${Object.keys(stepContext!.entities[0] || {}).length} columns`}
+                    label={`${previewEntities.length} entities \u00d7 ${Object.keys(previewEntities[0] || {}).length} columns`}
                   />
                 </div>
               )}
+
+              {!hasPreviewData && (
+                <div className="text-center py-4 flex-shrink-0">
+                  <p className="text-xs text-gray-400">No input data. Upload a file or enter data above.</p>
+                </div>
+              )}
+
+              {/* SAVE INPUT button */}
+              <button
+                onClick={handleSaveInput}
+                disabled={!inputDirty}
+                className={`w-full py-2 rounded text-sm font-medium transition-colors flex-shrink-0 ${
+                  inputDirty
+                    ? 'bg-[#3B82F6] text-white hover:bg-[#3B82F6]/90'
+                    : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                }`}
+              >
+                {inputDirty ? 'Save Input' : 'Save Input (no changes)'}
+              </button>
             </div>
           </PanelAccordionItem>
 
@@ -406,6 +556,8 @@ export function SubmodulePanel({
                 values={localOptions}
                 onChange={handleOptionChange}
               />
+
+              {/* SAVE OPTIONS button */}
               <button
                 onClick={handleSaveOptions}
                 disabled={!optionsDirty}
@@ -415,7 +567,20 @@ export function SubmodulePanel({
                     : 'bg-gray-100 text-gray-400 cursor-not-allowed'
                 }`}
               >
-                {optionsDirty ? 'SAVE OPTIONS' : 'Options saved'}
+                {optionsDirty ? 'Save Options' : 'Save Options (no changes)'}
+              </button>
+
+              {/* NEXT button */}
+              <button
+                onClick={handleNext}
+                disabled={!hasInput || isRunning}
+                className={`w-full py-2 rounded text-sm font-medium transition-colors ${
+                  hasInput && !isRunning
+                    ? 'bg-[#E11D73] text-white hover:bg-[#E11D73]/90'
+                    : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                }`}
+              >
+                {isRunning ? 'Running...' : 'Next \u2192'}
               </button>
             </div>
           </PanelAccordionItem>
@@ -438,6 +603,9 @@ export function SubmodulePanel({
               onCheckedKeysChange={isSelectable ? setCheckedKeys : undefined}
               summary={summary}
               resultsLabel={resultsLabel}
+              onChangeInput={handleChangeInput}
+              onChangeOptions={handleChangeOptions}
+              onTryAgain={handleTryAgain}
             />
           </PanelAccordionItem>
         </div>
@@ -503,6 +671,9 @@ function ResultsContent({
   onCheckedKeysChange,
   summary,
   resultsLabel,
+  onChangeInput,
+  onChangeOptions,
+  onTryAgain,
 }: {
   submoduleRun: { status: string; progress: { current: number; total: number; message: string } | null; error: string | null } | null;
   flatItems: Array<Record<string, unknown> & { entity_name: string }>;
@@ -513,6 +684,9 @@ function ResultsContent({
   onCheckedKeysChange?: (keys: Set<string>) => void;
   summary: { total_entities: number; total_items: number; errors: string[] } | undefined;
   resultsLabel: string | undefined;
+  onChangeInput: () => void;
+  onChangeOptions: () => void;
+  onTryAgain: () => void;
 }) {
   // No run yet
   if (!submoduleRun) {
@@ -558,16 +732,24 @@ function ResultsContent({
   // Failed
   if (submoduleRun.status === 'failed') {
     return (
-      <div className="bg-red-50 border border-red-200 rounded p-3">
-        <p className="text-sm text-red-700 font-medium">Execution failed</p>
-        <p className="text-xs text-red-600 mt-1">{submoduleRun.error || 'Unknown error'}</p>
+      <div className="space-y-3">
+        <div className="bg-red-50 border border-red-200 rounded p-3">
+          <p className="text-sm text-red-700 font-medium">Execution failed</p>
+          <p className="text-xs text-red-600 mt-1">{submoduleRun.error || 'Unknown error'}</p>
+        </div>
+        <ResultsActionCTAs onChangeInput={onChangeInput} onChangeOptions={onChangeOptions} onTryAgain={onTryAgain} />
       </div>
     );
   }
 
   // Completed or Approved — pass-through to ContentRenderer
   if (flatItems.length === 0) {
-    return <p className="text-sm text-gray-400">No results returned.</p>;
+    return (
+      <div className="space-y-3">
+        <p className="text-sm text-gray-400">No results returned.</p>
+        <ResultsActionCTAs onChangeInput={onChangeInput} onChangeOptions={onChangeOptions} onTryAgain={onTryAgain} />
+      </div>
+    );
   }
 
   return (
@@ -594,6 +776,91 @@ function ResultsContent({
           fullHeight
         />
       </div>
+
+      {/* Action CTAs */}
+      <ResultsActionCTAs
+        onChangeInput={onChangeInput}
+        onChangeOptions={onChangeOptions}
+        onTryAgain={onTryAgain}
+        showDownload
+        entities={flatItems}
+        renderSchema={renderSchema}
+      />
+    </div>
+  );
+}
+
+
+// --- Results Action CTAs ---
+
+function ResultsActionCTAs({
+  onChangeInput,
+  onChangeOptions,
+  onTryAgain,
+  showDownload,
+  entities,
+  renderSchema,
+}: {
+  onChangeInput: () => void;
+  onChangeOptions: () => void;
+  onTryAgain: () => void;
+  showDownload?: boolean;
+  entities?: Record<string, unknown>[];
+  renderSchema?: RenderSchema | null;
+}) {
+  const handleDownload = () => {
+    if (!entities || entities.length === 0) return;
+    const metaFields = new Set(['display_type', 'selectable']);
+    const columns = renderSchema
+      ? Object.keys(renderSchema).filter((k) => !metaFields.has(k))
+      : Object.keys(entities[0]);
+    const headerRow = columns.map((c) => `"${c}"`).join(',');
+    const rows = entities.map((entity) =>
+      columns
+        .map((col) => {
+          const val = String(entity[col] ?? '');
+          return `"${val.replace(/"/g, '""')}"`;
+        })
+        .join(',')
+    );
+    const csv = [headerRow, ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `results-${entities.length}-rows.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="flex items-center gap-2 flex-shrink-0 pt-2 border-t border-gray-100">
+      <button
+        onClick={onChangeInput}
+        className="text-xs text-[#3B82F6] hover:underline"
+      >
+        Change Input
+      </button>
+      <button
+        onClick={onChangeOptions}
+        className="text-xs text-[#0891B2] hover:underline"
+      >
+        Change Options
+      </button>
+      {showDownload && (
+        <button
+          onClick={handleDownload}
+          className="text-xs text-gray-500 hover:underline"
+        >
+          Download
+        </button>
+      )}
+      <button
+        onClick={onTryAgain}
+        className="text-xs text-[#E11D73] hover:underline ml-auto"
+      >
+        Try again
+      </button>
     </div>
   );
 }

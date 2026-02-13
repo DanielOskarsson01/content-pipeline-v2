@@ -1,19 +1,22 @@
 import { useState } from 'react';
-import type { CategoryGroups, SubmoduleManifest, SubmoduleLatestRunMap } from '../../types/step';
+import type { CategoryGroups, SubmoduleManifest, SubmoduleLatestRunMap, SubmoduleConfig } from '../../types/step';
 import { usePanelStore } from '../../stores/panelStore';
 
+const DATA_OP_OPTIONS = ['add', 'remove', 'transform'] as const;
 const DATA_OP_ICONS: Record<string, string> = {
-  add: '➕',
-  remove: '➖',
-  transform: '＝',
+  add: '\u2795',
+  remove: '\u2796',
+  transform: '\uFF1D',
 };
 
 interface CategoryCardGridProps {
   categories: CategoryGroups;
   latestRuns?: SubmoduleLatestRunMap;
+  configMap?: Record<string, SubmoduleConfig>;
+  onDataOperationChange?: (submoduleId: string, op: 'add' | 'remove' | 'transform') => void;
 }
 
-export function CategoryCardGrid({ categories, latestRuns = {} }: CategoryCardGridProps) {
+export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, onDataOperationChange }: CategoryCardGridProps) {
   const { openSubmodulePanel } = usePanelStore();
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
 
@@ -61,15 +64,30 @@ export function CategoryCardGrid({ categories, latestRuns = {} }: CategoryCardGr
                   Submodules
                 </p>
                 <div className="p-2 space-y-1">
-                  {submodules.map((sub) => (
-                    <SubmoduleRow
-                      key={sub.id}
-                      submodule={sub}
-                      categoryKey={catKey}
-                      onOpen={openSubmodulePanel}
-                      latestRun={latestRuns[sub.id]}
-                    />
-                  ))}
+                  {submodules.map((sub) => {
+                    const savedOp = configMap[sub.id]?.data_operation;
+                    const currentOp = savedOp || sub.data_operation_default;
+
+                    return (
+                      <SubmoduleRow
+                        key={sub.id}
+                        submodule={sub}
+                        categoryKey={catKey}
+                        onOpen={openSubmodulePanel}
+                        latestRun={latestRuns[sub.id]}
+                        currentDataOp={currentOp}
+                        onCycleDataOp={
+                          onDataOperationChange
+                            ? () => {
+                                const idx = DATA_OP_OPTIONS.indexOf(currentOp as typeof DATA_OP_OPTIONS[number]);
+                                const next = DATA_OP_OPTIONS[(idx + 1) % DATA_OP_OPTIONS.length];
+                                onDataOperationChange(sub.id, next);
+                              }
+                            : undefined
+                        }
+                      />
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -85,13 +103,17 @@ function SubmoduleRow({
   categoryKey,
   onOpen,
   latestRun,
+  currentDataOp,
+  onCycleDataOp,
 }: {
   submodule: SubmoduleManifest;
   categoryKey: string;
   onOpen: (submoduleId: string, categoryKey: string) => void;
   latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null };
+  currentDataOp: string;
+  onCycleDataOp?: () => void;
 }) {
-  const opIcon = DATA_OP_ICONS[submodule.data_operation_default] || '＝';
+  const opIcon = DATA_OP_ICONS[currentDataOp] || '\uFF1D';
 
   return (
     <div
@@ -99,9 +121,17 @@ function SubmoduleRow({
       onClick={() => onOpen(submodule.id, categoryKey)}
     >
       <div className="flex items-center gap-2">
-        <span className="text-sm w-5 text-center" title={submodule.data_operation_default}>
+        <button
+          type="button"
+          className="text-sm w-5 text-center hover:scale-125 transition-transform"
+          title={`Data operation: ${currentDataOp} (click to change)`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onCycleDataOp?.();
+          }}
+        >
           {opIcon}
-        </span>
+        </button>
         <div>
           <p className="text-sm text-gray-700">{submodule.name}</p>
           <p className="text-[10px] text-gray-400">{submodule.description}</p>

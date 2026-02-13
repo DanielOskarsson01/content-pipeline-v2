@@ -81,6 +81,8 @@ export const api = {
   // Submodule config
   getSubmoduleConfig: (runId: string, stepIndex: number, submoduleId: string) =>
     apiFetch<SubmoduleConfig>(`/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/config`),
+  getSubmoduleConfigs: (runId: string, stepIndex: number) =>
+    apiFetch<Record<string, SubmoduleConfig>>(`/api/runs/${runId}/steps/${stepIndex}/submodule-configs`),
   saveSubmoduleConfig: (runId: string, stepIndex: number, submoduleId: string, config: Partial<SubmoduleConfig>) =>
     apiFetch<SubmoduleConfig>(`/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/config`, {
       method: 'PUT',
@@ -88,10 +90,10 @@ export const api = {
     }),
 
   // Submodule execution (Phase 7)
-  executeSubmodule: (runId: string, stepIndex: number, submoduleId: string) =>
+  executeSubmodule: (runId: string, stepIndex: number, submoduleId: string, body?: { entities?: Record<string, unknown>[] }) =>
     apiFetch<{ submodule_run_id: string; status: string }>(
       `/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/run`,
-      { method: 'POST' }
+      { method: 'POST', body: JSON.stringify(body || {}) }
     ),
   getSubmoduleRun: (submoduleRunId: string) =>
     apiFetch<SubmoduleRun>(`/api/submodule-runs/${submoduleRunId}`),
