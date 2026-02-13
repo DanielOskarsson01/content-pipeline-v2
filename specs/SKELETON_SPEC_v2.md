@@ -305,12 +305,30 @@ Data source: latest `submodule_runs` record for this submodule + run.
 
 #### Upload Zone (always visible)
 
-- Drag-and-drop file area (accepts CSV, XLSX in v1)
-- "or" divider
-- URL/text textarea for manual entry (freeform)
-- Link to download CSV template (generated from manifest `requires_columns`)
+```
+┌─────────────────────────────────────────────────────┐
+│ Paste URLs or data                                   │
+│ ┌─────────────────────────────────────────────────┐ │
+│ │ (textarea, multiline freeform)                  │ │
+│ └─────────────────────────────────────────────────┘ │
+│                                                      │
+│ ──────────────── or ────────────────                 │
+│                                                      │
+│ ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐                │
+│   Drop CSV or XLSX here                              │
+│   or click to browse                                 │
+│ └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘                │
+│                                                      │
+│ ↓ Download template                                  │
+└─────────────────────────────────────────────────────┘
+```
 
-Uploading new data always overrides any auto-resolved input.
+- **Textarea** (top) — `UrlTextarea` primitive. Freeform multiline input for pasting URLs, entity names, or any text data. Label: "Paste URLs or data".
+- **"or" divider** — Visual separator between the two input methods.
+- **File upload** (below divider) — `CsvUploadInput` primitive. Drag-and-drop area accepting CSV, XLSX. Shows filename + entity count after upload, with [Replace] link to swap file.
+- **Download template** — Link below file upload. Generates a CSV with column headers from manifest `requires_columns`. Helps users prepare data in the expected format.
+
+Either input method provides data. Uploading a CSV clears the textarea. Typing in the textarea clears any uploaded file. Only one source active at a time.
 
 #### Auto-Resolution (skeleton handles automatically)
 
@@ -385,11 +403,13 @@ If data was just uploaded by the user: preview updates immediately after server-
 #### [SAVE INPUT] button
 
 - Positioned at the bottom of the Input accordion (below content preview)
-- **Active only if** the user has changed something (uploaded a file, typed entities, or switched from auto-resolved to manual). Dirty-state tracked by the skeleton.
+- **Active only if** the user has changed something (uploaded a file, typed in textarea, or switched from auto-resolved to manual). Dirty-state tracked by the skeleton.
+- **Label when clean:** "Save Input (no changes)" (disabled/gray)
+- **Label when dirty:** "Save Input" (active)
 - **Saves to:** `run_submodule_config.input_config` (see Part 10: Configuration Storage)
 - Also triggers server-side file parsing if a file was uploaded (see Part 9: File Upload Flow)
 - After save: content preview updates with the new data
-- If nothing has been changed since last save, button is disabled (gray)
+- **Guided flow:** After successful save, collapses Input accordion and opens Options accordion automatically. This guides the user through the natural Input → Options → Run sequence.
 
 #### RUN TASK activation rule
 
@@ -425,8 +445,17 @@ The rule: if the content preview shows data, RUN TASK is active.
 
 **[SAVE OPTIONS] button:**
 - Active only if the submodule component has called `onChange()` with values different from the last saved state
+- **Label when clean:** "Save Options (no changes)" (disabled/gray)
+- **Label when dirty:** "Save Options" (active)
 - Saves to: `run_submodule_config.options` in Supabase
 - After save: button returns to disabled (no unsaved changes)
+
+**[NEXT] button:**
+- Always visible below [SAVE OPTIONS] in the Options accordion
+- **Active when** `hasInput` is true (Input accordion has data from any source)
+- **What it does:** If options are dirty, saves them first. Then collapses Options accordion, opens Results accordion, and triggers RUN TASK automatically (equivalent to clicking RUN TASK in the footer).
+- This completes the guided flow: Input → Save → Options → Next → Run.
+- If user prefers manual control, they can still use the footer RUN TASK button directly.
 
 **Default values:** On first open, the skeleton loads defaults from the manifest's `options_defaults` object and passes them to the submodule component. If a saved config exists in `run_submodule_config`, those saved values are used instead of defaults.
 

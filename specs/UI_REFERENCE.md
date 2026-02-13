@@ -139,22 +139,27 @@ Each row shows, LEFT to RIGHT:
 
 #### 6e. Input Accordion (blue/cyan header)
 **Skeleton owns entirely.**
-Contents:
-- Paste URLs/data textarea
-- "or" divider
-- File drop zone (CSV, XLSX)
-- Download template link
-- Content preview (auto-resolved from previous step, shared context, or saved input)
+Contents (top to bottom):
+- **UrlTextarea** — "Paste URLs or data" multiline freeform textarea
+- **"or" divider**
+- **CsvUploadInput** — drag-and-drop file zone (CSV, XLSX). Shows filename + count after upload, [Replace] link
+- **↓ Download template** — generates CSV from manifest `requires_columns`
+- **Content preview** — auto-resolved from previous step, shared context, or saved input
   - Rendered via ContentRenderer using render_schema from producing module
   - Source label: "From Step {N-1}" / "Saved input" / "From {submodule} upload"
-- [Save Input] button — active only if user changed something
+- **[Save Input]** button — active only if user changed something. Label: "Save Input (no changes)" when clean.
+  - **Guided flow:** After save → collapses Input, opens Options automatically
+- Mutual exclusion: typing in textarea clears uploaded CSV, uploading CSV clears textarea
 
 #### 6f. Options Accordion (teal header)
 **Slot for module-provided component.**
 - If module provides `options_component` → render that component
 - If no component but `options[]` in manifest → auto-render form
 - If neither → "No configurable options"
-- [Save Options] button — active only if dirty
+- **[Save Options]** button — active only if dirty. Label: "Save Options (no changes)" when clean.
+- **[Next]** button — below Save Options. Active when `hasInput` is true.
+  - If options dirty → saves first, then collapses Options, opens Results, triggers RUN TASK
+  - Completes guided flow: Input → Save → Options → Next → Run
 
 #### 6g. Results Accordion (pink header) — ALWAYS RENDERED
 **Skeleton renders via ContentRenderer + output_schema from module.**
@@ -168,10 +173,10 @@ After run (content driven by output_render_schema via ContentRenderer):
 - Per-row data operation icon only when selectable (read-only, matches pane setting)
 - Pagination + counts (total, and approved/rejected when selectable)
 - **Action CTAs at bottom of results:**
-  - [Change Input] → opens Input accordion
-  - [Change Options] → opens Options accordion
-  - [Download] — generic export (NOT CSV-specific)
-  - [Try again] — clears results, resets for new run
+  - [Change Input] → collapses Results, opens Input accordion
+  - [Change Options] → collapses Results, opens Options accordion
+  - [Download] — exports current results
+  - [Try again] — clears results, resets to fresh state for new run
 
 #### 6h. Fixed CTA Footer (always visible at bottom)
 | Button | When enabled | Action |

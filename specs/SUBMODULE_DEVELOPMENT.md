@@ -106,6 +106,7 @@ The manifest is the complete interface declaration. The skeleton never reads you
 
   "output_schema": {
     "display_type": "table",
+    "selectable": false,
     "url": "string (required)",
     "source_category": "string",
     "depth": "number",
@@ -131,7 +132,7 @@ The manifest is the complete interface declaration. The skeleton never reads you
 | `options_defaults` | | `{key: value}` pairs. Starting values when no saved config exists. |
 | `options_component` | | Path to a React component for custom options UI. If omitted, skeleton auto-renders from `options[]`. |
 | `item_key` | ✓ | Primary key field in output items (e.g., `"url"`). Used for deduplication and cross-run tracking. Can be a string for a single field or an array for composite keys (e.g., `["url", "entity_name"]`). |
-| `output_schema` | ✓ | Describes output item shape + `display_type`. `display_type` values: `"table"` (columnar, default), `"url_list"` (compact URL rows), `"content_cards"` (article/document cards), `"file_list"` (filename + size + timestamp). |
+| `output_schema` | ✓ | Describes output item shape + rendering. `display_type` values: `"table"` (columnar, default), `"url_list"` (compact URL rows), `"content_cards"` (article/document cards), `"file_list"` (filename + size + timestamp). Set `selectable: true` for item-level approval (user picks which items to keep). See "Output Schema" section below. |
 
 ---
 
@@ -319,6 +320,10 @@ Your `output_schema` describes what each result item looks like and how it shoul
   - `"url_list"` — Compact list showing primary URL + entity name. Other fields on row expand.
   - `"content_cards"` — Card layout for content pieces (articles, HTML documents). Shows title, excerpt, status. Used by content-producing steps.
   - `"file_list"` — Filename + size + timestamp. For steps that produce file outputs.
+- **`selectable`** — Boolean. Controls whether users can pick individual items during approval.
+  - `true` → The Results accordion shows checkboxes per row + Select all/Deselect all controls. APPROVE sends only checked item keys. Use for submodules where the user needs to filter results (e.g., removing bad URLs, rejecting low-quality content).
+  - `false` or absent → Results are read-only. APPROVE sends all item keys (approve everything). Use for discovery/add submodules where all results are generally wanted.
+  - **Convention:** ➕ add submodules → `selectable: false` (approve all). ➖ remove submodules → `selectable: true` (user picks). ＝ transform submodules → `selectable: false` (approve all). These are conventions, not rules — set whatever makes sense for your use case.
 - **Field definitions** — Each field name and type. Used for results column headers.
 
 This matters because:
@@ -385,6 +390,7 @@ This matters because:
 
   "output_schema": {
     "display_type": "table",
+    "selectable": false,
     "url": "string (required)",
     "title": "string",
     "published_at": "string (ISO date)",

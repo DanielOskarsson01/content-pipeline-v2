@@ -13,9 +13,10 @@
 
 1. **Read the spec before writing code.** Every phase references specific Parts of SKELETON_SPEC_v2.md. Read those Parts. Do not guess.
 2. **Build exactly what the spec says.** Do not add features, "improve" patterns, or anticipate future needs.
-3. **Do not touch previous phases.** If Phase 3 requires a change to Phase 1 code, flag it — do not silently modify.
-4. **No placeholder "TODO" code.** Each phase must be functional when complete. If something isn't needed yet, don't stub it.
-5. **Test each phase before moving on.** The app must compile, render, and function after every phase.
+3. **Cross-reference deliverables against the spec.** After building, re-read the referenced spec Parts and verify EVERY UI element, button, field, and behavior described in the spec is implemented — not just the deliverable summary lines. The deliverables are a checklist, the spec is the contract. If the spec describes it and this phase references that Part, it must be built.
+4. **Do not touch previous phases.** If Phase 3 requires a change to Phase 1 code, flag it — do not silently modify.
+5. **No placeholder "TODO" code.** Each phase must be functional when complete. If something isn't needed yet, don't stub it.
+6. **Test each phase before moving on.** The app must compile, render, and function after every phase.
 
 ### Strategy: Clean Start + Just-in-Time Audit
 
@@ -159,6 +160,10 @@ Source repo (READ-ONLY): `/Users/danieloskarsson/Library/CloudStorage/Dropbox/co
 ## Phase 0 — Repo Scaffold (Clean Start)
 
 **Goal:** Two empty repos exist with correct folder structures. Inert config files copied. Seed modules in place. Dev server runs.
+
+**Spec reference:** Part 20 (Tech Stack), Part 2 (Repo Structure)
+
+**⚠️ CROSS-CHECK:** After building, re-read the referenced spec Parts. Every folder, config file, and structural decision described in the spec must be present. The deliverables are a checklist — the spec is the contract.
 
 ### Steps
 
@@ -312,6 +317,8 @@ Source repo (READ-ONLY): `/Users/danieloskarsson/Library/CloudStorage/Dropbox/co
 
 **Spec reference:** Part 3 (UI Shell — Top-Level Structure)
 
+**⚠️ CROSS-CHECK:** After building, re-read Part 3. Every UI element, nav item, route, and layout decision described in the spec must be present. The deliverables are a checklist — the spec is the contract.
+
 ### V1 Audit (open → compare against spec → REUSE / FIX / FRESH)
 - `AppHeader.tsx` → compare against Part 3. Nav items need changing to [New Project, Projects, Templates].
 - `router.tsx` → compare against Part 3. Routes need updating to /new, /projects, /templates.
@@ -346,6 +353,8 @@ Source repo (READ-ONLY): `/Users/danieloskarsson/Library/CloudStorage/Dropbox/co
 **Goal:** User can create a project. Data persists in Supabase. After creation, user lands on the Run View (placeholder).
 
 **Spec reference:** Part 4 (Step 0), Part 10 (Database Schema — projects, pipeline_runs, pipeline_stages tables)
+
+**⚠️ CROSS-CHECK:** After building, re-read Parts 4 and 10. Every form field, table column, API behavior, and redirect described in the spec must be present. The deliverables are a checklist — the spec is the contract.
 
 ### V1 Audit (open → compare against spec → REUSE / FIX / FRESH)
 - `Step0ProjectSetup.tsx` → compare against Part 4. Has project creation form + TanStack Query mutations. Schema fields differ in v2.
@@ -435,6 +444,8 @@ This STEP_CONFIG is copied verbatim from SKELETON_SPEC_v2.md Part 5. It is the s
 
 **Spec reference:** Part 3 (Run View), Part 5 (Universal Step Template), Part 8 (Data Flow — Level 1)
 
+**⚠️ CROSS-CHECK:** After building, re-read Parts 3, 5, and 8. Every status badge, button, layout element, and data flow rule described in the spec must be present. The deliverables are a checklist — the spec is the contract.
+
 ### V1 Audit (open → compare against spec → REUSE / FIX / FRESH)
 - `StepContainer.tsx` → compare against Part 3 + Part 5. Has collapsible step pattern with status badges. Internals must become universal (category cards from manifests, not step-specific content).
 - `pipelineStore.ts` → compare against Part 3. Has step expansion state. Must be generic (no hardcoded step references).
@@ -502,6 +513,8 @@ This STEP_CONFIG is copied verbatim from SKELETON_SPEC_v2.md Part 5. It is the s
 
 **Spec reference:** Part 13 (Module Auto-Discovery), Part 5 (Category Cards)
 
+**⚠️ CROSS-CHECK:** After building, re-read Parts 13 and 5. Every card element, manifest field, status indicator, and API shape described in the spec must be present. The deliverables are a checklist — the spec is the contract.
+
 ### V1 Audit (open → compare against spec → REUSE / FIX / FRESH)
 - `CategoryCardGrid.tsx` → compare against Part 5. Has card grid with category expand/collapse and submodule rows. Needs v2 additions: data operation icon (➕➖＝), cost badge from manifest, status-based display.
 - `useSubmodules.ts` → compare against Part 16. Has `useSubmoduleMetadata()` fetching from `/api/submodules`. API shape differs in v2.
@@ -557,6 +570,8 @@ This STEP_CONFIG is copied verbatim from SKELETON_SPEC_v2.md Part 5. It is the s
 **Goal:** Clicking a submodule row opens the SubmodulePanel. Panel has three accordions (all empty/placeholder inside). CTA footer with three buttons. Panel closes properly.
 
 **Spec reference:** Part 6 (Universal Pane Template — structure only, not internals)
+
+**⚠️ CROSS-CHECK:** After building, re-read Part 6 structure sections. Every accordion, CTA button, toggle, close behavior, and panel layout described in the spec must be present. The deliverables are a checklist — the spec is the contract.
 
 ### V1 Audit (open → compare against spec → REUSE / FIX / FRESH)
 - `SubmodulePanel.tsx` → compare against Part 6. Has panel with accordions, CTA footer, escape key handling, backdrop. Needs exact three accordions (Input blue, Options teal, Results pink) and CTA button logic per spec.
@@ -620,6 +635,8 @@ This STEP_CONFIG is copied verbatim from SKELETON_SPEC_v2.md Part 5. It is the s
 **Goal:** Input accordion handles file upload and content preview. Options accordion renders submodule options (auto-rendered from manifest). SAVE INPUT and SAVE OPTIONS work.
 
 **Spec reference:** Part 6 (Input accordion, Options accordion), Part 9 (Shared Step Context, File Upload Flow)
+
+**⚠️ CROSS-CHECK:** After building, re-read Parts 6 and 9. Every upload zone element, auto-resolution rule, options rendering path, save button, and preview behavior described in the spec must be present. The deliverables are a checklist — the spec is the contract.
 
 ### V1 Audit (open → compare against spec → REUSE / FIX / FRESH)
 - `CsvUploadInput.tsx` → compare against Part 6 + Part 9. Has drag-and-drop CSV upload. Flow may differ in v2.
@@ -695,6 +712,8 @@ This STEP_CONFIG is copied verbatim from SKELETON_SPEC_v2.md Part 5. It is the s
 **Goal:** RUN TASK creates a BullMQ job, worker executes submodule, results appear, user approves, working pool updates.
 
 **Spec reference:** Part 15 (Job Queue), Part 14 (Execute Function), Part 6 (Results accordion), Part 17 (Approval Mechanics), Part 8 (Working Pool)
+
+**⚠️ CROSS-CHECK:** After building, re-read Parts 15, 14, 6, 17, and 8. Every queue config, worker behavior, results rendering rule, approval flow step, and pool update mechanic described in the spec must be present. The deliverables are a checklist — the spec is the contract.
 
 ### V1 Audit (open → compare against spec → REUSE / FIX / FRESH)
 - `workers/stageWorker.js` → compare against Part 14 + Part 15. Has BullMQ worker pattern, Redis connection, job processing. Execution model differs in v2.
@@ -786,11 +805,83 @@ This STEP_CONFIG is copied verbatim from SKELETON_SPEC_v2.md Part 5. It is the s
 
 ---
 
+## Phase 7b — Pane Completeness
+
+**Goal:** Fill all gaps in the SubmodulePanel. The three accordions must be fully functional before step-to-step plumbing.
+
+**Spec reference:** Part 6 (Universal Pane Template — Upload Zone, SAVE INPUT, SAVE OPTIONS, NEXT, Results action CTAs), UI_REFERENCE.md sections 6e/6f/6g
+
+**⚠️ CROSS-CHECK:** After building, re-read Part 6 and UI_REFERENCE 6e/6f/6g. Every textarea, divider, button, CTA, toggle, and guided flow behavior described in the spec must be present. The deliverables are a checklist — the spec is the contract.
+
+### Build
+
+1. **UrlTextarea primitive** (`components/primitives/UrlTextarea`):
+   - Multiline textarea with label "Paste URLs or data"
+   - Parses input: one URL/entity per line
+   - Returns structured data to Input accordion
+   - Typing in textarea clears any uploaded CSV (mutual exclusion)
+
+2. **Input accordion layout update** (matches mockup):
+   - UrlTextarea (top)
+   - "or" divider
+   - CsvUploadInput (below divider) — already built
+   - ↓ Download template link (generates CSV from manifest `requires_columns`)
+   - Content preview via ContentRenderer — already built
+   - [SAVE INPUT] button at bottom
+
+3. **SAVE INPUT button:**
+   - Active when user has changed input (CSV uploaded OR textarea has content)
+   - Label: "Save Input (no changes)" when clean, "Save Input" when dirty
+   - Saves to `run_submodule_config.input_config`
+   - **Guided flow:** After save → collapses Input, opens Options automatically
+
+4. **SAVE OPTIONS button:**
+   - Active when options have been modified from saved/default state
+   - Label: "Save Options (no changes)" when clean, "Save Options" when dirty
+   - Saves to `run_submodule_config.options`
+
+5. **NEXT button** (Options accordion, below SAVE OPTIONS):
+   - Active when `hasInput` is true
+   - If options are dirty, saves them first
+   - Then: collapses Options, opens Results, triggers RUN TASK automatically
+   - Completes guided flow: Input → Save → Options → Next → Run
+
+6. **Results action CTAs** (inside Results accordion, below result content):
+   - [Change Input] → collapses Results, opens Input accordion
+   - [Change Options] → collapses Results, opens Options accordion
+   - [Download] → exports current results
+   - [Try again] → clears results display, resets to fresh state for re-run
+
+7. **CategoryCardGrid ➕➖＝ toggle:**
+   - Each submodule row shows data operation icon (➕➖＝), clickable, cycles through add/remove/transform
+   - Syncs with the read-only indicator in the pane — toggling in either location updates both
+   - Saves to `run_submodule_config.data_operation`
+
+### Do NOT build
+- Anything from Phase 8 (step-to-step data flow)
+- New display_types for ContentRenderer
+- Options component loading (manifest `options_component`) — deferred
+
+### Deliverables
+- [ ] UrlTextarea primitive exists and works
+- [ ] Input accordion shows textarea + "or" + CSV upload + template link
+- [ ] Mutual exclusion: textarea clears CSV, CSV clears textarea
+- [ ] SAVE INPUT button with dirty tracking and guided flow
+- [ ] SAVE OPTIONS button with dirty tracking
+- [ ] NEXT button triggers save + run
+- [ ] [Change Input], [Change Options], [Download], [Try again] in Results
+- [ ] CategoryCardGrid rows show ➕➖＝ toggle, syncs with pane indicator
+- [ ] Full guided flow: open pane → enter data → save → options → next → running
+
+---
+
 ## Phase 8 — Step-to-Step Plumbing
 
 **Goal:** Full pipeline flow works. Approve step → aggregates pool → writes output → activates next step → next step reads input. Data flows from Step 1 through Step 2 with real rendering.
 
 **Spec reference:** Part 8 (Data Flow — all three levels), Part 16 (Step Approval server logic)
+
+**⚠️ CROSS-CHECK:** After building, re-read Parts 8 and 16. Every data aggregation rule, pool merge mechanic, skip behavior, and approval validation described in the spec must be present. The deliverables are a checklist — the spec is the contract.
 
 ### Build
 
@@ -829,7 +920,9 @@ This STEP_CONFIG is copied verbatim from SKELETON_SPEC_v2.md Part 5. It is the s
 
 **Goal:** Build 2-3 real submodules in the modules repo to validate the full architecture.
 
-**Spec reference:** SUBMODULE_DEVELOPMENT.md
+**Spec reference:** SUBMODULE_DEVELOPMENT.md (full document)
+
+**⚠️ CROSS-CHECK:** After building, re-read SUBMODULE_DEVELOPMENT.md. Every manifest field, execute() signature, return format, and tools usage described in the guide must be correctly implemented. The deliverables are a checklist — the spec is the contract.
 
 This is when work shifts to the modules repo. The skeleton should not change (if it does, that's a spec gap — document it).
 
@@ -868,6 +961,10 @@ This is when work shifts to the modules repo. The skeleton should not change (if
 ## Phase 10 — Polish and Edge Cases
 
 **Goal:** Handle all the edge cases from the spec that weren't covered in core phases.
+
+**Spec reference:** Part 11 (Error Handling), Part 12 (Loading States), Part 6 (all remaining details), Part 5 (all remaining details)
+
+**⚠️ CROSS-CHECK:** After building, do a FULL re-read of the entire SKELETON_SPEC_v2.md. Every behavior, edge case, and UI detail that was not built in Phases 0-9 must be built here. The deliverables are a checklist — the spec is the contract.
 
 ### Build
 - Template system placeholder (table exists, UI shows empty state)
