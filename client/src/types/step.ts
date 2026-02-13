@@ -103,3 +103,48 @@ export interface SubmoduleConfig {
   data_operation: 'add' | 'remove' | 'transform' | null;
   updated_at?: string;
 }
+
+// Phase 7: Submodule run — one execution of one submodule
+export interface SubmoduleRun {
+  id: string;
+  submodule_id: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'approved';
+  progress: { current: number; total: number; message: string } | null;
+  output_data: SubmoduleOutput | null;
+  output_render_schema: Record<string, string> | null;
+  approved_items: string[] | null;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+// Output shape from execute() — per-entity results + summary
+export interface SubmoduleOutput {
+  results: SubmoduleEntityResult[];
+  summary: { total_entities: number; total_items: number; errors: string[] };
+}
+
+export interface SubmoduleEntityResult {
+  entity_name: string;
+  items: Record<string, unknown>[];
+  meta?: Record<string, unknown>;
+  error?: string;
+}
+
+// Latest run status per submodule (from /submodule-runs/latest endpoint)
+export interface SubmoduleLatestRun {
+  id: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'approved';
+  progress: { current: number; total: number; message: string } | null;
+  result_count: number;
+  approved_count: number;
+}
+
+export type SubmoduleLatestRunMap = Record<string, SubmoduleLatestRun>;
+
+// Approval response
+export interface ApproveSubmoduleRunResponse {
+  status: 'approved';
+  pool_count: number;
+  approved_count: number;
+}

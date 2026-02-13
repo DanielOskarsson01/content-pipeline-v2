@@ -2,8 +2,9 @@ import { useEffect, useState, useMemo } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { usePanelStore } from '../../stores/panelStore';
 import { useStepContext } from '../../hooks/useStepContext';
+import { useSubmoduleRun, useExecuteSubmodule, useApproveSubmoduleRun, useLatestSubmoduleRuns } from '../../hooks/useSubmoduleRuns';
 import { useAppStore } from '../../stores/appStore';
-import type { SubmoduleManifest, SubmoduleConfig } from '../../types/step';
+import type { SubmoduleManifest, SubmoduleConfig, SubmoduleRun } from '../../types/step';
 import { CsvUploadInput, type UploadResult } from '../primitives/CsvUploadInput';
 import { ContentRenderer } from '../primitives/ContentRenderer';
 import { SubmoduleOptions } from '../primitives/SubmoduleOptions';
@@ -92,12 +93,69 @@ export function SubmodulePanel({
   const {
     submodulePanelOpen,
     panelAccordion,
+    activeSubmoduleRunId,
     closeSubmodulePanel,
     setPanelAccordion,
+    setActiveSubmoduleRunId,
   } = usePanelStore();
 
   // Step context (shared CSV data for this step)
   const { data: stepContext } = useStepContext(runId, stepIndex);
+
+  // Latest submodule runs — to auto-load previous run on panel open
+  const { data: latestRuns } = useLatestSubmoduleRuns(runId, stepIndex);
+
+  // Auto-set activeSubmoduleRunId when opening a panel for a submodule with a previous run
+  useEffect(() => {
+    if (!submodulePanelOpen || !submodule || !latestRuns) return;
+    const latest = latestRuns[submodule.id];
+    if (latest && !activeSubmoduleRunId) {
+      setActiveSubmoduleRunId(latest.id);
+    }
+  }, [submodulePanelOpen, submodule?.id, latestRuns, activeSubmoduleRunId, setActiveSubmoduleRunId]);
+
+  // Clear activeSubmoduleRunId when switching submodules
+  useEffect(() => {
+    setActiveSubmoduleRunId(null);
+  }, [submodule?.id, setActiveSubmoduleRunId]);
+
+  // Poll active submodule run — only poll while panel is open
+  const { data: submoduleRun } = useSubmoduleRun(activeSubmoduleRunId, submodulePanelOpen);
+
+  // Execution mutation
+  const executeMutation = useExecuteSubmodule();
+  const approveMutation = useApproveSubmoduleRun();
+
+  // --- Checked items state (for Results accordion) ---
+  const [checkedKeys, setCheckedKeys] = useState<Set<string>>(new Set());
+
+  // Flatten results into a single list of items with entity_name
+  const flatItems = useMemo(() => {
+    if (!submoduleRun?.output_data?.results) return [];
+    const items: Array<Record<string, unknown> & { entity_name: string }> = [];
+    for (const entityResult of submoduleRun.output_data.results) {
+      for (const item of entityResult.items || []) {
+        items.push({ ...item, entity_name: entityResult.entity_name });
+      }
+    }
+    return items;
+  }, [submoduleRun?.output_data]);
+
+  const itemKey = submodule?.item_key || 'url';
+
+  // Initialize checked keys when results arrive or when loading an approved run
+  useEffect(() => {
+    if (flatItems.length === 0) return;
+
+    if (submoduleRun?.status === 'approved' && submoduleRun.approved_items) {
+      // Re-approval: restore previous checkbox state
+      setCheckedKeys(new Set(submoduleRun.approved_items));
+    } else if (submoduleRun?.status === 'completed') {
+      // Fresh completion: all checked by default
+      const allKeys = flatItems.map((item) => String(item[itemKey] ?? '')).filter(Boolean);
+      setCheckedKeys(new Set(allKeys));
+    }
+  }, [flatItems, submoduleRun?.status, submoduleRun?.approved_items, itemKey]);
 
   // Local options state — initialized from savedConfig or manifest defaults
   const manifestDefaults = useMemo(() => {
@@ -129,6 +187,20 @@ export function SubmodulePanel({
     return () => window.removeEventListener('keydown', handleEscape);
   }, [submodulePanelOpen, closeSubmodulePanel]);
 
+  // Show toast when background job completes
+  useEffect(() => {
+    if (!submoduleRun || !submodule) return;
+    if (submoduleRun.status === 'completed' && submoduleRun.output_data) {
+      const count = submoduleRun.output_data.summary?.total_items ?? 0;
+      if (!submodulePanelOpen) {
+        showToast(`${submodule.name} completed \u2014 ${count} results`, 'success');
+      }
+    }
+    if (submoduleRun.status === 'failed') {
+      showToast(`${submodule.name} failed: ${submoduleRun.error || 'Unknown error'}`, 'error');
+    }
+  }, [submoduleRun?.status]);
+
   if (!submodulePanelOpen || !submodule) return null;
 
   const submoduleName = submodule.name;
@@ -145,10 +217,8 @@ export function SubmodulePanel({
   const uploadUrl = `/api/runs/${runId}/steps/${stepIndex}/context`;
 
   const handleUploadComplete = (result: UploadResult) => {
-    // Invalidate step context query to reload the preview
     queryClient.invalidateQueries({ queryKey: ['stepContext', runId, stepIndex] });
     showToast(`Uploaded ${result.filename}: ${result.entity_count} entities`, 'success');
-
     if (result.columns_missing.length > 0) {
       showToast(`Missing columns: ${result.columns_missing.join(', ')}`, 'error');
     }
@@ -170,8 +240,70 @@ export function SubmodulePanel({
     showToast('Options saved', 'success');
   };
 
-  // --- RUN TASK enablement ---
-  const hasInput = hasStepContext;
+  // --- Execution state ---
+  // Server does auto-resolution: saved config → previous step output → step_context.
+  // For steps > 0, previous step output may be available even without step_context.
+  const hasInput = hasStepContext || stepIndex > 0;
+  const isRunning = submoduleRun?.status === 'pending' || submoduleRun?.status === 'running';
+  const isCompleted = submoduleRun?.status === 'completed' || submoduleRun?.status === 'approved';
+
+  // --- CTA handlers ---
+  const handleRunTask = () => {
+    if (!runId || !submodule) return;
+    executeMutation.mutate(
+      { runId, stepIndex, submoduleId: submodule.id },
+      {
+        onSuccess: (data) => {
+          setActiveSubmoduleRunId(data.submodule_run_id);
+          setPanelAccordion('results');
+        },
+      }
+    );
+  };
+
+  const handleSeeResults = () => {
+    setPanelAccordion('results');
+  };
+
+  const handleApprove = () => {
+    if (!activeSubmoduleRunId) return;
+    const approvedKeys = Array.from(checkedKeys);
+    approveMutation.mutate(
+      { submoduleRunId: activeSubmoduleRunId, approvedItemKeys: approvedKeys },
+      {
+        onSuccess: () => {
+          closeSubmodulePanel();
+          queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns'] });
+        },
+      }
+    );
+  };
+
+  // --- Results checkbox handlers ---
+  const toggleItem = (key: string) => {
+    setCheckedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    const allKeys = flatItems.map((item) => String(item[itemKey] ?? '')).filter(Boolean);
+    setCheckedKeys(new Set(allKeys));
+  };
+
+  const deselectAll = () => {
+    setCheckedKeys(new Set());
+  };
+
+  // --- Results badge ---
+  const resultsBadge = isRunning
+    ? 'running'
+    : isCompleted
+      ? `${checkedKeys.size}/${flatItems.length}`
+      : undefined;
 
   return (
     <div className="fixed inset-0 z-50">
@@ -229,7 +361,6 @@ export function SubmodulePanel({
             variant="blue"
           >
             <div className="flex flex-col gap-3 h-full">
-              {/* Shared context banner */}
               {hasStepContext && stepContext!.filename && (
                 <div className="bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-700 flex-shrink-0">
                   Shared step data: <span className="font-medium">{stepContext!.filename}</span>
@@ -237,7 +368,6 @@ export function SubmodulePanel({
                 </div>
               )}
 
-              {/* CSV upload zone */}
               <div className="flex-shrink-0">
                 <CsvUploadInput
                   uploadUrl={uploadUrl}
@@ -250,7 +380,6 @@ export function SubmodulePanel({
                 />
               </div>
 
-              {/* Content preview (ContentRenderer) — fills remaining space */}
               {hasStepContext && (
                 <div className="flex-1 min-h-0">
                   <ContentRenderer
@@ -277,8 +406,6 @@ export function SubmodulePanel({
                 values={localOptions}
                 onChange={handleOptionChange}
               />
-
-              {/* Save Options button */}
               <button
                 onClick={handleSaveOptions}
                 disabled={!optionsDirty}
@@ -293,45 +420,222 @@ export function SubmodulePanel({
             </div>
           </PanelAccordionItem>
 
-          {/* --- RESULTS ACCORDION (Phase 7 placeholder) --- */}
+          {/* --- RESULTS ACCORDION --- */}
           <PanelAccordionItem
             title="Results"
+            badge={resultsBadge}
             isOpen={panelAccordion === 'results'}
             onToggle={() => setPanelAccordion(panelAccordion === 'results' ? null : 'results')}
             variant="pink"
           >
-            <p className="text-sm text-gray-400">No results yet. Configure input and click RUN TASK.</p>
+            <ResultsAccordionContent
+              submoduleRun={submoduleRun ?? null}
+              flatItems={flatItems}
+              itemKey={itemKey}
+              dataOperation={dataOperation}
+              checkedKeys={checkedKeys}
+              onToggleItem={toggleItem}
+              onSelectAll={selectAll}
+              onDeselectAll={deselectAll}
+            />
           </PanelAccordionItem>
         </div>
 
         {/* CTA Footer */}
         <div className="border-t border-gray-200 px-4 py-3 bg-white flex-shrink-0">
           <div className="flex items-center justify-center gap-3">
+            {/* RUN TASK */}
             <button
-              disabled={!hasInput}
+              disabled={!hasInput || isRunning}
+              onClick={handleRunTask}
               className={`px-8 py-3 rounded text-sm font-medium transition-colors ${
-                hasInput
-                  ? 'bg-[#3B82F6] text-white hover:bg-[#3B82F6]/90'
+                hasInput && !isRunning
+                  ? 'bg-[#E11D73] text-white hover:bg-[#E11D73]/90'
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               }`}
             >
-              RUN TASK
+              {isRunning ? 'RUNNING...' : 'RUN TASK'}
             </button>
+
+            {/* SEE RESULTS */}
             <button
-              disabled
-              className="px-8 py-3 rounded text-sm font-medium bg-gray-100 text-gray-400 cursor-not-allowed"
+              disabled={!isCompleted}
+              onClick={handleSeeResults}
+              className={`px-8 py-3 rounded text-sm font-medium transition-colors ${
+                isCompleted
+                  ? 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+              }`}
             >
               SEE RESULTS
             </button>
+
+            {/* APPROVE */}
             <button
-              disabled
-              className="px-8 py-3 rounded text-sm font-medium bg-gray-100 text-gray-400 cursor-not-allowed"
+              disabled={!isCompleted || approveMutation.isPending}
+              onClick={handleApprove}
+              className={`px-8 py-3 rounded text-sm font-medium transition-colors ${
+                isCompleted && !approveMutation.isPending
+                  ? 'bg-green-600 text-white hover:bg-green-700'
+                  : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+              }`}
             >
-              APPROVE
+              {approveMutation.isPending ? 'APPROVING...' : 'APPROVE'}
             </button>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+
+// --- Results Accordion Content ---
+
+function ResultsAccordionContent({
+  submoduleRun,
+  flatItems,
+  itemKey,
+  dataOperation,
+  checkedKeys,
+  onToggleItem,
+  onSelectAll,
+  onDeselectAll,
+}: {
+  submoduleRun: SubmoduleRun | null;
+  flatItems: Array<Record<string, unknown> & { entity_name: string }>;
+  itemKey: string;
+  dataOperation: string;
+  checkedKeys: Set<string>;
+  onToggleItem: (key: string) => void;
+  onSelectAll: () => void;
+  onDeselectAll: () => void;
+}) {
+  // No run yet
+  if (!submoduleRun) {
+    return <p className="text-sm text-gray-400">No results yet. Configure input and click RUN TASK.</p>;
+  }
+
+  // Pending
+  if (submoduleRun.status === 'pending') {
+    return (
+      <div className="flex items-center gap-3 py-4">
+        <Spinner />
+        <p className="text-sm text-gray-500">Waiting to start...</p>
+      </div>
+    );
+  }
+
+  // Running — show progress
+  if (submoduleRun.status === 'running') {
+    const progress = submoduleRun.progress;
+    const pct = progress && progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
+
+    return (
+      <div className="space-y-3 py-2">
+        <div className="flex items-center gap-3">
+          <Spinner />
+          <p className="text-sm text-gray-700">
+            {progress?.message || 'Processing...'}
+          </p>
+        </div>
+        <div className="w-full bg-gray-200 rounded-full h-2">
+          <div
+            className="bg-[#E11D73] h-2 rounded-full transition-all duration-300"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <p className="text-xs text-gray-500 text-right">
+          {progress ? `${progress.current}/${progress.total}` : ''} {pct}%
+        </p>
+      </div>
+    );
+  }
+
+  // Failed
+  if (submoduleRun.status === 'failed') {
+    return (
+      <div className="bg-red-50 border border-red-200 rounded p-3">
+        <p className="text-sm text-red-700 font-medium">Execution failed</p>
+        <p className="text-xs text-red-600 mt-1">{submoduleRun.error || 'Unknown error'}</p>
+      </div>
+    );
+  }
+
+  // Completed or Approved — show results with checkboxes
+  if (flatItems.length === 0) {
+    return <p className="text-sm text-gray-400">No results returned.</p>;
+  }
+
+  const opIcon = DATA_OP_ICONS[dataOperation] || '\uFF1D';
+  const columns = Object.keys(flatItems[0]).filter((k) => k !== 'entity_name');
+  const summary = submoduleRun.output_data?.summary;
+
+  return (
+    <div className="flex flex-col gap-3 h-full">
+      {/* Summary */}
+      {summary && (
+        <div className="flex-shrink-0 text-xs text-gray-600">
+          {summary.total_items} items across {summary.total_entities} entities
+          {summary.errors.length > 0 && (
+            <span className="text-red-500 ml-2">{summary.errors.length} errors</span>
+          )}
+        </div>
+      )}
+
+      {/* Bulk actions */}
+      <div className="flex items-center gap-3 flex-shrink-0">
+        <button onClick={onSelectAll} className="text-xs text-[#0891B2] hover:underline">
+          Select all
+        </button>
+        <button onClick={onDeselectAll} className="text-xs text-[#0891B2] hover:underline">
+          Deselect all
+        </button>
+        <span className="text-xs text-gray-400 ml-auto">
+          {checkedKeys.size} approved \u00b7 {flatItems.length - checkedKeys.size} rejected
+        </span>
+      </div>
+
+      {/* Item list with checkboxes */}
+      <div className="flex-1 min-h-0 overflow-y-auto border border-gray-200 rounded">
+        {flatItems.map((item, idx) => {
+          const key = String(item[itemKey] ?? `row-${idx}`);
+          const isChecked = checkedKeys.has(key);
+
+          return (
+            <div
+              key={key}
+              className={`flex items-center gap-2 px-3 py-1.5 text-xs border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${
+                isChecked ? '' : 'opacity-50'
+              }`}
+              onClick={() => onToggleItem(key)}
+            >
+              <input
+                type="checkbox"
+                checked={isChecked}
+                onChange={() => onToggleItem(key)}
+                className="w-3.5 h-3.5 rounded border-gray-300 text-[#0891B2] focus:ring-[#0891B2] cursor-pointer"
+                onClick={(e) => e.stopPropagation()}
+              />
+              <span className="w-4 text-center text-[10px]" title={dataOperation}>{opIcon}</span>
+              <span className="truncate flex-1 text-gray-700" title={key}>{key}</span>
+              <span className="text-gray-400 truncate max-w-[120px]">{String(item.entity_name)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
+// --- Spinner ---
+
+function Spinner() {
+  return (
+    <svg className="animate-spin w-5 h-5 text-[#E11D73]" viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
   );
 }

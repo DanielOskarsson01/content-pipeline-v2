@@ -66,3 +66,46 @@ CREATE TABLE IF NOT EXISTS step_context (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(run_id, step_index)
 );
+
+-- Phase 7: Submodule runs — one execution of one submodule within a step
+CREATE TABLE IF NOT EXISTS submodule_runs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  stage_id UUID NOT NULL REFERENCES pipeline_stages(id),
+  run_id UUID NOT NULL REFERENCES pipeline_runs(id),
+  submodule_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  options JSONB,
+  input_data JSONB,
+  output_data JSONB,
+  output_render_schema JSONB,
+  approved_items JSONB,
+  progress JSONB,
+  error TEXT,
+  logs JSONB,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_submodule_runs_run_id ON submodule_runs(run_id);
+CREATE INDEX IF NOT EXISTS idx_submodule_runs_stage_id ON submodule_runs(stage_id);
+CREATE INDEX IF NOT EXISTS idx_submodule_runs_stage_submodule ON submodule_runs(stage_id, submodule_id);
+
+-- Prevent concurrent execution: only one pending/running run per submodule per pipeline run
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_run_per_submodule
+  ON submodule_runs(run_id, submodule_id)
+  WHERE status IN ('pending', 'running');
+
+-- Phase 7: Decision log — every human judgment recorded
+CREATE TABLE IF NOT EXISTS decision_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id UUID NOT NULL REFERENCES pipeline_runs(id),
+  step_index INTEGER NOT NULL,
+  submodule_id TEXT,
+  entity_id TEXT,
+  decision TEXT NOT NULL,
+  reason TEXT,
+  context JSONB,
+  decided_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_log_run_id ON decision_log(run_id);

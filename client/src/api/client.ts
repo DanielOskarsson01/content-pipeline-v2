@@ -50,6 +50,7 @@ import type {
   Project, CreateProjectInput, CreateProjectResponse,
   RunWithStages, PipelineStage, StepApproveResponse, StepSkipResponse,
   CategoryGroups, SubmoduleConfig,
+  SubmoduleRun, SubmoduleLatestRunMap, ApproveSubmoduleRunResponse,
 } from '../types/step';
 
 export const api = {
@@ -85,4 +86,20 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(config),
     }),
+
+  // Submodule execution (Phase 7)
+  executeSubmodule: (runId: string, stepIndex: number, submoduleId: string) =>
+    apiFetch<{ submodule_run_id: string; status: string }>(
+      `/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/run`,
+      { method: 'POST' }
+    ),
+  getSubmoduleRun: (submoduleRunId: string) =>
+    apiFetch<SubmoduleRun>(`/api/submodule-runs/${submoduleRunId}`),
+  approveSubmoduleRun: (submoduleRunId: string, approvedItemKeys: string[]) =>
+    apiFetch<ApproveSubmoduleRunResponse>(`/api/submodule-runs/${submoduleRunId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ approved_item_keys: approvedItemKeys }),
+    }),
+  getLatestSubmoduleRuns: (runId: string, stepIndex: number) =>
+    apiFetch<SubmoduleLatestRunMap>(`/api/runs/${runId}/steps/${stepIndex}/submodule-runs/latest`),
 };

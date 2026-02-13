@@ -15,6 +15,9 @@ interface PanelStore {
   activeSubmoduleId: string | null;
   activeCategoryKey: string | null;
 
+  // Active submodule run ID — for polling resume on panel reopen
+  activeSubmoduleRunId: string | null;
+
   // Accordion state
   panelAccordion: PanelAccordion;
 
@@ -22,12 +25,14 @@ interface PanelStore {
   openSubmodulePanel: (submoduleId: string, categoryKey: string) => void;
   closeSubmodulePanel: () => void;
   setPanelAccordion: (accordion: PanelAccordion) => void;
+  setActiveSubmoduleRunId: (runId: string | null) => void;
 }
 
 export const usePanelStore = create<PanelStore>((set) => ({
   submodulePanelOpen: false,
   activeSubmoduleId: null,
   activeCategoryKey: null,
+  activeSubmoduleRunId: null,
   panelAccordion: 'input',
 
   openSubmodulePanel: (submoduleId, categoryKey) =>
@@ -41,8 +46,12 @@ export const usePanelStore = create<PanelStore>((set) => ({
   closeSubmodulePanel: () =>
     set({
       submodulePanelOpen: false,
+      // Keep activeSubmoduleRunId so polling can resume on reopen
     }),
 
   setPanelAccordion: (accordion) =>
     set({ panelAccordion: accordion }),
+
+  setActiveSubmoduleRunId: (runId) =>
+    set({ activeSubmoduleRunId: runId }),
 }));

@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import type { PipelineStage, SubmoduleManifest } from '../../types/step';
 import { useStepSubmodules } from '../../hooks/useSubmodules';
 import { useSubmoduleConfig, useSaveSubmoduleConfig } from '../../hooks/useSubmoduleConfig';
+import { useLatestSubmoduleRuns } from '../../hooks/useSubmoduleRuns';
 import { usePanelStore } from '../../stores/panelStore';
 import { CategoryCardGrid } from '../shared/CategoryCardGrid';
 import { SubmodulePanel } from '../shared/SubmodulePanel';
@@ -20,6 +21,7 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
   const isCompleted = stage.status === 'completed';
   const { data: categories, isLoading: submodulesLoading } = useStepSubmodules(stage.step_index);
   const { activeSubmoduleId } = usePanelStore();
+  const { data: latestRuns } = useLatestSubmoduleRuns(stage.run_id, stage.step_index);
 
   // Flatten categories to find active submodule by ID
   const activeSubmodule: SubmoduleManifest | null = useMemo(() => {
@@ -55,7 +57,7 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
           <p className="text-gray-400 text-sm">Loading submodules...</p>
         </div>
       ) : (
-        <CategoryCardGrid categories={categories || {}} />
+        <CategoryCardGrid categories={categories || {}} latestRuns={latestRuns} />
       )}
 
       {/* StepSummary — empty for now (populated when submodules have runs) */}

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { CategoryGroups, SubmoduleManifest } from '../../types/step';
+import type { CategoryGroups, SubmoduleManifest, SubmoduleLatestRunMap } from '../../types/step';
 import { usePanelStore } from '../../stores/panelStore';
 
 const DATA_OP_ICONS: Record<string, string> = {
@@ -10,9 +10,10 @@ const DATA_OP_ICONS: Record<string, string> = {
 
 interface CategoryCardGridProps {
   categories: CategoryGroups;
+  latestRuns?: SubmoduleLatestRunMap;
 }
 
-export function CategoryCardGrid({ categories }: CategoryCardGridProps) {
+export function CategoryCardGrid({ categories, latestRuns = {} }: CategoryCardGridProps) {
   const { openSubmodulePanel } = usePanelStore();
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
 
@@ -66,6 +67,7 @@ export function CategoryCardGrid({ categories }: CategoryCardGridProps) {
                       submodule={sub}
                       categoryKey={catKey}
                       onOpen={openSubmodulePanel}
+                      latestRun={latestRuns[sub.id]}
                     />
                   ))}
                 </div>
@@ -82,10 +84,12 @@ function SubmoduleRow({
   submodule,
   categoryKey,
   onOpen,
+  latestRun,
 }: {
   submodule: SubmoduleManifest;
   categoryKey: string;
   onOpen: (submoduleId: string, categoryKey: string) => void;
+  latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null };
 }) {
   const opIcon = DATA_OP_ICONS[submodule.data_operation_default] || '＝';
 
@@ -103,9 +107,8 @@ function SubmoduleRow({
           <p className="text-[10px] text-gray-400">{submodule.description}</p>
         </div>
       </div>
-      {/* Status: idle (Phase 7+ populates real status) */}
       <div className="flex items-center gap-2">
-        <span className="text-[10px] text-gray-300">idle</span>
+        <SubmoduleStatusBadge latestRun={latestRun} />
         <svg
           className="w-4 h-4 text-gray-400 opacity-50 group-hover:opacity-100"
           fill="currentColor"
@@ -120,4 +123,43 @@ function SubmoduleRow({
       </div>
     </div>
   );
+}
+
+function SubmoduleStatusBadge({ latestRun }: { latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null } }) {
+  if (!latestRun) {
+    return <span className="text-[10px] text-gray-300">idle</span>;
+  }
+
+  switch (latestRun.status) {
+    case 'pending':
+      return <span className="text-[10px] text-amber-400">queued</span>;
+    case 'running':
+      return (
+        <span className="flex items-center gap-1 text-[10px] text-sky-500">
+          <span className="inline-block w-3 h-3 border-2 border-sky-400 border-t-transparent rounded-full animate-spin" />
+          {latestRun.progress
+            ? `${latestRun.progress.current}/${latestRun.progress.total}`
+            : 'running'}
+        </span>
+      );
+    case 'completed':
+      return (
+        <span className="text-[10px] font-medium text-amber-500">
+          {latestRun.result_count} result{latestRun.result_count !== 1 ? 's' : ''}
+        </span>
+      );
+    case 'approved':
+      return (
+        <span className="flex items-center gap-1 text-[10px] font-medium text-emerald-500">
+          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+          </svg>
+          {latestRun.approved_count}
+        </span>
+      );
+    case 'failed':
+      return <span className="text-[10px] font-medium text-red-500">failed</span>;
+    default:
+      return <span className="text-[10px] text-gray-300">idle</span>;
+  }
 }
