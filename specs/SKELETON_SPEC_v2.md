@@ -27,6 +27,8 @@ The skeleton is the building. Submodules are the apartments.
 
 Each submodule declares all of that through its manifest and component definitions. The skeleton renders the slot. The submodule fills it.
 
+**Rendering rule:** The skeleton displays submodule-provided content as-is. It never constructs, composes, or interprets domain-specific text. Summary lines, result descriptions, and status labels come from `output_data.summary.description` — written by the submodule's `execute()`. If the skeleton is assembling strings like "X items across Y entities — no duplicates", that's a bug. The skeleton may fall back to basic counts (`total_items`, `total_entities`) when `description` is absent, but never adds domain-specific context.
+
 ---
 
 ## Part 2: Two-Repo Architecture

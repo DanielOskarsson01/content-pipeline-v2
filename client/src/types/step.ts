@@ -121,7 +121,7 @@ export interface SubmoduleRun {
 // Output shape from execute() — per-entity results + summary
 export interface SubmoduleOutput {
   results: SubmoduleEntityResult[];
-  summary: { total_entities: number; total_items: number; errors: string[] };
+  summary: { total_entities: number; total_items: number; errors: string[]; description?: string; [key: string]: unknown };
 }
 
 export interface SubmoduleEntityResult {
@@ -138,6 +138,7 @@ export interface SubmoduleLatestRun {
   progress: { current: number; total: number; message: string } | null;
   result_count: number;
   approved_count: number;
+  description?: string;
 }
 
 export type SubmoduleLatestRunMap = Record<string, SubmoduleLatestRun>;

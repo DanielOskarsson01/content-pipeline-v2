@@ -46,7 +46,29 @@ router.post('/', upload.single('file'), async (req, res) => {
   // Parse CSV
   let records;
   try {
-    const content = req.file.buffer.toString('utf-8');
+    let content = req.file.buffer.toString('utf-8');
+
+    // Detect double-encoded CSV: when a spreadsheet app (Numbers/Excel) re-saves a CSV,
+    // it can wrap each row as a single quoted field with doubled internal quotes.
+    // e.g. header becomes: "url,""priority"",""last_modified"""  (one field instead of four)
+    // Fix: strip the outer quoting layer and un-escape doubled quotes.
+    const firstLine = content.split(/\r?\n/)[0];
+    const testParse = parse(firstLine + '\n', { columns: false, skip_empty_lines: true, bom: true, relax_column_count: true });
+    if (testParse.length > 0 && testParse[0].length === 1 && testParse[0][0].includes(',')) {
+      console.log('[stepContext] Detected double-encoded CSV — stripping outer quoting layer');
+      // Each line is a single quoted field. Un-wrap: strip outer quotes and unescape "" → "
+      const lines = content.split(/\r?\n/);
+      const fixed = lines.map((line) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+          // Remove outer quotes and unescape doubled quotes
+          return trimmed.slice(1, -1).replace(/""/g, '"');
+        }
+        return trimmed;
+      });
+      content = fixed.join('\n');
+    }
+
     records = parse(content, {
       columns: true,
       skip_empty_lines: true,

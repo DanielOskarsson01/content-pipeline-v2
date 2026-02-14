@@ -203,6 +203,7 @@ export function ContentRenderer({
             const entity = entities[virtualItem.index];
             const key = String(entity[itemKey] ?? `row-${virtualItem.index}`);
             const isChecked = selectable ? checkedKeys!.has(key) : true;
+            const isDuplicate = entity.status === 'duplicate';
 
             return (
               <div
@@ -217,8 +218,9 @@ export function ContentRenderer({
                   display: 'grid',
                   gridTemplateColumns: gridTemplate,
                 }}
-                className={`items-center hover:bg-gray-50 text-xs border-b border-gray-100 ${
-                  selectable && !isChecked ? 'opacity-50' : ''
+                className={`items-center text-xs border-b border-gray-100 ${
+                  isDuplicate ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-gray-50'
+                } ${selectable && !isChecked ? 'opacity-50' : ''
                 } ${selectable ? 'cursor-pointer' : ''}`}
                 onClick={selectable ? () => toggleItem(key) : undefined}
               >

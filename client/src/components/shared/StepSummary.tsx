@@ -3,6 +3,7 @@ interface SubmoduleSummaryRow {
   dataOperation: 'add' | 'remove' | 'transform';
   resultCount: number;
   status: string;
+  description?: string;
 }
 
 interface StepSummaryProps {
@@ -30,7 +31,9 @@ export function StepSummary({ submodules }: StepSummaryProps) {
           <div key={s.name} className="flex items-center gap-2 text-sm text-gray-700">
             <span>{OP_ICON[s.dataOperation] || '＝'}</span>
             <span>{s.name}:</span>
-            <span className="font-medium">{s.resultCount} items approved</span>
+            <span className="font-medium">
+              {s.description || `${s.resultCount} items approved`}
+            </span>
           </div>
         ))}
       </div>

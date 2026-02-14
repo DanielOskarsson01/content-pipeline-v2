@@ -225,6 +225,7 @@ tools.progress.update(3, 5, "Processing entity 3 of 5");
   summary: {
     total_entities: 2,
     total_items: 284,
+    description: "284 URLs found across 2 companies",
     errors: []
   }
 }
@@ -232,7 +233,7 @@ tools.progress.update(3, 5, "Processing entity 3 of 5");
 
 **Per-entity grouping required.** The skeleton displays results grouped by entity.
 
-**Summary required.** The skeleton uses it for the status line and card badge.
+**Summary required.** The skeleton uses `summary` for the status line, card badge, and StepSummary rows. The `description` field is a human-readable summary written by the submodule — the skeleton displays it as-is, never constructs its own. Each submodule knows best how to describe its own results (URLs, articles, scores, etc.). If `description` is omitted, the skeleton falls back to basic counts.
 
 ### Error Handling
 
@@ -244,7 +245,7 @@ tools.progress.update(3, 5, "Processing entity 3 of 5");
     { entity_name: "Company A", items: [...], meta: { total_found: 142 } },
     { entity_name: "Bad Domain", items: [], error: "DNS resolution failed", meta: { errors: 1 } }
   ],
-  summary: { total_entities: 2, total_items: 142, errors: ["Bad Domain: DNS resolution failed"] }
+  summary: { total_entities: 2, total_items: 142, description: "142 items from 1 of 2 entities (1 failed)", errors: ["Bad Domain: DNS resolution failed"] }
 }
 ```
 
@@ -470,6 +471,7 @@ async function execute(input, options, tools) {
     summary: {
       total_entities: input.entities.length,
       total_items: totalItems,
+      description: `${totalItems} feed items from ${input.entities.length} sources${errors.length ? ` (${errors.length} failed)` : ''}`,
       errors
     }
   };

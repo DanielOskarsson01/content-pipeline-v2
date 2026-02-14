@@ -78,9 +78,9 @@ router.get('/:runId/steps/:stepIndex/submodule-configs', async (req, res, next) 
 
 /**
  * POST /api/runs/:runId/steps/:stepIndex/approve
- * Approve step — basic version (Phase 3)
- * Step 0: just advance. Steps 1-10: require approved submodules (Phase 7+).
- * For Phase 3, Step 0 approval is unconditional.
+ * Approve step — full version (Phase 8).
+ * Step 0: unconditional advance. Steps 1-10: require at least one approved submodule.
+ * Finalizes working_pool → output_data, flows data to next step.
  */
 router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
   try {
@@ -99,10 +99,51 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
     if (!stage) return res.status(404).json({ error: 'Step not found' });
     if (stage.status !== 'active') return res.status(400).json({ error: 'Step is not active' });
 
-    // Mark current step completed
+    // For steps with submodules (step > 0): validate at least one approved submodule_run
+    let approvedRuns = [];
+    if (stepIndex > 0) {
+      const { data, error } = await db
+        .from('submodule_runs')
+        .select('id, submodule_id, approved_items, output_render_schema')
+        .eq('stage_id', stage.id)
+        .eq('status', 'approved');
+
+      if (error) throw error;
+      approvedRuns = data || [];
+
+      if (approvedRuns.length === 0) {
+        return res.status(400).json({ error: 'At least one submodule must be approved before approving the step' });
+      }
+    }
+
+    // Compute output_render_schema (union of approved submodule schemas)
+    let stageOutputRenderSchema = stage.output_render_schema;
+    if (approvedRuns.length > 0) {
+      const mergedSchema = {};
+      for (const run of approvedRuns) {
+        if (run.output_render_schema) {
+          Object.assign(mergedSchema, run.output_render_schema);
+        }
+      }
+      if (!mergedSchema.display_type) {
+        mergedSchema.display_type = 'table';
+      }
+      stageOutputRenderSchema = mergedSchema;
+    }
+
+    // Finalize pool → output_data
+    const outputData = stage.working_pool || [];
+    const itemsForwarded = Array.isArray(outputData) ? outputData.length : 0;
+
+    // Mark current step completed with finalized output
     const { error: completeErr } = await db
       .from('pipeline_stages')
-      .update({ status: 'completed', completed_at: new Date().toISOString() })
+      .update({
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        output_data: outputData,
+        output_render_schema: stageOutputRenderSchema,
+      })
       .eq('id', stage.id);
 
     if (completeErr) throw completeErr;
@@ -113,14 +154,14 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
     if (!isLastStep) {
       nextStep = stepIndex + 1;
 
-      // Activate next step + copy output_data -> input_data
+      // Activate next step: copy output → input, initialize working_pool
       const { error: nextErr } = await db
         .from('pipeline_stages')
         .update({
           status: 'active',
-          input_data: stage.output_data || stage.working_pool,
-          input_render_schema: stage.output_render_schema,
-          working_pool: stage.output_data || stage.working_pool,
+          input_data: outputData,
+          input_render_schema: stageOutputRenderSchema,
+          working_pool: outputData,
           started_at: new Date().toISOString(),
         })
         .eq('run_id', runId)
@@ -145,10 +186,24 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
       if (runErr) throw runErr;
     }
 
+    // Log decision
+    await db
+      .from('decision_log')
+      .insert({
+        run_id: runId,
+        step_index: stepIndex,
+        decision: 'step_approved',
+        context: {
+          approved_submodule_count: approvedRuns.length,
+          items_forwarded: itemsForwarded,
+          next_step: nextStep,
+        },
+      });
+
     res.json({
       step_completed: stepIndex,
       next_step: nextStep,
-      items_forwarded: 0,
+      items_forwarded: itemsForwarded,
     });
   } catch (err) { next(err); }
 });
@@ -224,6 +279,19 @@ router.post('/:runId/steps/:stepIndex/skip', async (req, res, next) => {
 
       if (runErr) throw runErr;
     }
+
+    // Log decision
+    await db
+      .from('decision_log')
+      .insert({
+        run_id: runId,
+        step_index: stepIndex,
+        decision: 'step_skipped',
+        context: {
+          items_passed_through: Array.isArray(stage.input_data) ? stage.input_data.length : 0,
+          next_step: nextStep,
+        },
+      });
 
     res.json({
       step_skipped: stepIndex,

@@ -62,9 +62,12 @@ executeRouter.post('/run', async (req, res) => {
     //    3. step_context (shared CSV upload, may exist without explicit save)
     let inputData = null;
 
+    console.log(`[execute] Resolving input for ${submoduleId} at step ${stepIdx}`);
+
     // Priority 0: Entities sent directly in request body (most reliable — no save-then-read)
     if (req.body?.entities?.length > 0) {
       inputData = { entities: req.body.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+      console.log(`[execute] Priority 0: ${req.body.entities.length} entities from request body`);
     }
 
     // Priority 1: Check saved input_config (user explicitly saved via SAVE INPUT)
@@ -83,6 +86,7 @@ executeRouter.post('/run', async (req, res) => {
         if (inputConfig.source === 'textarea' && inputConfig.entities?.length > 0) {
           // Textarea: entities stored directly in input_config
           inputData = { entities: inputConfig.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+          console.log(`[execute] Priority 1: ${inputConfig.entities.length} entities from textarea config`);
         } else if (inputConfig.source === 'csv') {
           // CSV: load parsed entities from step_context
           const { data: ctx } = await db
@@ -94,12 +98,13 @@ executeRouter.post('/run', async (req, res) => {
 
           if (ctx?.entities) {
             inputData = { entities: ctx.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+            console.log(`[execute] Priority 1: ${ctx.entities.length} entities from CSV config`);
           }
         }
       }
     }
 
-    // Priority 2: Previous step output
+    // Priority 2: Previous step output (re-group flat pool items into entity format)
     if (!inputData && stepIdx > 0) {
       const { data: prevStage } = await db
         .from('pipeline_stages')
@@ -108,8 +113,23 @@ executeRouter.post('/run', async (req, res) => {
         .eq('step_index', stepIdx - 1)
         .maybeSingle();
 
-      if (prevStage?.output_data) {
-        inputData = { entities: prevStage.output_data, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+      console.log(`[execute] Priority 2: prevStage exists=${!!prevStage}, output_data type=${prevStage?.output_data ? (Array.isArray(prevStage.output_data) ? `array(${prevStage.output_data.length})` : typeof prevStage.output_data) : 'null'}`);
+
+      if (prevStage?.output_data && Array.isArray(prevStage.output_data) && prevStage.output_data.length > 0) {
+        // Working pool is a flat array of items with entity_name.
+        // Re-group into entity format: [{ name, items: [...] }]
+        const poolItems = prevStage.output_data;
+        const entityMap = new Map();
+        for (const item of poolItems) {
+          const name = item.entity_name || 'unknown';
+          if (!entityMap.has(name)) {
+            entityMap.set(name, { name, items: [] });
+          }
+          entityMap.get(name).items.push(item);
+        }
+        const groupedEntities = Array.from(entityMap.values());
+        inputData = { entities: groupedEntities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+        console.log(`[execute] Priority 2: Re-grouped ${poolItems.length} pool items into ${groupedEntities.length} entities. First item keys: ${poolItems.length > 0 ? Object.keys(poolItems[0]).join(', ') : 'n/a'}`);
       }
     }
 
@@ -124,12 +144,16 @@ executeRouter.post('/run', async (req, res) => {
 
       if (ctx?.entities) {
         inputData = { entities: ctx.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+        console.log(`[execute] Priority 3: ${ctx.entities.length} entities from step_context`);
       }
     }
 
     if (!inputData) {
+      console.log(`[execute] NO INPUT FOUND for ${submoduleId} at step ${stepIdx}, run ${runId}`);
       return res.status(400).json({ error: 'No input data available. Upload data or ensure previous step has output.' });
     }
+
+    console.log(`[execute] Final input: ${inputData.entities.length} entities for ${submoduleId}`);
 
     // 5. Resolve options
     const { data: optConfig } = await db
@@ -224,8 +248,8 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
     if (!Array.isArray(approved_item_keys)) {
       return res.status(400).json({ error: 'approved_item_keys must be an array' });
     }
-    if (approved_item_keys.length > 10000) {
-      return res.status(400).json({ error: 'approved_item_keys exceeds maximum length (10000)' });
+    if (approved_item_keys.length > 50000) {
+      return res.status(400).json({ error: 'approved_item_keys exceeds maximum length (50000)' });
     }
     if (approved_item_keys.some((k) => typeof k !== 'string' && typeof k !== 'number')) {
       return res.status(400).json({ error: 'approved_item_keys must contain only strings or numbers' });
@@ -398,6 +422,7 @@ latestRunsRouter.get('/latest', async (req, res) => {
         const outputResults = run.output_data?.results || [];
         const resultCount = outputResults.reduce((sum, r) => sum + (r.items?.length || 0), 0);
         const approvedCount = run.approved_items?.length || 0;
+        const outputSummary = run.output_data?.summary || {};
 
         latest[run.submodule_id] = {
           id: run.id,
@@ -405,6 +430,7 @@ latestRunsRouter.get('/latest', async (req, res) => {
           progress: run.progress,
           result_count: resultCount,
           approved_count: approvedCount,
+          description: outputSummary.description || null,
         };
       }
     }

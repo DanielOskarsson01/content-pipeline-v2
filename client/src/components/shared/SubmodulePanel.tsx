@@ -32,6 +32,8 @@ interface SubmodulePanelProps {
   onDataOperationChange: (op: 'add' | 'remove' | 'transform') => void;
   savedConfig: SubmoduleConfig | undefined;
   onSaveConfig: (config: Partial<SubmoduleConfig>) => void;
+  previousStepData: Record<string, unknown>[] | null;
+  previousStepRenderSchema: Record<string, unknown> | null;
 }
 
 function PanelAccordionItem({
@@ -89,6 +91,8 @@ export function SubmodulePanel({
   onDataOperationChange,
   savedConfig,
   onSaveConfig,
+  previousStepData,
+  previousStepRenderSchema,
 }: SubmodulePanelProps) {
   const queryClient = useQueryClient();
   const showToast = useAppStore((s) => s.showToast);
@@ -151,7 +155,11 @@ export function SubmodulePanel({
 
   // Initialize checked keys when results arrive — only for selectable mode
   useEffect(() => {
-    if (flatItems.length === 0 || !isSelectable) return;
+    if (!isSelectable) return;
+    if (flatItems.length === 0) {
+      setCheckedKeys(new Set());
+      return;
+    }
 
     if (submoduleRun?.status === 'approved' && submoduleRun.approved_items) {
       setCheckedKeys(new Set(submoduleRun.approved_items));
@@ -183,8 +191,17 @@ export function SubmodulePanel({
 
   // Determine which entities to show in content preview
   const hasStepContext = !!stepContext?.entities && stepContext.entities.length > 0;
-  const previewEntities = inputSource === 'textarea' ? textareaEntities : (hasStepContext ? stepContext!.entities : []);
+  const hasPreviousStepData = !!previousStepData && previousStepData.length > 0;
+  const previewEntities = inputSource === 'textarea'
+    ? textareaEntities
+    : hasStepContext
+      ? stepContext!.entities
+      : hasPreviousStepData
+        ? previousStepData!
+        : [];
   const hasPreviewData = previewEntities.length > 0;
+  // Track whether we're showing previous step data (for render schema and label)
+  const showingPreviousStepData = !inputSource && !hasStepContext && hasPreviousStepData;
 
   // Mutual exclusion handlers
   const handleTextareaChange = useCallback((value: string) => {
@@ -398,10 +415,16 @@ export function SubmodulePanel({
 
   // --- Input badge ---
   const inputBadge = hasPreviewData
-    ? `${previewEntities.length} entities`
-    : undefined;
+    ? showingPreviousStepData
+      ? `${previewEntities.length} from previous step`
+      : `${previewEntities.length} entities`
+    : stepIndex > 0
+      ? 'From previous step'
+      : undefined;
 
   // --- Results badge ---
+  const summary = submoduleRun?.output_data?.summary;
+
   const resultsBadge = isRunning
     ? 'running'
     : isCompleted
@@ -410,11 +433,9 @@ export function SubmodulePanel({
         : `${flatItems.length} items`
       : undefined;
 
-  // --- Results summary label ---
-  const summary = submoduleRun?.output_data?.summary;
-  const resultsLabel = summary
-    ? `${summary.total_items} items across ${summary.total_entities} entities`
-    : undefined;
+  // --- Results summary label — submodule-authored, skeleton just renders it ---
+  const resultsLabel = summary?.description
+    || (summary ? `${summary.total_items} items across ${summary.total_entities} entities` : undefined);
 
   return (
     <div className="fixed inset-0 z-50">
@@ -510,18 +531,29 @@ export function SubmodulePanel({
                 </button>
               )}
 
-              {/* Content preview */}
+              {/* Content preview — shows textarea, CSV, or previous step data */}
               {hasPreviewData && (
                 <div className="flex-1 min-h-0">
+                  {showingPreviousStepData && (
+                    <p className="text-xs text-blue-600 font-medium mb-1">Input from previous step — override by entering data above</p>
+                  )}
                   <ContentRenderer
                     entities={previewEntities}
+                    renderSchema={showingPreviousStepData ? previousStepRenderSchema as RenderSchema | undefined : undefined}
                     fullHeight
-                    label={`${previewEntities.length} entities \u00d7 ${Object.keys(previewEntities[0] || {}).length} columns`}
+                    label={`${previewEntities.length} items \u00d7 ${Object.keys(previewEntities[0] || {}).length} columns`}
                   />
                 </div>
               )}
 
-              {!hasPreviewData && (
+              {!hasPreviewData && stepIndex > 0 && (
+                <div className="bg-blue-50 rounded border border-blue-200 p-3 flex-shrink-0">
+                  <p className="text-xs text-blue-700 font-medium">No input data available</p>
+                  <p className="text-xs text-blue-500 mt-1">Previous step has no output yet. Complete and approve the previous step, or upload data above.</p>
+                </div>
+              )}
+
+              {!hasPreviewData && stepIndex === 0 && (
                 <div className="text-center py-4 flex-shrink-0">
                   <p className="text-xs text-gray-400">No input data. Upload a file or enter data above.</p>
                 </div>
@@ -682,7 +714,7 @@ function ResultsContent({
   dataOperation: string;
   checkedKeys: Set<string>;
   onCheckedKeysChange?: (keys: Set<string>) => void;
-  summary: { total_entities: number; total_items: number; errors: string[] } | undefined;
+  summary: { total_entities: number; total_items: number; errors: string[]; description?: string; [key: string]: unknown } | undefined;
   resultsLabel: string | undefined;
   onChangeInput: () => void;
   onChangeOptions: () => void;
