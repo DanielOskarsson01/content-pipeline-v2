@@ -86,12 +86,9 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
     });
   };
 
-  const handleSaveConfig = (config: Partial<NonNullable<typeof savedConfig>>) => {
-    saveConfig.mutate(config, {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: ['submoduleConfigs', stage.run_id, stage.step_index] });
-      },
-    });
+  const handleSaveConfig = async (config: Partial<NonNullable<typeof savedConfig>>) => {
+    await saveConfig.mutateAsync(config);
+    queryClient.invalidateQueries({ queryKey: ['submoduleConfigs', stage.run_id, stage.step_index] });
   };
 
   // CategoryCardGrid data op toggle — saves for any submodule (not just the active one)

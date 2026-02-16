@@ -31,7 +31,7 @@ interface SubmodulePanelProps {
   dataOperation: 'add' | 'remove' | 'transform';
   onDataOperationChange: (op: 'add' | 'remove' | 'transform') => void;
   savedConfig: SubmoduleConfig | undefined;
-  onSaveConfig: (config: Partial<SubmoduleConfig>) => void;
+  onSaveConfig: (config: Partial<SubmoduleConfig>) => Promise<unknown>;
   previousStepData: Record<string, unknown>[] | null;
   previousStepRenderSchema: Record<string, unknown> | null;
 }
@@ -386,20 +386,20 @@ export function SubmodulePanel({
     }
 
     approveMutation.mutate(
-      { submoduleRunId: activeSubmoduleRunId, approvedItemKeys: approvedKeys },
+      { submoduleRunId: activeSubmoduleRunId, approvedItemKeys: approvedKeys, runId: runId!, stepIndex },
       {
         onSuccess: () => {
           closeSubmodulePanel();
-          queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns'] });
+          queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', runId, stepIndex] });
         },
       }
     );
   };
 
-  // NEXT button handler — saves dirty options, then runs (handleRunTask sends entities directly)
-  const handleNext = () => {
+  // NEXT button handler — awaits save before running (R001 fix: prevents worker reading stale options)
+  const handleNext = async () => {
     if (optionsDirty) {
-      onSaveConfig({ options: localOptions as Record<string, unknown> });
+      await onSaveConfig({ options: localOptions as Record<string, unknown> });
       setOptionsDirty(false);
     }
     handleRunTask();

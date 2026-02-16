@@ -1,11 +1,24 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { parse } from 'csv-parse/sync';
+import { parse } from 'csv-parse';
 import supabase from '../services/db.js';
 import { getSubmodules } from '../services/moduleLoader.js';
 
 const router = Router({ mergeParams: true });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+/**
+ * R008 fix: async CSV parse wrapper (non-blocking).
+ * Uses csv-parse callback API instead of csv-parse/sync.
+ */
+function parseCsvAsync(content, options) {
+  return new Promise((resolve, reject) => {
+    parse(content, options, (err, records) => {
+      if (err) reject(err);
+      else resolve(records);
+    });
+  });
+}
 
 /**
  * Compute the union of requires_columns for all submodules in a step.
@@ -53,7 +66,7 @@ router.post('/', upload.single('file'), async (req, res) => {
     // e.g. header becomes: "url,""priority"",""last_modified"""  (one field instead of four)
     // Fix: strip the outer quoting layer and un-escape doubled quotes.
     const firstLine = content.split(/\r?\n/)[0];
-    const testParse = parse(firstLine + '\n', { columns: false, skip_empty_lines: true, bom: true, relax_column_count: true });
+    const testParse = await parseCsvAsync(firstLine + '\n', { columns: false, skip_empty_lines: true, bom: true, relax_column_count: true });
     if (testParse.length > 0 && testParse[0].length === 1 && testParse[0][0].includes(',')) {
       console.log('[stepContext] Detected double-encoded CSV — stripping outer quoting layer');
       // Each line is a single quoted field. Un-wrap: strip outer quotes and unescape "" → "
@@ -69,7 +82,7 @@ router.post('/', upload.single('file'), async (req, res) => {
       content = fixed.join('\n');
     }
 
-    records = parse(content, {
+    records = await parseCsvAsync(content, {
       columns: true,
       skip_empty_lines: true,
       trim: true,

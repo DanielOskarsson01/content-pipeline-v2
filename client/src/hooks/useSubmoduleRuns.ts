@@ -58,12 +58,12 @@ export function useApproveSubmoduleRun() {
   const showToast = useAppStore((s) => s.showToast);
 
   return useMutation({
-    mutationFn: ({ submoduleRunId, approvedItemKeys }: { submoduleRunId: string; approvedItemKeys: string[] }) =>
+    mutationFn: ({ submoduleRunId, approvedItemKeys }: { submoduleRunId: string; approvedItemKeys: string[]; runId: string; stepIndex: number }) =>
       api.approveSubmoduleRun(submoduleRunId, approvedItemKeys),
-    onSuccess: (data) => {
-      // Invalidate all relevant queries
-      queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns'] });
-      queryClient.invalidateQueries({ queryKey: ['submoduleRun'] });
+    onSuccess: (data, vars) => {
+      // R004 fix: scope invalidation to current run/step only
+      queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', vars.runId, vars.stepIndex] });
+      queryClient.invalidateQueries({ queryKey: ['submoduleRun', vars.submoduleRunId] });
       showToast(`Approved — ${data.approved_count} items, pool: ${data.pool_count}`, 'success');
     },
     onError: (error: Error) => {

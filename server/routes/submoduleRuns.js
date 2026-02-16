@@ -190,13 +190,23 @@ executeRouter.post('/run', async (req, res) => {
       return res.status(500).json({ error: 'Failed to create execution record' });
     }
 
-    // 7. Enqueue BullMQ job
-    await enqueueSubmoduleJob({
-      submoduleRunId: subRun.id,
-      submoduleId,
-      stepIndex: stepIdx,
-      cost: manifest.cost || 'medium',
-    });
+    // 7. Enqueue BullMQ job (R002 fix: clean up pending row if enqueue fails)
+    try {
+      await enqueueSubmoduleJob({
+        submoduleRunId: subRun.id,
+        submoduleId,
+        stepIndex: stepIdx,
+        cost: manifest.cost || 'medium',
+      });
+    } catch (enqueueErr) {
+      // Enqueue failed (Redis down, BullMQ error) — mark row as failed to avoid orphaned pending
+      console.error(`[execute] BullMQ enqueue failed for submodule_run ${subRun.id}:`, enqueueErr);
+      await db
+        .from('submodule_runs')
+        .update({ status: 'failed', error: `Enqueue failed: ${enqueueErr.message}` })
+        .eq('id', subRun.id);
+      return res.status(500).json({ error: `Failed to enqueue job: ${enqueueErr.message}` });
+    }
 
     res.json({ submodule_run_id: subRun.id, status: 'pending' });
   } catch (err) {

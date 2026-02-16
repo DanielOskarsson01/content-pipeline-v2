@@ -135,56 +135,18 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
     const outputData = stage.working_pool || [];
     const itemsForwarded = Array.isArray(outputData) ? outputData.length : 0;
 
-    // Mark current step completed with finalized output
-    const { error: completeErr } = await db
-      .from('pipeline_stages')
-      .update({
-        status: 'completed',
-        completed_at: new Date().toISOString(),
-        output_data: outputData,
-        output_render_schema: stageOutputRenderSchema,
+    // K003 fix: atomic step approval via Postgres function (single transaction)
+    const { data: rpcResult, error: rpcErr } = await db
+      .rpc('approve_step', {
+        p_stage_id: stage.id,
+        p_output_data: outputData,
+        p_output_render_schema: stageOutputRenderSchema,
       })
-      .eq('id', stage.id);
+      .single();
 
-    if (completeErr) throw completeErr;
+    if (rpcErr) throw rpcErr;
 
-    const isLastStep = stepIndex >= 10;
-    let nextStep = null;
-
-    if (!isLastStep) {
-      nextStep = stepIndex + 1;
-
-      // Activate next step: copy output → input, initialize working_pool
-      const { error: nextErr } = await db
-        .from('pipeline_stages')
-        .update({
-          status: 'active',
-          input_data: outputData,
-          input_render_schema: stageOutputRenderSchema,
-          working_pool: outputData,
-          started_at: new Date().toISOString(),
-        })
-        .eq('run_id', runId)
-        .eq('step_index', nextStep);
-
-      if (nextErr) throw nextErr;
-
-      // Update run's current_step
-      const { error: runErr } = await db
-        .from('pipeline_runs')
-        .update({ current_step: nextStep })
-        .eq('id', runId);
-
-      if (runErr) throw runErr;
-    } else {
-      // Last step — complete the run
-      const { error: runErr } = await db
-        .from('pipeline_runs')
-        .update({ status: 'completed', completed_at: new Date().toISOString() })
-        .eq('id', runId);
-
-      if (runErr) throw runErr;
-    }
+    const nextStep = rpcResult.next_step;
 
     // Log decision
     await db

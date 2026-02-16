@@ -9,14 +9,16 @@ You are building the skeleton infrastructure for an 11-step content creation wiz
 ## 📂 File System — CRITICAL
 
 ### Active repos (ALL work happens here):
-- **Skeleton:** `/Users/danieloskarsson/Library/CloudStorage/Dropbox/content-pipeline-v2/`
-- **Modules:** `/Users/danieloskarsson/Library/CloudStorage/Dropbox/content-pipeline-modules-v2/`
+- **Skeleton:** `/Users/danieloskarsson/Library/CloudStorage/Dropbox/Projects/OnlyiGaming/content-pipeline-v2/`
+- **Modules:** `/Users/danieloskarsson/Library/CloudStorage/Dropbox/Projects/OnlyiGaming/content-pipeline-modules-v2/`
 
 ### Archived (READ-ONLY, never write to):
 - **v1 original:** `/Users/danieloskarsson/Library/CloudStorage/Dropbox/content-pipeline/`
 
-### Specs (READ-ONLY reference):
+### Specs (READ-ONLY reference — lives OUTSIDE this repo):
 - `/Users/danieloskarsson/Library/CloudStorage/Dropbox/Projects/OnlyiGaming/Content-Pipeline/specs/`
+
+⛔ **Do NOT create a `specs/` folder inside this repo.** Specs live ONLY in the project folder above. Read them by path. Never copy, symlink, or duplicate them here. A previous copy caused spec divergence — the project folder fell behind while edits accumulated in the repo copy. Single source of truth = project folder.
 
 **Phase 0 creates the v2 repos from scratch. The original repo stays at its current path as a READ-ONLY reference. V1 files are audited just-in-time in each phase — never bulk-copied. If you find yourself writing to `content-pipeline/` (without -v2), STOP — you are in the wrong directory.**
 
@@ -55,10 +57,10 @@ The spec ALWAYS wins. Rewrite the code to match the spec. Do not adapt the spec 
 
 | Document | Location | What it tells you |
 |----------|----------|-------------------|
-| SKELETON_SPEC_v2.md | specs/ | Architecture, components, data flow, database schema — THE source of truth |
-| BUILD_PLAN.md | specs/ | Phased build sequence, what to copy vs build vs delete |
-| UI_REFERENCE.md | specs/ | Visual specs for every component, what changes vs stays, ownership model |
-| STRATEGIC_ARCHITECTURE.md | specs/ | Governing strategy (read once for context) |
+| SKELETON_SPEC_v2.md | Content-Pipeline/specs/ | Architecture, components, data flow, database schema — THE source of truth |
+| BUILD_PLAN.md | Content-Pipeline/specs/ | Phased build sequence, what to copy vs build vs delete |
+| UI_REFERENCE.md | Content-Pipeline/specs/ | Visual specs for every component, what changes vs stays, ownership model |
+| STRATEGIC_ARCHITECTURE.md | Content-Pipeline/specs/ | Governing strategy (read once for context) |
 
 **Before each phase:** Re-read the specific Parts of SKELETON_SPEC referenced in BUILD_PLAN for that phase.
 
@@ -132,8 +134,7 @@ content-pipeline-v2/
 │   └── workers/
 ├── sql/
 │   └── schema.sql
-├── specs/                 ← Read-only reference docs
-└── CLAUDE.md              ← This file
+└── CLAUDE.md              ← This file (no specs/ folder — specs live in Content-Pipeline/specs/)
 ```
 
 ---
@@ -213,8 +214,17 @@ Summary:
 
 ---
 
-## 🏷 CURRENT PHASE: 0 — Repo Scaffold
+## 🏷 CURRENT PHASE: 8b — Code Review Fixes (Pre-Phase 9 Gate)
 
-**Read BUILD_PLAN.md Phase 0 for detailed steps and deliverables.**
+**Read BUILD_PLAN.md Phase 8b for the 7 fixes required before Phase 9.**
 
-When Phase 0 is complete and verified, this line will be updated to Phase 1.
+Phases 0–8 are complete. Phase 8b fixes 7 issues found in Gemini code review:
+- R001: handleNext race condition (CRITICAL)
+- R002: Orphaned pending row on enqueue failure (CRITICAL)
+- R003: No global ErrorBoundary (MEDIUM)
+- R004: Imprecise query invalidation (MEDIUM)
+- K003: No transaction on step approval (MEDIUM)
+- R008: Synchronous CSV parsing blocks event loop (MEDIUM)
+- R009: Shared import path outside src/ (MEDIUM)
+
+All findings tracked in BACKLOG.md. Do NOT start Phase 9 until all 8b deliverables are checked off.
