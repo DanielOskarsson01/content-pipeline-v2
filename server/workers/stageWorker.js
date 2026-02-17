@@ -12,11 +12,26 @@ import { pathToFileURL } from 'url';
 import db from '../services/db.js';
 import { redis } from '../services/queue.js';
 import { getSubmoduleById } from '../services/moduleLoader.js';
+import { notifyCompletion, notifyFailure } from '../services/webhookNotifier.js';
 
 const COST_TIMEOUTS = {
   cheap: 5 * 60 * 1000,
   medium: 15 * 60 * 1000,
   expensive: 30 * 60 * 1000,
+};
+
+/**
+ * Model name → API model ID mapping.
+ * Adding a new model is one line.
+ */
+const MODEL_MAP = {
+  // Anthropic
+  haiku: 'claude-haiku-4-5-20251001',
+  sonnet: 'claude-sonnet-4-5-20250929',
+  opus: 'claude-opus-4-6',
+  // OpenAI
+  'gpt-4o-mini': 'gpt-4o-mini',
+  'gpt-4o': 'gpt-4o',
 };
 
 /**
@@ -90,7 +105,88 @@ function buildTools(submoduleRunId, submoduleId) {
     },
   };
 
-  return { logger, http, progress, _logs: logs };
+  const ai = {
+    complete: async ({ prompt, model = 'haiku', provider = 'anthropic' }) => {
+      const startTime = Date.now();
+      const modelId = MODEL_MAP[model] || model;
+
+      if (provider === 'anthropic') {
+        const apiKey = process.env.ANTHROPIC_API_KEY;
+        if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
+
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: modelId,
+            max_tokens: 4096,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+        });
+
+        const body = await res.text();
+        if (res.status !== 200) {
+          throw new Error(`Anthropic API error ${res.status}: ${body}`);
+        }
+
+        const data = JSON.parse(body);
+        const duration_ms = Date.now() - startTime;
+        const result = {
+          text: data.content?.[0]?.text || '',
+          tokens_in: data.usage?.input_tokens || 0,
+          tokens_out: data.usage?.output_tokens || 0,
+          model: modelId,
+          provider: 'anthropic',
+          duration_ms,
+        };
+        logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms`);
+        return result;
+
+      } else if (provider === 'openai') {
+        const apiKey = process.env.OPENAI_API_KEY;
+        if (!apiKey) throw new Error('OPENAI_API_KEY not set in environment');
+
+        const res = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model: modelId,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+        });
+
+        const body = await res.text();
+        if (res.status !== 200) {
+          throw new Error(`OpenAI API error ${res.status}: ${body}`);
+        }
+
+        const data = JSON.parse(body);
+        const duration_ms = Date.now() - startTime;
+        const result = {
+          text: data.choices?.[0]?.message?.content || '',
+          tokens_in: data.usage?.prompt_tokens || 0,
+          tokens_out: data.usage?.completion_tokens || 0,
+          model: modelId,
+          provider: 'openai',
+          duration_ms,
+        };
+        logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms`);
+        return result;
+
+      } else {
+        throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai`);
+      }
+    },
+  };
+
+  return { logger, http, progress, ai, _logs: logs };
 }
 
 /**
@@ -176,6 +272,7 @@ const worker = new Worker(
           completed_at: new Date().toISOString(),
         })
         .eq('id', submodule_run_id);
+      notifyFailure({ submoduleId: submodule_id, submoduleRunId: submodule_run_id, runId: run.run_id, stepIndex: step_index, error: err.message });
       throw err;
     } finally {
       clearTimeout(timeoutTimer);
@@ -195,6 +292,7 @@ const worker = new Worker(
       .eq('id', submodule_run_id);
 
     console.log(`[worker] Completed: ${submodule_id} (run ${submodule_run_id})`);
+    notifyCompletion({ submoduleId: submodule_id, submoduleRunId: submodule_run_id, runId: run.run_id, stepIndex: step_index, result });
     return result;
   },
   {

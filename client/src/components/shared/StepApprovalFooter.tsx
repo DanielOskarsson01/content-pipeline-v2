@@ -3,8 +3,10 @@ interface StepApprovalFooterProps {
   canApprove: boolean;
   onApprove: () => void;
   onSkip: () => void;
+  onReopen?: () => void;
   isApproving?: boolean;
   isSkipping?: boolean;
+  isReopening?: boolean;
 }
 
 export function StepApprovalFooter({
@@ -12,18 +14,31 @@ export function StepApprovalFooter({
   canApprove,
   onApprove,
   onSkip,
+  onReopen,
   isApproving = false,
   isSkipping = false,
+  isReopening = false,
 }: StepApprovalFooterProps) {
   if (status === 'completed') {
     return (
-      <div className="mt-4 flex justify-end">
+      <div className="mt-4 flex justify-end items-center gap-3">
         <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-green-100 text-green-700 text-xs font-medium">
           <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
             <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
           </svg>
           Step Completed
         </span>
+        {onReopen && (
+          <button
+            onClick={onReopen}
+            disabled={isReopening}
+            className={`px-4 py-1.5 rounded text-xs font-medium ${
+              isReopening ? 'bg-gray-100 text-gray-300 cursor-not-allowed' : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
+            }`}
+          >
+            {isReopening ? 'Reopening...' : 'Reopen Step'}
+          </button>
+        )}
       </div>
     );
   }

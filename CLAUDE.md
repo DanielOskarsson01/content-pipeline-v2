@@ -214,17 +214,22 @@ Summary:
 
 ---
 
-## 🏷 CURRENT PHASE: 8b — Code Review Fixes (Pre-Phase 9 Gate)
+## 🏷 CURRENT PHASE: 9 — End-to-End Pipeline Testing
 
-**Read BUILD_PLAN.md Phase 8b for the 7 fixes required before Phase 9.**
+Phases 0–8b are complete. Phase 9 is active:
 
-Phases 0–8 are complete. Phase 8b fixes 7 issues found in Gemini code review:
-- R001: handleNext race condition (CRITICAL)
-- R002: Orphaned pending row on enqueue failure (CRITICAL)
-- R003: No global ErrorBoundary (MEDIUM)
-- R004: Imprecise query invalidation (MEDIUM)
-- K003: No transaction on step approval (MEDIUM)
-- R008: Synchronous CSV parsing blocks event loop (MEDIUM)
-- R009: Shared import path outside src/ (MEDIUM)
+**Verified (Step 1 + Step 2):**
+- Data operation semantics: ＝ (transform/accumulate), ➖ (remove/chain), ➕ (add/chain)
+- Sibling submodule chaining in Step 2 (➖ operations)
+- tools.ai integration for LLM-based submodules (url-relevance)
+- Textarea + CSV input sharing via step_context
+- Reopen Step for iterative workflows
+- Flagged item pre-deselection and visual highlighting
+- Clickable URLs in ContentRenderer
 
-All findings tracked in BACKLOG.md. Do NOT start Phase 9 until all 8b deliverables are checked off.
+**Remaining:**
+- Test edge cases (empty results, error handling, large datasets)
+- Build Step 3+ submodules
+- Schema-driven row_highlight (K001 — Phase 10)
+
+All findings tracked in `specs/BACKLOG.md`.

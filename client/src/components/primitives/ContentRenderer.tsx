@@ -203,7 +203,8 @@ export function ContentRenderer({
             const entity = entities[virtualItem.index];
             const key = String(entity[itemKey] ?? `row-${virtualItem.index}`);
             const isChecked = selectable ? checkedKeys!.has(key) : true;
-            const isDuplicate = entity.status === 'duplicate';
+            const isFlagged = entity.status === 'duplicate' || entity.status === 'excluded'
+              || entity.status === 'dead_link' || entity.relevance === 'DROP';
 
             return (
               <div
@@ -219,7 +220,7 @@ export function ContentRenderer({
                   gridTemplateColumns: gridTemplate,
                 }}
                 className={`items-center text-xs border-b border-gray-100 ${
-                  isDuplicate ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-gray-50'
+                  isFlagged ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-gray-50'
                 } ${selectable && !isChecked ? 'opacity-50' : ''
                 } ${selectable ? 'cursor-pointer' : ''}`}
                 onClick={selectable ? () => toggleItem(key) : undefined}
@@ -241,11 +242,25 @@ export function ContentRenderer({
                 <span className="px-2 text-gray-400 truncate">
                   {virtualItem.index + 1}
                 </span>
-                {columns.map((col) => (
-                  <span key={col} className="px-2 truncate text-gray-700" title={String(entity[col] ?? '')}>
-                    {String(entity[col] ?? '')}
-                  </span>
-                ))}
+                {columns.map((col) => {
+                  const value = String(entity[col] ?? '');
+                  const isUrl = col === 'url' || value.startsWith('http://') || value.startsWith('https://');
+                  return (
+                    <span key={col} className="px-2 truncate text-gray-700" title={value}>
+                      {isUrl ? (
+                        <a
+                          href={value}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-cyan-600 hover:underline"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {value}
+                        </a>
+                      ) : value}
+                    </span>
+                  );
+                })}
               </div>
             );
           })}

@@ -36,8 +36,8 @@ export function useExecuteSubmodule() {
   const showToast = useAppStore((s) => s.showToast);
 
   return useMutation({
-    mutationFn: ({ runId, stepIndex, submoduleId, entities }: { runId: string; stepIndex: number; submoduleId: string; entities?: Record<string, unknown>[] }) =>
-      api.executeSubmodule(runId, stepIndex, submoduleId, entities?.length ? { entities } : undefined),
+    mutationFn: ({ runId, stepIndex, submoduleId, entities, fromPreviousStep }: { runId: string; stepIndex: number; submoduleId: string; entities?: Record<string, unknown>[]; fromPreviousStep?: boolean }) =>
+      api.executeSubmodule(runId, stepIndex, submoduleId, entities?.length ? { entities, from_previous_step: fromPreviousStep || false } : undefined),
     onSuccess: (_data, vars) => {
       // Invalidate latest runs so CategoryCardGrid updates
       queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', vars.runId, vars.stepIndex] });
@@ -64,6 +64,8 @@ export function useApproveSubmoduleRun() {
       // R004 fix: scope invalidation to current run/step only
       queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', vars.runId, vars.stepIndex] });
       queryClient.invalidateQueries({ queryKey: ['submoduleRun', vars.submoduleRunId] });
+      // Refresh stage data so sibling submodules see updated working_pool
+      queryClient.invalidateQueries({ queryKey: ['run', vars.runId] });
       showToast(`Approved — ${data.approved_count} items, pool: ${data.pool_count}`, 'success');
     },
     onError: (error: Error) => {

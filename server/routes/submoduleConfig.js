@@ -63,6 +63,22 @@ router.put('/', async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 
+  // Share textarea entities to step_context so sibling submodules can access them
+  // (mirrors what CSV upload does — both input methods share via step_context)
+  if (input_config?.source === 'textarea' && Array.isArray(input_config.entities) && input_config.entities.length > 0) {
+    const step = parseInt(stepIndex, 10);
+    await supabase
+      .from('step_context')
+      .upsert({
+        run_id: runId,
+        step_index: step,
+        entities: input_config.entities,
+        filename: null,
+        source_submodule: submoduleId,
+        created_at: new Date().toISOString(),
+      }, { onConflict: 'run_id,step_index' });
+  }
+
   res.json(data);
 });
 

@@ -45,3 +45,16 @@ export function useSkipStep(runId: string) {
     },
   });
 }
+
+export function useReopenStep(runId: string) {
+  const queryClient = useQueryClient();
+  const showToast = useAppStore((s) => s.showToast);
+
+  return useMutation({
+    mutationFn: (stepIndex: number) => api.reopenStep(runId, stepIndex),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['run', runId] });
+      showToast(`Step ${data.step_reopened} reopened`, 'info');
+    },
+  });
+}

@@ -164,8 +164,18 @@ export function SubmodulePanel({
     if (submoduleRun?.status === 'approved' && submoduleRun.approved_items) {
       setCheckedKeys(new Set(submoduleRun.approved_items));
     } else if (submoduleRun?.status === 'completed') {
-      const allKeys = flatItems.map((item) => String(item[itemKey] ?? '')).filter(Boolean);
-      setCheckedKeys(new Set(allKeys));
+      // Pre-deselect flagged items (duplicates, excluded, dead links, AI-dropped)
+      const selectedKeys = flatItems
+        .filter((item) => {
+          const status = item.status as string | undefined;
+          const relevance = item.relevance as string | undefined;
+          if (status === 'duplicate' || status === 'excluded' || status === 'dead_link') return false;
+          if (relevance === 'DROP') return false;
+          return true;
+        })
+        .map((item) => String(item[itemKey] ?? ''))
+        .filter(Boolean);
+      setCheckedKeys(new Set(selectedKeys));
     }
   }, [flatItems, submoduleRun?.status, submoduleRun?.approved_items, itemKey, isSelectable]);
 
@@ -245,6 +255,8 @@ export function SubmodulePanel({
   const handleSaveInput = () => {
     if (inputSource === 'textarea') {
       onSaveConfig({ input_config: { source: 'textarea', raw_text: textareaValue, entities: textareaEntities } });
+      // Textarea entities are also saved to step_context server-side — refresh so siblings see them
+      queryClient.invalidateQueries({ queryKey: ['stepContext', runId, stepIndex] });
     } else if (inputSource === 'csv') {
       onSaveConfig({ input_config: { source: 'csv', filename: stepContext?.filename || null } });
     }
@@ -338,6 +350,8 @@ export function SubmodulePanel({
       await api.saveSubmoduleConfig(runId, stepIndex, submodule.id, {
         input_config: { source: 'textarea', raw_text: textareaValue, entities: textareaEntities },
       });
+      // Textarea entities are also saved to step_context server-side — refresh so siblings see them
+      queryClient.invalidateQueries({ queryKey: ['stepContext', runId, stepIndex] });
     } else if (inputSource === 'csv') {
       await api.saveSubmoduleConfig(runId, stepIndex, submodule.id, {
         input_config: { source: 'csv', filename: stepContext?.filename || null },
@@ -361,7 +375,7 @@ export function SubmodulePanel({
     saveInputIfDirty().catch(() => { /* non-critical */ });
 
     executeMutation.mutate(
-      { runId, stepIndex, submoduleId: submodule.id, entities: entitiesToSend },
+      { runId, stepIndex, submoduleId: submodule.id, entities: entitiesToSend, fromPreviousStep: showingPreviousStepData },
       {
         onSuccess: (data) => {
           setActiveSubmoduleRunId(data.submodule_run_id);
@@ -416,7 +430,7 @@ export function SubmodulePanel({
   // --- Input badge ---
   const inputBadge = hasPreviewData
     ? showingPreviousStepData
-      ? `${previewEntities.length} from previous step`
+      ? `${previewEntities.length} in working pool`
       : `${previewEntities.length} entities`
     : stepIndex > 0
       ? 'From previous step'

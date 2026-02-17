@@ -108,11 +108,15 @@ router.post('/', upload.single('file'), async (req, res) => {
   const columnsMissing = requiredColumns.filter(c => !normalizedFound.includes(c.toLowerCase()));
   const columnsFound = requiredColumns.filter(c => normalizedFound.includes(c.toLowerCase()));
 
-  // Normalize column names to lowercase
+  // Normalize column names to lowercase + canonical aliases
   const entities = records.map(row => {
     const normalized = {};
     for (const [key, value] of Object.entries(row)) {
       normalized[key.toLowerCase().trim()] = value;
+    }
+    // Canonical alias: entity_name → name (spec guarantees every entity has `name`)
+    if (!normalized.name && normalized.entity_name) {
+      normalized.name = normalized.entity_name;
     }
     return normalized;
   });

@@ -17,11 +17,13 @@ interface UniversalStepTemplateProps {
   stage: PipelineStage;
   onApprove: () => void;
   onSkip: () => void;
+  onReopen?: () => void;
   isApproving: boolean;
   isSkipping: boolean;
+  isReopening?: boolean;
 }
 
-export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, isSkipping }: UniversalStepTemplateProps) {
+export function UniversalStepTemplate({ stage, onApprove, onSkip, onReopen, isApproving, isSkipping, isReopening }: UniversalStepTemplateProps) {
   const queryClient = useQueryClient();
   const showToast = useAppStore((s) => s.showToast);
   const isCompleted = stage.status === 'completed';
@@ -150,8 +152,10 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
           canApprove={hasApprovedSubmodule}
           onApprove={onApprove}
           onSkip={onSkip}
+          onReopen={onReopen}
           isApproving={isApproving}
           isSkipping={isSkipping}
+          isReopening={isReopening}
         />
       )}
 
@@ -165,7 +169,11 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, isApproving, i
         onDataOperationChange={handleDataOpChange}
         savedConfig={savedConfig}
         onSaveConfig={handleSaveConfig}
-        previousStepData={stage.input_data as Record<string, unknown>[] | null}
+        previousStepData={
+          (currentDataOp === 'remove' || currentDataOp === 'add') && Array.isArray(stage.working_pool) && (stage.working_pool as unknown[]).length > 0
+            ? stage.working_pool as Record<string, unknown>[]
+            : stage.input_data as Record<string, unknown>[] | null
+        }
         previousStepRenderSchema={stage.input_render_schema as Record<string, unknown> | null}
       />
     </div>

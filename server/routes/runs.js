@@ -262,4 +262,48 @@ router.post('/:runId/steps/:stepIndex/skip', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/**
+ * POST /api/runs/:runId/steps/:stepIndex/reopen
+ * Reopen a completed step so the user can re-run submodules and re-approve.
+ * Note: re-approving will overwrite the next step's input_data and working_pool.
+ */
+router.post('/:runId/steps/:stepIndex/reopen', async (req, res, next) => {
+  try {
+    const { runId, stepIndex: stepIndexStr } = req.params;
+    const stepIndex = parseInt(stepIndexStr);
+
+    const { data: stage, error: stageErr } = await db
+      .from('pipeline_stages')
+      .select('id, status')
+      .eq('run_id', runId)
+      .eq('step_index', stepIndex)
+      .single();
+
+    if (stageErr) throw stageErr;
+    if (!stage) return res.status(404).json({ error: 'Step not found' });
+    if (stage.status === 'active') return res.json({ message: 'Step is already active' });
+    if (stage.status !== 'completed' && stage.status !== 'skipped') {
+      return res.status(400).json({ error: `Cannot reopen step with status: ${stage.status}` });
+    }
+
+    const { error: updateErr } = await db
+      .from('pipeline_stages')
+      .update({ status: 'active', completed_at: null })
+      .eq('id', stage.id);
+
+    if (updateErr) throw updateErr;
+
+    await db
+      .from('decision_log')
+      .insert({
+        run_id: runId,
+        step_index: stepIndex,
+        decision: 'step_reopened',
+        context: { previous_status: stage.status },
+      });
+
+    res.json({ step_reopened: stepIndex });
+  } catch (err) { next(err); }
+});
+
 export default router;

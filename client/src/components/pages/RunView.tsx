@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useParams, Link, Navigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import { useRunData, useApproveStep, useSkipStep } from '../../hooks/useRun';
+import { useRunData, useApproveStep, useSkipStep, useReopenStep } from '../../hooks/useRun';
 import { usePipelineStore } from '../../stores/pipelineStore';
 import { STEP_CONFIG } from '../../config/stepConfig';
 import { StepContainer } from '../steps/StepContainer';
@@ -45,6 +45,7 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
   // Known: isPending is shared across all steps — resolves when steps get per-step queries (Phase 4+)
   const approveStep = useApproveStep(runId);
   const skipStep = useSkipStep(runId);
+  const reopenStep = useReopenStep(runId);
 
   // Auto-expand the active step when run data loads
   useEffect(() => {
@@ -108,16 +109,20 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
                   project={project}
                   onApprove={() => approveStep.mutate(0)}
                   onSkip={() => skipStep.mutate(0)}
+                  onReopen={() => reopenStep.mutate(0)}
                   isApproving={approveStep.isPending}
                   isSkipping={skipStep.isPending}
+                  isReopening={reopenStep.isPending}
                 />
               ) : stage ? (
                 <UniversalStepTemplate
                   stage={stage}
                   onApprove={() => approveStep.mutate(stepCfg.index)}
                   onSkip={() => skipStep.mutate(stepCfg.index)}
+                  onReopen={() => reopenStep.mutate(stepCfg.index)}
                   isApproving={approveStep.isPending}
                   isSkipping={skipStep.isPending}
+                  isReopening={reopenStep.isPending}
                 />
               ) : null}
             </StepContainer>

@@ -73,6 +73,8 @@ export const api = {
     apiFetch<StepApproveResponse>(`/api/runs/${runId}/steps/${stepIndex}/approve`, { method: 'POST' }),
   skipStep: (runId: string, stepIndex: number) =>
     apiFetch<StepSkipResponse>(`/api/runs/${runId}/steps/${stepIndex}/skip`, { method: 'POST' }),
+  reopenStep: (runId: string, stepIndex: number) =>
+    apiFetch<{ step_reopened: number }>(`/api/runs/${runId}/steps/${stepIndex}/reopen`, { method: 'POST' }),
 
   // Submodules
   getSubmodules: (stepIndex: number) =>
@@ -90,7 +92,7 @@ export const api = {
     }),
 
   // Submodule execution (Phase 7)
-  executeSubmodule: (runId: string, stepIndex: number, submoduleId: string, body?: { entities?: Record<string, unknown>[] }) =>
+  executeSubmodule: (runId: string, stepIndex: number, submoduleId: string, body?: { entities?: Record<string, unknown>[]; from_previous_step?: boolean }) =>
     apiFetch<{ submodule_run_id: string; status: string }>(
       `/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/run`,
       { method: 'POST', body: JSON.stringify(body || {}) }

@@ -6,11 +6,13 @@ interface Step0ViewProps {
   project: Project;
   onApprove: () => void;
   onSkip: () => void;
+  onReopen?: () => void;
   isApproving: boolean;
   isSkipping: boolean;
+  isReopening?: boolean;
 }
 
-export function Step0View({ stage, project, onApprove, onSkip, isApproving, isSkipping }: Step0ViewProps) {
+export function Step0View({ stage, project, onApprove, onSkip, onReopen, isApproving, isSkipping, isReopening }: Step0ViewProps) {
   return (
     <div>
       <div className="bg-white rounded-lg border border-gray-200 p-4 mb-4">
@@ -39,8 +41,10 @@ export function Step0View({ stage, project, onApprove, onSkip, isApproving, isSk
         canApprove={stage.status === 'active'}
         onApprove={onApprove}
         onSkip={onSkip}
+        onReopen={onReopen}
         isApproving={isApproving}
         isSkipping={isSkipping}
+        isReopening={isReopening}
       />
     </div>
   );
