@@ -27,6 +27,9 @@ interface DetailModalProps {
   detailSchema: DetailSchema;
   onClose: () => void;
   onNavigate: (index: number) => void;
+  /** When set, shows an approve/reject checkbox in the header */
+  isChecked?: boolean;
+  onToggle?: () => void;
 }
 
 // --- Badge colors ---
@@ -50,7 +53,10 @@ export function DetailModal({
   detailSchema,
   onClose,
   onNavigate,
+  isChecked,
+  onToggle,
 }: DetailModalProps) {
+  const showCheckbox = isChecked !== undefined && !!onToggle;
   const hasPrev = index > 0;
   const hasNext = index < totalItems - 1;
 
@@ -81,6 +87,19 @@ export function DetailModal({
             {index + 1} of {totalItems}
           </span>
           <div className="flex items-center gap-2">
+            {showCheckbox && (
+              <label className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium cursor-pointer ${
+                isChecked ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'
+              }`}>
+                <input
+                  type="checkbox"
+                  checked={isChecked}
+                  onChange={onToggle}
+                  className="w-3.5 h-3.5 rounded border-gray-300 text-[#0891B2] focus:ring-[#0891B2] cursor-pointer"
+                />
+                {isChecked ? 'Approved' : 'Rejected'}
+              </label>
+            )}
             <button
               onClick={() => onNavigate(index - 1)}
               disabled={!hasPrev}
@@ -187,8 +206,8 @@ function SectionRenderer({ value, display }: { value: string; display: string })
   switch (display) {
     case 'prose':
       return (
-        <div className="bg-gray-50 rounded border border-gray-200 p-3 max-h-[400px] overflow-y-auto">
-          <pre className="text-xs text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">
+        <div className="bg-gray-50 rounded border border-gray-200 p-4 overflow-y-auto" style={{ maxHeight: '60vh' }}>
+          <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">
             {value || '(empty)'}
           </pre>
         </div>

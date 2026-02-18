@@ -319,6 +319,10 @@ export function ContentRenderer({
               setDetailItem({ item: entities[newIndex], index: newIndex });
             }
           }}
+          {...(selectable ? {
+            isChecked: checkedKeys!.has(String(detailItem.item[itemKey] ?? '')),
+            onToggle: () => toggleItem(String(detailItem.item[itemKey] ?? '')),
+          } : {})}
         />
       )}
     </div>
