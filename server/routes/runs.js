@@ -286,12 +286,28 @@ router.post('/:runId/steps/:stepIndex/reopen', async (req, res, next) => {
       return res.status(400).json({ error: `Cannot reopen step with status: ${stage.status}` });
     }
 
+    // 1. Reset the stage: clear pool and output so user builds fresh data
     const { error: updateErr } = await db
       .from('pipeline_stages')
-      .update({ status: 'active', completed_at: null })
+      .update({
+        status: 'active',
+        completed_at: null,
+        working_pool: [],
+        output_data: null,
+      })
       .eq('id', stage.id);
 
     if (updateErr) throw updateErr;
+
+    // 2. Revert approved submodule_runs back to 'completed' so user must
+    //    re-approve them (adds items back to the now-empty pool)
+    const { error: revertErr } = await db
+      .from('submodule_runs')
+      .update({ status: 'completed' })
+      .eq('stage_id', stage.id)
+      .eq('status', 'approved');
+
+    if (revertErr) throw revertErr;
 
     await db
       .from('decision_log')

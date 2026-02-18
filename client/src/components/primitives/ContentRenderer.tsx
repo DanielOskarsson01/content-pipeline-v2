@@ -1,10 +1,12 @@
-import { useRef, useMemo } from 'react';
+import { useRef, useMemo, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { DetailModal, type DetailSchema } from './DetailModal';
 
 /** Render schema from output_schema — drives display_type, selectable, columns */
 export interface RenderSchema {
   display_type?: string;
   selectable?: boolean;
+  detail_schema?: DetailSchema;
   [field: string]: unknown;
 }
 
@@ -43,6 +45,9 @@ const DATA_OP_ICONS: Record<string, string> = { add: '\u2795', remove: '\u2796',
  * When renderSchema.selectable is true, adds per-row checkboxes and
  * Select all / Deselect all controls for item-level approval.
  *
+ * When renderSchema.detail_schema is set, row clicks open a detail modal
+ * showing full content for the item (header fields + scrollable sections).
+ *
  * DO NOT replace with naive .map() — virtualisation is critical for performance.
  */
 export function ContentRenderer({
@@ -61,12 +66,16 @@ export function ContentRenderer({
   const parentRef = useRef<HTMLDivElement>(null);
 
   const selectable = renderSchema?.selectable === true && !!checkedKeys && !!onCheckedKeysChange;
+  const detailSchema = (renderSchema?.detail_schema as DetailSchema | undefined) ?? null;
+
+  // Detail modal state
+  const [detailItem, setDetailItem] = useState<{ item: Record<string, unknown>; index: number } | null>(null);
 
   // Derive columns from renderSchema field definitions (exclude meta fields) or from props/data
   const columns = useMemo(() => {
     if (columnsProp) return columnsProp;
     if (renderSchema) {
-      const metaFields = new Set(['display_type', 'selectable']);
+      const metaFields = new Set(['display_type', 'selectable', 'detail_schema']);
       return Object.keys(renderSchema).filter((k) => !metaFields.has(k));
     }
     return entities.length > 0 ? Object.keys(entities[0]) : [];
@@ -133,10 +142,31 @@ export function ContentRenderer({
     onCheckedKeysChange(new Set());
   };
 
-  // Grid template: optional checkbox + optional data-op icon + # + columns
+  // --- Row click handler ---
+  const handleRowClick = (entity: Record<string, unknown>, index: number, key: string) => {
+    if (detailSchema) {
+      // Has detail_schema: row click opens modal (checkbox has stopPropagation)
+      setDetailItem({ item: entity, index });
+    } else if (selectable) {
+      // No detail_schema + selectable: row click toggles checkbox
+      toggleItem(key);
+    }
+    // No detail_schema + not selectable: no action
+  };
+
+  // Grid template: optional checkbox + optional data-op icon + # + columns + optional expand icon
+  // Wide columns: preview/description fields get 3fr, compact fields get auto-sized
+  const WIDE_PATTERNS = /preview|description|content|summary/i;
+  const NARROW_PATTERNS = /^(status|word_count|content_type)$/;
   const checkboxCol = selectable ? '28px ' : '';
   const opIconCol = selectable && dataOperation ? '24px ' : '';
-  const gridTemplate = `${checkboxCol}${opIconCol}40px repeat(${columns.length}, minmax(80px, 1fr))`;
+  const expandCol = detailSchema ? ' 28px' : '';
+  const colWidths = columns.map((col) => {
+    if (WIDE_PATTERNS.test(col)) return 'minmax(200px, 3fr)';
+    if (NARROW_PATTERNS.test(col)) return 'minmax(60px, auto)';
+    return 'minmax(80px, 1fr)';
+  }).join(' ');
+  const gridTemplate = `${checkboxCol}${opIconCol}40px ${colWidths}${expandCol}`;
 
   const opIcon = dataOperation ? (DATA_OP_ICONS[dataOperation] || '\uFF1D') : '';
 
@@ -189,6 +219,7 @@ export function ContentRenderer({
               {col}
             </span>
           ))}
+          {detailSchema && <span className="px-1 py-1.5" />}
         </div>
 
         {/* Virtual rows */}
@@ -205,6 +236,7 @@ export function ContentRenderer({
             const isChecked = selectable ? checkedKeys!.has(key) : true;
             const isFlagged = entity.status === 'duplicate' || entity.status === 'excluded'
               || entity.status === 'dead_link' || entity.relevance === 'DROP';
+            const isClickable = selectable || !!detailSchema;
 
             return (
               <div
@@ -222,8 +254,8 @@ export function ContentRenderer({
                 className={`items-center text-xs border-b border-gray-100 ${
                   isFlagged ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-gray-50'
                 } ${selectable && !isChecked ? 'opacity-50' : ''
-                } ${selectable ? 'cursor-pointer' : ''}`}
-                onClick={selectable ? () => toggleItem(key) : undefined}
+                } ${isClickable ? 'cursor-pointer' : ''}`}
+                onClick={() => handleRowClick(entity, virtualItem.index, key)}
               >
                 {selectable && (
                   <span className="px-1 flex items-center justify-center">
@@ -261,11 +293,34 @@ export function ContentRenderer({
                     </span>
                   );
                 })}
+                {detailSchema && (
+                  <span className="px-1 flex items-center justify-center text-gray-400 hover:text-gray-600">
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                    </svg>
+                  </span>
+                )}
               </div>
             );
           })}
         </div>
       </div>
+
+      {/* Detail modal — only rendered when an item is selected for inspection */}
+      {detailItem && detailSchema && (
+        <DetailModal
+          item={detailItem.item}
+          index={detailItem.index}
+          totalItems={entities.length}
+          detailSchema={detailSchema}
+          onClose={() => setDetailItem(null)}
+          onNavigate={(newIndex) => {
+            if (newIndex >= 0 && newIndex < entities.length) {
+              setDetailItem({ item: entities[newIndex], index: newIndex });
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

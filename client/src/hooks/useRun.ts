@@ -54,7 +54,9 @@ export function useReopenStep(runId: string) {
     mutationFn: (stepIndex: number) => api.reopenStep(runId, stepIndex),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['run', runId] });
-      showToast(`Step ${data.step_reopened} reopened`, 'info');
+      // Refresh submodule run statuses (approved → completed after reopen)
+      queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', runId, data.step_reopened] });
+      showToast(`Step ${data.step_reopened} reopened — re-approve submodules to rebuild pool`, 'info');
     },
   });
 }
