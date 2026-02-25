@@ -534,6 +534,53 @@ export function SubmodulePanel({
           </button>
         </div>
 
+        {/* Previous Run Summary — visible when a completed/approved/failed run exists */}
+        {(() => {
+          // Only show when we're NOT viewing that run already
+          const latestRun = latestRuns?.[submodule.id];
+          if (!latestRun || latestRun.id === activeSubmoduleRunId) return null;
+
+          const status = latestRun.status;
+          if (!['completed', 'approved', 'failed'].includes(status)) return null;
+
+          const count = latestRun.result_count || 0;
+          const agoMs = latestRun.completed_at ? Date.now() - new Date(latestRun.completed_at).getTime() : 0;
+          const agoText = agoMs < 60000 ? 'just now'
+            : agoMs < 3600000 ? `${Math.floor(agoMs / 60000)}m ago`
+            : agoMs < 86400000 ? `${Math.floor(agoMs / 3600000)}h ago`
+            : `${Math.floor(agoMs / 86400000)}d ago`;
+
+          let label = '';
+          let statusIcon = '';
+          if (status === 'approved') {
+            label = `Last run: ${count} items \u00b7 Approved`;
+            statusIcon = '\u2713';
+          } else if (status === 'completed') {
+            label = `Last run: ${count} items \u00b7 Completed`;
+            statusIcon = '\u25cb';
+          } else if (status === 'failed') {
+            label = `Last run: Failed`;
+            statusIcon = '\u2717';
+          }
+
+          return (
+            <div className="mx-3 mt-2 px-3 py-2 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600 flex items-center justify-between flex-shrink-0">
+              <span>
+                {label} {statusIcon} \u00b7 {agoText}
+              </span>
+              <button
+                onClick={() => {
+                  setActiveSubmoduleRunId(latestRun.id);
+                  setPanelAccordion('results');
+                }}
+                className="text-[#0891B2] hover:underline"
+              >
+                View results
+              </button>
+            </div>
+          );
+        })()}
+
         {/* Accordions */}
         <div className="flex-1 flex flex-col overflow-hidden p-3 gap-3">
           {/* --- INPUT ACCORDION --- */}

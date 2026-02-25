@@ -115,7 +115,7 @@ function SubmoduleRow({
   submodule: SubmoduleManifest;
   categoryKey: string;
   onOpen: (submoduleId: string, categoryKey: string) => void;
-  latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null };
+  latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null; error?: string | null };
   currentDataOp: string;
   onCycleDataOp?: () => void;
 }) {
@@ -173,7 +173,7 @@ function SubmoduleRow({
   );
 }
 
-function SubmoduleStatusBadge({ latestRun }: { latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null } }) {
+function SubmoduleStatusBadge({ latestRun }: { latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null; error?: string | null } }) {
   if (!latestRun) {
     return <span className="text-[10px] text-gray-300">idle</span>;
   }
@@ -205,8 +205,17 @@ function SubmoduleStatusBadge({ latestRun }: { latestRun?: { status: string; res
           {latestRun.approved_count}
         </span>
       );
-    case 'failed':
-      return <span className="text-[10px] font-medium text-red-500">failed</span>;
+    case 'failed': {
+      const errMsg = latestRun.error ? (latestRun.error.length > 30 ? latestRun.error.slice(0, 30) + '…' : latestRun.error) : 'failed';
+      return (
+        <span className="flex items-center gap-1 text-[10px] font-medium text-red-500" title={latestRun.error || 'Execution failed'}>
+          <svg className="w-3 h-3 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+          </svg>
+          {errMsg}
+        </span>
+      );
+    }
     default:
       return <span className="text-[10px] text-gray-300">idle</span>;
   }

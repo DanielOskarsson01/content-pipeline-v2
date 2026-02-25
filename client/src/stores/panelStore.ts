@@ -26,6 +26,7 @@ interface PanelStore {
   closeSubmodulePanel: () => void;
   setPanelAccordion: (accordion: PanelAccordion) => void;
   setActiveSubmoduleRunId: (runId: string | null) => void;
+  resetPanel: () => void;
 }
 
 export const usePanelStore = create<PanelStore>((set) => ({
@@ -54,4 +55,13 @@ export const usePanelStore = create<PanelStore>((set) => ({
 
   setActiveSubmoduleRunId: (runId) =>
     set({ activeSubmoduleRunId: runId }),
+
+  resetPanel: () =>
+    set({
+      submodulePanelOpen: false,
+      activeSubmoduleId: null,
+      activeCategoryKey: null,
+      activeSubmoduleRunId: null,
+      panelAccordion: 'input',
+    }),
 }));

@@ -322,4 +322,21 @@ router.post('/:runId/steps/:stepIndex/reopen', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/**
+ * GET /api/runs/:runId/decisions
+ * Returns decision log entries for a run, newest first.
+ */
+router.get('/:runId/decisions', async (req, res, next) => {
+  try {
+    const { data, error } = await db
+      .from('decision_log')
+      .select('*')
+      .eq('run_id', req.params.runId)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) { next(err); }
+});
+
 export default router;

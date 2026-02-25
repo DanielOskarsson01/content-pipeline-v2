@@ -51,6 +51,7 @@ import type {
   RunWithStages, PipelineStage, StepApproveResponse, StepSkipResponse,
   CategoryGroups, SubmoduleConfig,
   SubmoduleRun, SubmoduleLatestRunMap, ApproveSubmoduleRunResponse,
+  DecisionLogEntry,
 } from '../types/step';
 
 export const api = {
@@ -112,4 +113,8 @@ export const api = {
     }),
   getLatestSubmoduleRuns: (runId: string, stepIndex: number) =>
     apiFetch<SubmoduleLatestRunMap>(`/api/runs/${runId}/steps/${stepIndex}/submodule-runs/latest`),
+
+  // Decision log
+  getDecisions: (runId: string) =>
+    apiFetch<DecisionLogEntry[]>(`/api/runs/${runId}/decisions`),
 };

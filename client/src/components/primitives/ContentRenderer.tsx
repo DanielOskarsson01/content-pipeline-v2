@@ -56,6 +56,8 @@ const DATA_OP_ICONS: Record<string, string> = { add: '\u2795', remove: '\u2796',
  *
  * DO NOT replace with naive .map() — virtualisation is critical for performance.
  */
+const PAGE_SIZE = 50;
+
 export function ContentRenderer({
   entities,
   renderSchema,
@@ -71,6 +73,15 @@ export function ContentRenderer({
   onRequestFullData,
 }: ContentRendererProps) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const [currentPage, setCurrentPage] = useState(0);
+
+  // Reset page when data changes
+  const entityCount = entities.length;
+  const prevCountRef = useRef(entityCount);
+  if (entityCount !== prevCountRef.current) {
+    prevCountRef.current = entityCount;
+    if (currentPage !== 0) setCurrentPage(0);
+  }
 
   const selectable = renderSchema?.selectable === true && !!checkedKeys && !!onCheckedKeysChange;
   const detailSchema = (renderSchema?.detail_schema as DetailSchema | undefined) ?? null;
@@ -91,8 +102,15 @@ export function ContentRenderer({
     return entities.length > 0 ? Object.keys(entities[0]) : [];
   }, [columnsProp, renderSchema, entities]);
 
+  // Pagination — only active when entities exceed PAGE_SIZE
+  const totalPages = Math.ceil(entities.length / PAGE_SIZE);
+  const showPagination = entities.length > PAGE_SIZE;
+  const pageStart = currentPage * PAGE_SIZE;
+  const pageEnd = Math.min(pageStart + PAGE_SIZE, entities.length);
+  const pagedEntities = showPagination ? entities.slice(pageStart, pageEnd) : entities;
+
   const virtualizer = useVirtualizer({
-    count: entities.length,
+    count: pagedEntities.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 28,
     overscan: 15,
@@ -242,8 +260,9 @@ export function ContentRenderer({
           }}
         >
           {virtualizer.getVirtualItems().map((virtualItem) => {
-            const entity = entities[virtualItem.index];
-            const key = String(entity[itemKey] ?? `row-${virtualItem.index}`);
+            const entity = pagedEntities[virtualItem.index];
+            const globalIndex = pageStart + virtualItem.index;
+            const key = String(entity[itemKey] ?? `row-${globalIndex}`);
             const isChecked = selectable ? checkedKeys!.has(key) : true;
             const isFlagged = flaggedWhen ? Object.entries(flaggedWhen).some(
               ([field, values]) => values.includes(String(entity[field] ?? ''))
@@ -267,7 +286,7 @@ export function ContentRenderer({
                   isFlagged ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-gray-50'
                 } ${selectable && !isChecked ? 'opacity-50' : ''
                 } ${isClickable ? 'cursor-pointer' : ''}`}
-                onClick={() => handleRowClick(entity, virtualItem.index, key)}
+                onClick={() => handleRowClick(entity, globalIndex, key)}
               >
                 {selectable && (
                   <span className="px-1 flex items-center justify-center">
@@ -284,7 +303,7 @@ export function ContentRenderer({
                   <span className="px-1 text-center text-[10px]" title={dataOperation}>{opIcon}</span>
                 )}
                 <span className="px-2 text-gray-400 truncate">
-                  {virtualItem.index + 1}
+                  {globalIndex + 1}
                 </span>
                 {columns.map((col) => {
                   const value = String(entity[col] ?? '');
@@ -317,6 +336,35 @@ export function ContentRenderer({
           })}
         </div>
       </div>
+
+      {/* Pagination footer */}
+      {showPagination && (
+        <div className="flex items-center justify-between mt-1 flex-shrink-0">
+          <span className="text-xs text-gray-500">
+            Showing {pageStart + 1}-{pageEnd} of {entities.length}
+            {selectable && ` \u00b7 ${checkedKeys!.size} approved \u00b7 ${entities.length - checkedKeys!.size} rejected`}
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
+              disabled={currentPage === 0}
+              className="px-2 py-0.5 text-xs rounded border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Prev
+            </button>
+            <span className="text-xs text-gray-400 px-1">
+              {currentPage + 1}/{totalPages}
+            </span>
+            <button
+              onClick={() => setCurrentPage((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={currentPage >= totalPages - 1}
+              className="px-2 py-0.5 text-xs rounded border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Detail modal — only rendered when an item is selected for inspection */}
       {detailItem && detailItemData && detailSchema && (

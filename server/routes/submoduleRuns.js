@@ -71,7 +71,6 @@ executeRouter.post('/run', async (req, res) => {
       if (!allCleared) {
         return res.status(409).json({ error: 'Submodule already has an active run', active_run_id: activeRuns[0].id });
       }
-      console.log(`[execute] Cleared ${activeRuns.length} stuck run(s) for ${submoduleId}`);
     }
 
     // 4. Resolve input — auto-resolution priority:
@@ -82,8 +81,6 @@ executeRouter.post('/run', async (req, res) => {
     let inputData = null;
     let inputFromPool = false; // true when entities are derived from pool data (skip enrichment)
     const workingPool = stage.working_pool;
-
-    console.log(`[execute] Resolving input for ${submoduleId} at step ${stepIdx}`);
 
     // 4a. Resolve data_operation FIRST — it determines input routing
     //     ➖/➕ = chaining (use working pool), ＝ = independent (use original input)
@@ -97,8 +94,6 @@ executeRouter.post('/run', async (req, res) => {
     const dataOperation = opConfig?.data_operation || manifest.data_operation_default || 'transform';
     const isChaining = dataOperation === 'remove' || dataOperation === 'add';
     const hasWorkingPool = Array.isArray(workingPool) && workingPool.length > 0;
-
-    console.log(`[execute] data_operation=${dataOperation}, isChaining=${isChaining}, hasWorkingPool=${hasWorkingPool} (${workingPool?.length || 0} items)`);
 
     // HIGHEST PRIORITY: Working pool for chaining operations (➖ remove / ➕ add)
     //   When data_operation is 'remove' or 'add' AND the working pool has items,
@@ -116,7 +111,6 @@ executeRouter.post('/run', async (req, res) => {
       const groupedEntities = Array.from(entityMap.values());
       inputData = { entities: groupedEntities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
       inputFromPool = true;
-      console.log(`[execute] POOL INPUT: Re-grouped ${workingPool.length} working pool items into ${groupedEntities.length} entities (chaining: ${dataOperation})`);
     }
 
     // Priority 0: Entities sent directly in request body (for ＝ operations or first chaining submodule)
@@ -134,11 +128,9 @@ executeRouter.post('/run', async (req, res) => {
           entityMap.get(name).items.push(item);
         }
         entities = Array.from(entityMap.values());
-        console.log(`[execute] Priority 0: Re-grouped ${req.body.entities.length} flat items into ${entities.length} entities`);
       }
 
       inputData = { entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
-      console.log(`[execute] Priority 0: ${entities.length} entities from request body${inputFromPool ? ' (from previous step)' : ''}`);
     }
 
     // Priority 1: Check saved input_config (user explicitly saved via SAVE INPUT)
@@ -156,7 +148,6 @@ executeRouter.post('/run', async (req, res) => {
 
         if (inputConfig.source === 'textarea' && inputConfig.entities?.length > 0) {
           inputData = { entities: inputConfig.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
-          console.log(`[execute] Priority 1: ${inputConfig.entities.length} entities from textarea config`);
         } else if (inputConfig.source === 'csv') {
           const { data: ctx } = await db
             .from('step_context')
@@ -167,7 +158,6 @@ executeRouter.post('/run', async (req, res) => {
 
           if (ctx?.entities) {
             inputData = { entities: ctx.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
-            console.log(`[execute] Priority 1: ${ctx.entities.length} entities from CSV config`);
           }
         }
       }
@@ -181,8 +171,6 @@ executeRouter.post('/run', async (req, res) => {
         .eq('run_id', runId)
         .eq('step_index', stepIdx - 1)
         .maybeSingle();
-
-      console.log(`[execute] Priority 2: prevStage exists=${!!prevStage}, output_data type=${prevStage?.output_data ? (Array.isArray(prevStage.output_data) ? `array(${prevStage.output_data.length})` : typeof prevStage.output_data) : 'null'}`);
 
       if (prevStage?.output_data && Array.isArray(prevStage.output_data) && prevStage.output_data.length > 0) {
         // Working pool is a flat array of items with entity_name.
@@ -199,7 +187,6 @@ executeRouter.post('/run', async (req, res) => {
         const groupedEntities = Array.from(entityMap.values());
         inputData = { entities: groupedEntities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
         inputFromPool = true;
-        console.log(`[execute] Priority 2: Re-grouped ${poolItems.length} pool items into ${groupedEntities.length} entities (from pool, skip enrichment). First item keys: ${poolItems.length > 0 ? Object.keys(poolItems[0]).join(', ') : 'n/a'}`);
       }
     }
 
@@ -214,16 +201,12 @@ executeRouter.post('/run', async (req, res) => {
 
       if (ctx?.entities) {
         inputData = { entities: ctx.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
-        console.log(`[execute] Priority 3: ${ctx.entities.length} entities from step_context`);
       }
     }
 
     if (!inputData) {
-      console.log(`[execute] NO INPUT FOUND for ${submoduleId} at step ${stepIdx}, run ${runId}`);
       return res.status(400).json({ error: 'No input data available. Upload data or ensure previous step has output.' });
     }
-
-    console.log(`[execute] Final input: ${inputData.entities.length} entities for ${submoduleId}`);
 
     // 4b. Enrich entities with working pool items (sibling submodule support)
     //     Only when entities come from user input (CSV/textarea), NOT when they
@@ -251,7 +234,6 @@ executeRouter.post('/run', async (req, res) => {
           entity.items = [];
         }
       }
-      console.log(`[execute] Working pool enrichment: ${workingPool.length} pool items, ${enrichedCount} attached to ${inputData.entities.length} entities`);
     }
 
     // 5. Resolve options
@@ -492,8 +474,6 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
     let currentPool = stageRow.working_pool || [];
 
-    console.log(`[approve] Pool BEFORE: ${currentPool.length} items, dataOperation=${dataOperation}, itemKey=${itemKey}, approvedKeys=${approvedKeySet.size}, stageId=${subRun.stage_id}`);
-
     // Pool dedup key: when items have source_submodule (Step 5 chaining),
     // use composite key so items from different submodules coexist.
     // Otherwise, use item_key alone (Steps 1-4, single-submodule items).
@@ -537,8 +517,6 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
       currentPool = Array.from(poolMap.values());
     }
 
-    console.log(`[approve] Pool AFTER: ${currentPool.length} items`);
-
     // 6. Write updated pool back
     const { error: poolUpdateErr } = await db
       .from('pipeline_stages')
@@ -547,8 +525,6 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
     if (poolUpdateErr) {
       console.error(`[approve] POOL UPDATE FAILED:`, poolUpdateErr);
-    } else {
-      console.log(`[approve] Pool written to DB successfully (${currentPool.length} items, stage ${subRun.stage_id})`);
     }
 
     // 7. Update submodule_runs
@@ -617,7 +593,7 @@ latestRunsRouter.get('/latest', async (req, res) => {
     // Get all submodule runs for this stage, ordered by creation (latest first)
     const { data: runs, error } = await db
       .from('submodule_runs')
-      .select('id, submodule_id, status, progress, approved_items, output_data, completed_at')
+      .select('id, submodule_id, status, progress, approved_items, output_data, completed_at, error')
       .eq('stage_id', stage.id)
       .order('completed_at', { ascending: false, nullsFirst: false });
 
@@ -640,6 +616,8 @@ latestRunsRouter.get('/latest', async (req, res) => {
           result_count: resultCount,
           approved_count: approvedCount,
           description: outputSummary.description || null,
+          completed_at: run.completed_at || null,
+          error: run.error || null,
         };
       }
     }

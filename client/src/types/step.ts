@@ -141,6 +141,7 @@ export interface SubmoduleLatestRun {
   result_count: number;
   approved_count: number;
   description?: string;
+  error?: string | null;
 }
 
 export type SubmoduleLatestRunMap = Record<string, SubmoduleLatestRun>;
@@ -157,4 +158,15 @@ export interface ApproveSubmoduleRunResponse {
   status: 'approved';
   pool_count: number;
   approved_count: number;
+}
+
+// Decision log entry (from /api/runs/:runId/decisions)
+export interface DecisionLogEntry {
+  id: string;
+  run_id: string;
+  step_index: number;
+  submodule_id?: string | null;
+  decision: string;
+  context: Record<string, unknown>;
+  created_at: string;
 }

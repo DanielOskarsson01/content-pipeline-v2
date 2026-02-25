@@ -1,14 +1,15 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, Link, Navigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import { useRunData, useApproveStep, useSkipStep, useReopenStep } from '../../hooks/useRun';
 import { usePipelineStore } from '../../stores/pipelineStore';
+import { usePanelStore } from '../../stores/panelStore';
 import { STEP_CONFIG } from '../../config/stepConfig';
 import { StepContainer } from '../steps/StepContainer';
 import { Step0View } from '../steps/Step0View';
 import { UniversalStepTemplate } from '../steps/UniversalStepTemplate';
-import type { PipelineStage, ProjectWithRuns } from '../../types/step';
+import type { PipelineStage, ProjectWithRuns, DecisionLogEntry } from '../../types/step';
 
 export function RunView() {
   const { projectId, runId } = useParams<{ projectId: string; runId: string }>();
@@ -35,6 +36,10 @@ export function RunView() {
 function RunViewInner({ projectId, runId }: { projectId: string; runId: string }) {
   const { data: run, isLoading, error } = useRunData(runId);
   const { setExpandedStep } = usePipelineStore();
+  const { resetPanel } = usePanelStore();
+
+  // Reset panel state when navigating to a different run
+  useEffect(() => { resetPanel(); }, [runId, resetPanel]);
 
   const { data: project } = useQuery({
     queryKey: ['project', projectId],
@@ -130,6 +135,81 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
           );
         })}
       </div>
+
+      <DecisionLog runId={runId} />
+    </div>
+  );
+}
+
+function DecisionLog({ runId }: { runId: string }) {
+  const [open, setOpen] = useState(false);
+  const { data: decisions } = useQuery({
+    queryKey: ['decisions', runId],
+    queryFn: () => api.getDecisions(runId),
+    enabled: open,
+  });
+
+  const DECISION_LABELS: Record<string, string> = {
+    approved: 'Submodule approved',
+    step_approved: 'Step approved',
+    step_skipped: 'Step skipped',
+    step_reopened: 'Step reopened',
+  };
+
+  return (
+    <div className="mt-4 border border-gray-200 rounded">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between px-3 py-2 text-xs text-gray-500 hover:bg-gray-50"
+      >
+        <span className="font-medium">Decision Log</span>
+        <svg
+          className={`w-3.5 h-3.5 transition-transform ${open ? 'rotate-180' : ''}`}
+          fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="border-t border-gray-200 max-h-60 overflow-auto">
+          {!decisions || decisions.length === 0 ? (
+            <p className="text-xs text-gray-400 text-center py-3">No decisions recorded yet</p>
+          ) : (
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 sticky top-0">
+                <tr>
+                  <th className="px-3 py-1.5 text-left text-gray-500 font-medium">Time</th>
+                  <th className="px-3 py-1.5 text-left text-gray-500 font-medium">Step</th>
+                  <th className="px-3 py-1.5 text-left text-gray-500 font-medium">Decision</th>
+                  <th className="px-3 py-1.5 text-left text-gray-500 font-medium">Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                {decisions.map((d: DecisionLogEntry) => {
+                  const time = new Date(d.created_at).toLocaleString(undefined, {
+                    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                  });
+                  const details: string[] = [];
+                  if (d.submodule_id) details.push(d.submodule_id);
+                  if (d.context.approved_count != null) details.push(`${d.context.approved_count} approved`);
+                  if (d.context.items_forwarded != null) details.push(`${d.context.items_forwarded} forwarded`);
+                  if (d.context.pool_count != null) details.push(`pool: ${d.context.pool_count}`);
+
+                  return (
+                    <tr key={d.id} className="border-t border-gray-100 hover:bg-gray-50">
+                      <td className="px-3 py-1.5 text-gray-400 whitespace-nowrap">{time}</td>
+                      <td className="px-3 py-1.5 text-gray-600">{d.step_index}</td>
+                      <td className="px-3 py-1.5 text-gray-700">{DECISION_LABELS[d.decision] || d.decision}</td>
+                      <td className="px-3 py-1.5 text-gray-500 truncate max-w-[200px]">{details.join(' · ')}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   );
 }
