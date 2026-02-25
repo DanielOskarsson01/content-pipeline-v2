@@ -106,4 +106,59 @@ router.post('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/**
+ * DELETE /api/projects/:id
+ * Delete project and ALL related data (runs, stages, configs, results, docs)
+ */
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const projectId = req.params.id;
+
+    // 1. Verify project exists
+    const { data: project, error: projErr } = await db
+      .from('projects')
+      .select('id')
+      .eq('id', projectId)
+      .single();
+
+    if (projErr?.code === 'PGRST116' || !project) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+    if (projErr) throw projErr;
+
+    // 2. Get all run IDs for this project
+    const { data: runs, error: runsErr } = await db
+      .from('pipeline_runs')
+      .select('id')
+      .eq('project_id', projectId);
+
+    if (runsErr) throw runsErr;
+    const runIds = (runs || []).map((r) => r.id);
+
+    // 3. Delete child tables in dependency order (no CASCADE on these FKs)
+    if (runIds.length > 0) {
+      await db.from('decision_log').delete().in('run_id', runIds);
+      await db.from('submodule_runs').delete().in('run_id', runIds);
+      await db.from('run_submodule_config').delete().in('run_id', runIds);
+      await db.from('step_context').delete().in('run_id', runIds);
+      await db.from('pipeline_stages').delete().in('run_id', runIds);
+      await db.from('pipeline_runs').delete().eq('project_id', projectId);
+    }
+
+    // 4. project_reference_docs (has CASCADE but explicit is cleaner)
+    await db.from('project_reference_docs').delete().eq('project_id', projectId);
+
+    // 5. Delete the project itself
+    const { error: deleteErr } = await db
+      .from('projects')
+      .delete()
+      .eq('id', projectId);
+
+    if (deleteErr) throw deleteErr;
+
+    console.log(`[projects] Deleted project ${projectId} with ${runIds.length} run(s)`);
+    res.json({ deleted: true, runs_deleted: runIds.length });
+  } catch (err) { next(err); }
+});
+
 export default router;

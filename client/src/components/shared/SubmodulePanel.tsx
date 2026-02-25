@@ -1,15 +1,17 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import JSZip from 'jszip';
 import { usePanelStore } from '../../stores/panelStore';
 import { useStepContext } from '../../hooks/useStepContext';
-import { useSubmoduleRun, useExecuteSubmodule, useApproveSubmoduleRun, useLatestSubmoduleRuns } from '../../hooks/useSubmoduleRuns';
+import { useSubmoduleRun, useSubmoduleRunFull, useExecuteSubmodule, useApproveSubmoduleRun, useLatestSubmoduleRuns } from '../../hooks/useSubmoduleRuns';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../api/client';
-import type { SubmoduleManifest, SubmoduleConfig } from '../../types/step';
+import type { SubmoduleManifest, SubmoduleConfig, DownloadableField } from '../../types/step';
 import { CsvUploadInput, type UploadResult } from '../primitives/CsvUploadInput';
 import { ContentRenderer, type RenderSchema } from '../primitives/ContentRenderer';
 import { SubmoduleOptions } from '../primitives/SubmoduleOptions';
 import { UrlTextarea, parseTextareaToEntities } from '../primitives/UrlTextarea';
+import { sanitizeFilename } from '../../utils/sanitize';
 
 type AccordionVariant = 'blue' | 'teal' | 'pink';
 
@@ -26,6 +28,7 @@ const DATA_OP_LABELS: Record<string, string> = { add: 'Add to pool', remove: 'Fi
 interface SubmodulePanelProps {
   stepName: string;
   submodule: SubmoduleManifest | null;
+  projectId: string;
   runId: string | undefined;
   stepIndex: number;
   dataOperation: 'add' | 'remove' | 'transform';
@@ -85,6 +88,7 @@ function PanelAccordionItem({
 export function SubmodulePanel({
   stepName,
   submodule,
+  projectId,
   runId,
   stepIndex,
   dataOperation,
@@ -150,6 +154,39 @@ export function SubmodulePanel({
 
   const itemKey = submodule?.item_key || 'url';
 
+  // --- Full data fetching for detail modal + download ---
+  // Only triggered on demand (detail modal open or download click).
+  // Fetches unstripped output_data including downloadable fields (e.g. text_content).
+  const hasDownloadableFields = !!(renderSchema?.downloadable_fields as unknown[])?.length;
+  const [fullDataRequested, setFullDataRequested] = useState(false);
+  const { data: fullSubmoduleRun } = useSubmoduleRunFull(
+    activeSubmoduleRunId,
+    fullDataRequested && hasDownloadableFields
+  );
+
+  // Reset full data request when switching submodules
+  useEffect(() => { setFullDataRequested(false); }, [submodule?.id]);
+
+  // Merge full data into flatItems when available
+  const mergedFlatItems = useMemo(() => {
+    if (!fullSubmoduleRun?.output_data?.results || flatItems.length === 0) return flatItems;
+    const fullMap = new Map<string, Record<string, unknown>>();
+    for (const entityResult of fullSubmoduleRun.output_data.results) {
+      for (const item of entityResult.items || []) {
+        fullMap.set(String(item[itemKey] ?? ''), item);
+      }
+    }
+    return flatItems.map(item => {
+      const fullItem = fullMap.get(String(item[itemKey] ?? ''));
+      return fullItem ? { ...item, ...fullItem } : item;
+    });
+  }, [flatItems, fullSubmoduleRun?.output_data, itemKey]);
+
+  // Callback for ContentRenderer to request full data (detail modal open)
+  const handleRequestFullData = useCallback(() => {
+    if (hasDownloadableFields) setFullDataRequested(true);
+  }, [hasDownloadableFields]);
+
   // --- Checked items state (only used when selectable) ---
   const [checkedKeys, setCheckedKeys] = useState<Set<string>>(new Set());
 
@@ -164,14 +201,14 @@ export function SubmodulePanel({
     if (submoduleRun?.status === 'approved' && submoduleRun.approved_items) {
       setCheckedKeys(new Set(submoduleRun.approved_items));
     } else if (submoduleRun?.status === 'completed') {
-      // Pre-deselect flagged items (duplicates, excluded, dead links, AI-dropped)
+      // Pre-deselect flagged items using manifest-declared flagged_when rules
+      const flaggedWhen = renderSchema?.flagged_when;
       const selectedKeys = flatItems
         .filter((item) => {
-          const status = item.status as string | undefined;
-          const relevance = item.relevance as string | undefined;
-          if (status === 'duplicate' || status === 'excluded' || status === 'dead_link') return false;
-          if (relevance === 'DROP') return false;
-          return true;
+          if (!flaggedWhen) return true;
+          return !Object.entries(flaggedWhen).some(
+            ([field, values]) => values.includes(String(item[field] ?? ''))
+          );
         })
         .map((item) => String(item[itemKey] ?? ''))
         .filter(Boolean);
@@ -405,6 +442,7 @@ export function SubmodulePanel({
         onSuccess: () => {
           closeSubmodulePanel();
           queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', runId, stepIndex] });
+          queryClient.invalidateQueries({ queryKey: ['run', runId] });
         },
       }
     );
@@ -601,6 +639,7 @@ export function SubmodulePanel({
                 options={submodule.options || []}
                 values={localOptions}
                 onChange={handleOptionChange}
+                projectId={projectId}
               />
 
               {/* SAVE OPTIONS button */}
@@ -641,7 +680,7 @@ export function SubmodulePanel({
           >
             <ResultsContent
               submoduleRun={submoduleRun ?? null}
-              flatItems={flatItems}
+              flatItems={mergedFlatItems}
               renderSchema={renderSchema}
               itemKey={itemKey}
               dataOperation={dataOperation}
@@ -652,6 +691,9 @@ export function SubmodulePanel({
               onChangeInput={handleChangeInput}
               onChangeOptions={handleChangeOptions}
               onTryAgain={handleTryAgain}
+              submoduleId={submodule.id}
+              submoduleRunStatus={submoduleRun?.status ?? null}
+              onRequestFullData={handleRequestFullData}
             />
           </PanelAccordionItem>
         </div>
@@ -720,6 +762,9 @@ function ResultsContent({
   onChangeInput,
   onChangeOptions,
   onTryAgain,
+  submoduleId,
+  submoduleRunStatus,
+  onRequestFullData,
 }: {
   submoduleRun: { status: string; progress: { current: number; total: number; message: string } | null; error: string | null } | null;
   flatItems: Array<Record<string, unknown> & { entity_name: string }>;
@@ -733,6 +778,9 @@ function ResultsContent({
   onChangeInput: () => void;
   onChangeOptions: () => void;
   onTryAgain: () => void;
+  submoduleId: string;
+  submoduleRunStatus: string | null;
+  onRequestFullData?: () => void;
 }) {
   // No run yet
   if (!submoduleRun) {
@@ -819,6 +867,7 @@ function ResultsContent({
           dataOperation={dataOperation}
           checkedKeys={checkedKeys}
           onCheckedKeysChange={onCheckedKeysChange}
+          onRequestFullData={onRequestFullData}
           fullHeight
         />
       </div>
@@ -831,6 +880,11 @@ function ResultsContent({
         showDownload
         entities={flatItems}
         renderSchema={renderSchema}
+        submoduleId={submoduleId}
+        checkedKeys={checkedKeys}
+        itemKey={itemKey}
+        submoduleRunStatus={submoduleRunStatus}
+        onRequestFullData={onRequestFullData}
       />
     </div>
   );
@@ -846,6 +900,11 @@ function ResultsActionCTAs({
   showDownload,
   entities,
   renderSchema,
+  submoduleId,
+  checkedKeys,
+  itemKey,
+  submoduleRunStatus,
+  onRequestFullData,
 }: {
   onChangeInput: () => void;
   onChangeOptions: () => void;
@@ -853,10 +912,26 @@ function ResultsActionCTAs({
   showDownload?: boolean;
   entities?: Record<string, unknown>[];
   renderSchema?: RenderSchema | null;
+  submoduleId?: string;
+  checkedKeys?: Set<string>;
+  itemKey?: string;
+  submoduleRunStatus?: string | null;
+  onRequestFullData?: () => void;
 }) {
+  const showToast = useAppStore((s) => s.showToast);
+  const [zipping, setZipping] = useState(false);
+  const [downloadPending, setDownloadPending] = useState(false);
+
+  const downloadableFields = renderSchema?.downloadable_fields as DownloadableField[] | undefined;
+
+  // Check if entities have full downloadable field data loaded
+  const hasFullData = !!(downloadableFields?.length && entities?.some(
+    (e) => e[downloadableFields[0].field] != null && String(e[downloadableFields[0].field]).length > 0
+  ));
+
   const handleDownload = () => {
     if (!entities || entities.length === 0) return;
-    const metaFields = new Set(['display_type', 'selectable']);
+    const metaFields = new Set(['display_type', 'selectable', 'detail_schema', 'downloadable_fields', 'flagged_when']);
     const columns = renderSchema
       ? Object.keys(renderSchema).filter((k) => !metaFields.has(k))
       : Object.keys(entities[0]);
@@ -879,6 +954,83 @@ function ResultsActionCTAs({
     URL.revokeObjectURL(url);
   };
 
+  // Core zip creation logic (called when data is ready)
+  const performDownloadAll = useCallback(async () => {
+    if (!entities?.length || !downloadableFields?.length) return;
+    try {
+      setZipping(true);
+      const zip = new JSZip();
+
+      for (const entity of entities) {
+        const entityName = String(entity.entity_name || 'entity');
+        const safeName = sanitizeFilename(entityName);
+        const isRejected = submoduleRunStatus === 'approved'
+          && checkedKeys
+          && !checkedKeys.has(String(entity[itemKey ?? 'url'] ?? ''));
+        const folderName = isRejected ? `REJECTED-${safeName}` : safeName;
+        const folder = zip.folder(folderName);
+        if (!folder) continue;
+
+        // Derive unique filename per item from URL path (or key value)
+        const keyVal = String(entity[itemKey ?? 'url'] ?? '');
+        let itemSlug = safeName;
+        if (keyVal.startsWith('http')) {
+          try {
+            const pathParts = new URL(keyVal).pathname.split('/').filter(Boolean);
+            const lastPart = pathParts[pathParts.length - 1] || pathParts[pathParts.length - 2] || safeName;
+            itemSlug = sanitizeFilename(lastPart.slice(0, 80));
+          } catch { /* keep safeName */ }
+        }
+
+        for (const df of downloadableFields) {
+          const raw = entity[df.field];
+          if (!raw) continue;
+          const content = typeof raw === 'object' && raw !== null
+            ? JSON.stringify(raw, null, 2)
+            : String(raw);
+          folder.file(
+            `${itemSlug}.${df.extension}`,
+            content
+          );
+        }
+      }
+
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${submoduleId || 'results'}-content.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Zip generation failed:', err);
+      showToast('Zip generation failed', 'error');
+    } finally {
+      setZipping(false);
+    }
+  }, [entities, downloadableFields, submoduleId, checkedKeys, itemKey, submoduleRunStatus, showToast]);
+
+  // Auto-trigger download when pending and full data arrives
+  useEffect(() => {
+    if (downloadPending && hasFullData) {
+      setDownloadPending(false);
+      performDownloadAll();
+    }
+  }, [downloadPending, hasFullData, performDownloadAll]);
+
+  const handleDownloadAll = () => {
+    if (!entities?.length || !downloadableFields?.length) return;
+    if (hasFullData) {
+      // Data already loaded — download immediately
+      performDownloadAll();
+    } else {
+      // Request full data, download will auto-trigger when it arrives
+      onRequestFullData?.();
+      setDownloadPending(true);
+      showToast('Loading full content...', 'info');
+    }
+  };
+
   return (
     <div className="flex items-center gap-2 flex-shrink-0 pt-2 border-t border-gray-100">
       <button
@@ -899,6 +1051,15 @@ function ResultsActionCTAs({
           className="text-xs text-gray-500 hover:underline"
         >
           Download
+        </button>
+      )}
+      {showDownload && downloadableFields && downloadableFields.length > 0 && (
+        <button
+          onClick={handleDownloadAll}
+          disabled={zipping}
+          className="text-xs text-gray-500 hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {zipping ? 'Generating...' : 'Download All'}
         </button>
       )}
       <button

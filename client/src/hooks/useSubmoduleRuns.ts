@@ -28,6 +28,23 @@ export function useSubmoduleRun(submoduleRunId: string | null, enabled = true) {
 }
 
 /**
+ * Fetch full submodule run data (including downloadable fields like text_content).
+ * Only fetches when enabled=true — use on-demand when detail modal opens or download is clicked.
+ * Cached for 5 minutes since the data rarely changes after completion.
+ */
+export function useSubmoduleRunFull(submoduleRunId: string | null, enabled = false) {
+  return useQuery<SubmoduleRun | null>({
+    queryKey: ['submoduleRunFull', submoduleRunId],
+    queryFn: () => {
+      if (!submoduleRunId) return null;
+      return api.getSubmoduleRunFull(submoduleRunId);
+    },
+    enabled: enabled && !!submoduleRunId,
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+/**
  * Trigger submodule execution.
  * Returns { submodule_run_id, status: "pending" }.
  */

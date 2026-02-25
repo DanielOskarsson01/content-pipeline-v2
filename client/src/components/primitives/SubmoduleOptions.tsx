@@ -1,21 +1,24 @@
 import type { SubmoduleOption } from '../../types/step';
+import { ReferenceDocSelector } from './ReferenceDocSelector';
 
 interface SubmoduleOptionsProps {
   options: SubmoduleOption[];
   values: Record<string, unknown>;
   onChange: (name: string, value: unknown) => void;
+  projectId: string;
 }
 
 /**
  * Dynamic form generator for submodule options.
  *
  * Renders form fields based on manifest options[] array.
- * Supports: select, checkbox/boolean, number, text, textarea.
+ * Supports: select, checkbox/boolean, number, text, textarea, doc_selector.
  */
 export function SubmoduleOptions({
   options,
   values,
   onChange,
+  projectId,
 }: SubmoduleOptionsProps) {
   if (options.length === 0) {
     return (
@@ -123,6 +126,23 @@ export function SubmoduleOptions({
                       <span className="ml-1">(max {option.maxLength} chars)</span>
                     )}
                   </p>
+                )}
+              </div>
+            );
+
+          case 'doc_selector':
+            return (
+              <div key={option.name}>
+                <label className="block text-xs text-gray-600 mb-1">
+                  {option.label}
+                </label>
+                <ReferenceDocSelector
+                  projectId={projectId}
+                  value={Array.isArray(value) ? value as string[] : []}
+                  onChange={(docIds) => onChange(option.name, docIds)}
+                />
+                {option.description && (
+                  <p className="text-[10px] text-gray-400 mt-1">{option.description}</p>
                 )}
               </div>
             );

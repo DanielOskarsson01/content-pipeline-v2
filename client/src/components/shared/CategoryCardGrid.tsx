@@ -20,7 +20,13 @@ export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, 
   const { openSubmodulePanel } = usePanelStore();
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
 
-  const categoryEntries = Object.entries(categories);
+  // Sort categories in logical pipeline order (not alphabetical/load order)
+  const CATEGORY_ORDER: Record<string, number> = {
+    crawling: 1, news: 2, filtering: 3, scraping: 4, analysis: 5, planning: 6, generation: 7,
+  };
+  const categoryEntries = Object.entries(categories).sort(
+    ([a], [b]) => (CATEGORY_ORDER[a] ?? 99) - (CATEGORY_ORDER[b] ?? 99)
+  );
 
   if (categoryEntries.length === 0) {
     return (
@@ -114,11 +120,16 @@ function SubmoduleRow({
   onCycleDataOp?: () => void;
 }) {
   const opIcon = DATA_OP_ICONS[currentDataOp] || '\uFF1D';
+  const isActive = submodule.active !== false;
 
   return (
     <div
-      className="flex items-center justify-between p-2 rounded hover:bg-gray-50 cursor-pointer group"
-      onClick={() => onOpen(submodule.id, categoryKey)}
+      className={`flex items-center justify-between p-2 rounded ${
+        isActive
+          ? 'hover:bg-gray-50 cursor-pointer group'
+          : 'opacity-40 cursor-default'
+      }`}
+      onClick={isActive ? () => onOpen(submodule.id, categoryKey) : undefined}
     >
       <div className="flex items-center gap-2">
         <button
@@ -127,8 +138,9 @@ function SubmoduleRow({
           title={`Data operation: ${currentDataOp} (click to change)`}
           onClick={(e) => {
             e.stopPropagation();
-            onCycleDataOp?.();
+            if (isActive) onCycleDataOp?.();
           }}
+          disabled={!isActive}
         >
           {opIcon}
         </button>
@@ -138,18 +150,24 @@ function SubmoduleRow({
         </div>
       </div>
       <div className="flex items-center gap-2">
-        <SubmoduleStatusBadge latestRun={latestRun} />
-        <svg
-          className="w-4 h-4 text-gray-400 opacity-50 group-hover:opacity-100"
-          fill="currentColor"
-          viewBox="0 0 20 20"
-        >
-          <path
-            fillRule="evenodd"
-            d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
-            clipRule="evenodd"
-          />
-        </svg>
+        {isActive ? (
+          <>
+            <SubmoduleStatusBadge latestRun={latestRun} />
+            <svg
+              className="w-4 h-4 text-gray-400 opacity-50 group-hover:opacity-100"
+              fill="currentColor"
+              viewBox="0 0 20 20"
+            >
+              <path
+                fillRule="evenodd"
+                d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </>
+        ) : (
+          <span className="text-[10px] text-gray-300 italic">inactive</span>
+        )}
       </div>
     </div>
   );

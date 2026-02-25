@@ -147,7 +147,14 @@ export function getSubmodulesGroupedByCategory(stepIndex) {
       options: manifest.options || [],
       options_defaults: manifest.options_defaults || {},
       output_schema: manifest.output_schema,
+      sort_order: manifest.sort_order ?? 99,
+      active: manifest.active !== false,
     });
+  }
+
+  // Sort submodules within each category by sort_order
+  for (const cat of Object.keys(groups)) {
+    groups[cat].sort((a, b) => a.sort_order - b.sort_order);
   }
 
   return groups;

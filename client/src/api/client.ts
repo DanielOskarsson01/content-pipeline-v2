@@ -62,6 +62,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  deleteProject: (id: string) =>
+    apiFetch<{ deleted: boolean; runs_deleted: number }>(`/api/projects/${id}`, {
+      method: 'DELETE',
+    }),
 
   // Runs
   getRun: (id: string) => apiFetch<RunWithStages>(`/api/runs/${id}`),
@@ -99,6 +103,8 @@ export const api = {
     ),
   getSubmoduleRun: (submoduleRunId: string) =>
     apiFetch<SubmoduleRun>(`/api/submodule-runs/${submoduleRunId}`),
+  getSubmoduleRunFull: (submoduleRunId: string) =>
+    apiFetch<SubmoduleRun>(`/api/submodule-runs/${submoduleRunId}?full=true`),
   approveSubmoduleRun: (submoduleRunId: string, approvedItemKeys: string[]) =>
     apiFetch<ApproveSubmoduleRunResponse>(`/api/submodule-runs/${submoduleRunId}/approve`, {
       method: 'POST',

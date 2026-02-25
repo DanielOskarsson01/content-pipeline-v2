@@ -54,8 +54,9 @@ export function CsvUploadInput({
   };
 
   const uploadFile = async (file: File) => {
-    if (!file.name.endsWith('.csv')) {
-      onError?.('Please upload a CSV file');
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (!ext || !['csv', 'xlsx', 'xls'].includes(ext)) {
+      onError?.('Please upload a CSV or Excel (.xlsx/.xls) file');
       return;
     }
 
@@ -98,7 +99,7 @@ export function CsvUploadInput({
       <div className="bg-green-50 border border-green-200 rounded-lg p-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="text-green-600 text-sm">CSV</span>
+            <span className="text-green-600 text-sm">{currentFileName?.match(/\.xlsx?$/i) ? 'XLS' : 'CSV'}</span>
             <div>
               <p className="text-sm font-medium text-green-800">{currentFileName}</p>
               <p className="text-xs text-green-600">{currentEntityCount} entities loaded</p>
@@ -114,7 +115,7 @@ export function CsvUploadInput({
         <input
           ref={fileInputRef}
           type="file"
-          accept=".csv"
+          accept=".csv,.xlsx,.xls"
           onChange={handleFileChange}
           className="hidden"
         />
@@ -138,12 +139,12 @@ export function CsvUploadInput({
       <input
         ref={fileInputRef}
         type="file"
-        accept=".csv"
+        accept=".csv,.xlsx,.xls"
         onChange={handleFileChange}
         className="hidden"
       />
       <p className="text-xs text-gray-500">
-        {isDragging ? 'Drop CSV here' : 'Drop CSV or click to browse'}
+        {isDragging ? 'Drop file here' : 'Drop CSV/Excel or click to browse'}
       </p>
       {requiredColumns.length > 0 && (
         <p className="text-[10px] text-gray-400 mt-1">

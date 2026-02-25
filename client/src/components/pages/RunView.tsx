@@ -117,6 +117,7 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
               ) : stage ? (
                 <UniversalStepTemplate
                   stage={stage}
+                  projectId={projectId}
                   onApprove={() => approveStep.mutate(stepCfg.index)}
                   onSkip={() => skipStep.mutate(stepCfg.index)}
                   onReopen={() => reopenStep.mutate(stepCfg.index)}

@@ -15,6 +15,7 @@ import { ContentRenderer, type RenderSchema } from '../primitives/ContentRendere
 
 interface UniversalStepTemplateProps {
   stage: PipelineStage;
+  projectId: string;
   onApprove: () => void;
   onSkip: () => void;
   onReopen?: () => void;
@@ -23,7 +24,7 @@ interface UniversalStepTemplateProps {
   isReopening?: boolean;
 }
 
-export function UniversalStepTemplate({ stage, onApprove, onSkip, onReopen, isApproving, isSkipping, isReopening }: UniversalStepTemplateProps) {
+export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onReopen, isApproving, isSkipping, isReopening }: UniversalStepTemplateProps) {
   const queryClient = useQueryClient();
   const showToast = useAppStore((s) => s.showToast);
   const isCompleted = stage.status === 'completed';
@@ -163,6 +164,7 @@ export function UniversalStepTemplate({ stage, onApprove, onSkip, onReopen, isAp
       <SubmodulePanel
         stepName={stage.step_name}
         submodule={activeSubmodule}
+        projectId={projectId}
         runId={stage.run_id}
         stepIndex={stage.step_index}
         dataOperation={currentDataOp}

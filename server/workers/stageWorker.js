@@ -11,8 +11,11 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 import db from '../services/db.js';
 import { redis } from '../services/queue.js';
-import { getSubmoduleById } from '../services/moduleLoader.js';
+import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { notifyCompletion, notifyFailure } from '../services/webhookNotifier.js';
+
+// Load submodule manifests (worker is a separate process from server.js)
+loadModules();
 
 const COST_TIMEOUTS = {
   cheap: 5 * 60 * 1000,
@@ -123,7 +126,7 @@ function buildTools(submoduleRunId, submoduleId) {
           },
           body: JSON.stringify({
             model: modelId,
-            max_tokens: 4096,
+            max_tokens: 8192,
             messages: [{ role: 'user', content: prompt }],
           }),
         });
@@ -254,10 +257,80 @@ const worker = new Worker(
       timeoutTimer = setTimeout(() => reject(new Error(`Execution timed out after ${timeout / 1000}s`)), timeout);
     });
 
-    // 7. Execute with timeout
+    // 7. Prepare input + options
     const input = run.input_data;
     const options = run.options || manifest.options_defaults || {};
 
+    // 7b. Enrich input items with downloadable fields from upstream submodule runs.
+    //     Downloadable fields (e.g. text_content) are stored separately in
+    //     submodule_run_item_data and stripped from pool items to prevent row-size
+    //     limits. If this submodule requires those fields, merge them back in-memory.
+    const requiresColumns = manifest.requires_columns || [];
+    if (requiresColumns.length > 0 && input?.entities?.length > 0) {
+      const allItems = input.entities.flatMap(e => e.items || []);
+      if (allItems.length > 0) {
+        const sampleItems = allItems.slice(0, 10);
+        const missingColumns = requiresColumns.filter(col =>
+          sampleItems.every(item => !item[col] || String(item[col]).length === 0)
+        );
+
+        if (missingColumns.length > 0) {
+          console.log(`[worker] Enriching: ${missingColumns.join(', ')} missing from ${allItems.length} items`);
+
+          // Find all completed/approved submodule_run_ids for this pipeline run
+          const pipelineRunId = input.run_id || run.run_id;
+          const { data: upstreamRuns } = await db
+            .from('submodule_runs')
+            .select('id')
+            .eq('run_id', pipelineRunId)
+            .in('status', ['completed', 'approved']);
+
+          const upstreamRunIds = (upstreamRuns || []).map(r => r.id)
+            .filter(id => id !== submodule_run_id);
+
+          if (upstreamRunIds.length > 0) {
+            // Collect all item keys (URLs) from input
+            const itemKeys = [...new Set(
+              allItems.map(item => String(item.url ?? '')).filter(Boolean)
+            )];
+
+            // Fetch from separate table in batches
+            const ENRICH_BATCH = 200;
+            const lookup = new Map();
+            for (let i = 0; i < itemKeys.length; i += ENRICH_BATCH) {
+              const keyBatch = itemKeys.slice(i, i + ENRICH_BATCH);
+              const { data: itemData } = await db
+                .from('submodule_run_item_data')
+                .select('item_key, field_name, content')
+                .in('submodule_run_id', upstreamRunIds)
+                .in('field_name', missingColumns)
+                .in('item_key', keyBatch);
+
+              for (const row of (itemData || [])) {
+                if (!lookup.has(row.item_key)) lookup.set(row.item_key, {});
+                lookup.get(row.item_key)[row.field_name] = row.content;
+              }
+            }
+
+            // Merge into items in memory (not persisted back to DB)
+            let mergedCount = 0;
+            for (const entity of input.entities) {
+              for (const item of (entity.items || [])) {
+                const key = String(item.url ?? '');
+                const extra = lookup.get(key);
+                if (extra) {
+                  Object.assign(item, extra);
+                  mergedCount++;
+                }
+              }
+            }
+            console.log(`[worker] Enriched ${mergedCount}/${allItems.length} items with ${missingColumns.join(', ')}`);
+          }
+        }
+      }
+    }
+
+    // 8. Execute with timeout
     let result;
     try {
       result = await Promise.race([executeFn(input, options, tools), timeoutPromise]);
@@ -278,18 +351,100 @@ const worker = new Worker(
       clearTimeout(timeoutTimer);
     }
 
-    // 8. Write success
-    await db
+    // 9. Store downloadable fields separately, then write stripped result to main row.
+    //    This prevents row-size limits from losing data (e.g. 1000+ pages of text_content).
+    const downloadFieldDefs = manifest.output_schema?.downloadable_fields || [];
+    if (downloadFieldDefs.length > 0 && result?.results) {
+      const downloadFieldNames = downloadFieldDefs.map((d) => d.field);
+      const itemKeyField = manifest.item_key || 'url';
+      const itemDataRows = [];
+
+      for (const entityResult of result.results) {
+        for (const item of (entityResult.items || [])) {
+          const key = String(item[itemKeyField] ?? '');
+          if (!key) continue;
+          for (const field of downloadFieldNames) {
+            const content = item[field];
+            if (content != null) {
+              // Serialize objects as JSON, primitives as strings
+              const serialized = (typeof content === 'object')
+                ? JSON.stringify(content)
+                : String(content);
+              if (serialized.length > 0) {
+                itemDataRows.push({
+                  submodule_run_id: submodule_run_id,
+                  item_key: key,
+                  field_name: field,
+                  content: serialized,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // Batch insert to separate table
+      if (itemDataRows.length > 0) {
+        const BATCH_SIZE = 500;
+        let storedCount = 0;
+        for (let i = 0; i < itemDataRows.length; i += BATCH_SIZE) {
+          const batch = itemDataRows.slice(i, i + BATCH_SIZE);
+          const { error: itemErr } = await db
+            .from('submodule_run_item_data')
+            .insert(batch);
+          if (itemErr) {
+            console.warn(`[worker] Failed to store item data batch ${i}/${itemDataRows.length} for ${submodule_id}: ${itemErr.message}`);
+          } else {
+            storedCount += batch.length;
+          }
+        }
+        console.log(`[worker] Stored ${storedCount}/${itemDataRows.length} downloadable field entries for ${submodule_id}`);
+      }
+
+      // Only strip from main result if total downloadable data is large (>1MB).
+      // Small fields (e.g. analysis_json ~5KB) stay in output so they propagate
+      // through the working pool to downstream submodules. Large fields (e.g.
+      // text_content ~50MB) are stripped to prevent row-size limits.
+      const totalDownloadableSize = itemDataRows.reduce((sum, row) => sum + row.content.length, 0);
+      const STRIP_THRESHOLD = 1 * 1024 * 1024; // 1MB
+
+      if (totalDownloadableSize > STRIP_THRESHOLD) {
+        console.log(`[worker] Stripping ${downloadFieldNames.join(', ')} from output (${(totalDownloadableSize / 1024 / 1024).toFixed(1)}MB exceeds 1MB threshold)`);
+        for (const entityResult of result.results) {
+          for (const item of (entityResult.items || [])) {
+            for (const field of downloadFieldNames) {
+              delete item[field];
+            }
+          }
+        }
+      } else {
+        console.log(`[worker] Keeping downloadable fields in output (${(totalDownloadableSize / 1024).toFixed(0)}KB under 1MB threshold)`);
+      }
+    }
+
+    // 10. Write (now-stripped) result to main submodule_runs row
+    const writePayload = {
+      status: 'completed',
+      output_data: result,
+      output_render_schema: manifest.output_schema || null,
+      logs: tools._logs,
+      progress: { current: 1, total: 1, message: 'Done' },
+      completed_at: new Date().toISOString(),
+    };
+
+    const { error: writeErr } = await db
       .from('submodule_runs')
-      .update({
-        status: 'completed',
-        output_data: result,
-        output_render_schema: manifest.output_schema || null,
-        logs: tools._logs,
-        progress: { current: 1, total: 1, message: 'Done' },
-        completed_at: new Date().toISOString(),
-      })
+      .update(writePayload)
       .eq('id', submodule_run_id);
+
+    if (writeErr) {
+      console.error(`[worker] Output write failed for ${submodule_id}: ${writeErr.message}`);
+      await db
+        .from('submodule_runs')
+        .update({ status: 'failed', error: `Output write failed: ${writeErr.message}`, logs: tools._logs, completed_at: new Date().toISOString() })
+        .eq('id', submodule_run_id);
+      throw writeErr;
+    }
 
     console.log(`[worker] Completed: ${submodule_id} (run ${submodule_run_id})`);
     notifyCompletion({ submoduleId: submodule_id, submoduleRunId: submodule_run_id, runId: run.run_id, stepIndex: step_index, result });

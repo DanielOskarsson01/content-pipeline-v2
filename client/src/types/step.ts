@@ -75,11 +75,13 @@ export interface SubmoduleManifest {
   options: SubmoduleOption[];
   options_defaults: Record<string, unknown>;
   output_schema: Record<string, string>;
+  sort_order?: number;
+  active?: boolean;
 }
 
 export interface SubmoduleOption {
   name: string;
-  type: 'boolean' | 'number' | 'text' | 'select' | 'textarea';
+  type: 'boolean' | 'number' | 'text' | 'select' | 'textarea' | 'doc_selector';
   label: string;
   description: string;
   default: unknown;
@@ -142,6 +144,13 @@ export interface SubmoduleLatestRun {
 }
 
 export type SubmoduleLatestRunMap = Record<string, SubmoduleLatestRun>;
+
+// Downloadable field declaration (from manifest output_schema)
+export interface DownloadableField {
+  field: string;
+  extension: string;
+  label: string;
+}
 
 // Approval response
 export interface ApproveSubmoduleRunResponse {

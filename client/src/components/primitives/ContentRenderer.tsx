@@ -1,12 +1,16 @@
 import { useRef, useMemo, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { DetailModal, type DetailSchema } from './DetailModal';
+import type { DownloadableField } from '../../types/step';
 
 /** Render schema from output_schema — drives display_type, selectable, columns */
 export interface RenderSchema {
   display_type?: string;
   selectable?: boolean;
   detail_schema?: DetailSchema;
+  downloadable_fields?: DownloadableField[];
+  /** Manifest-driven flagging: { field: [values] } — items matching are red-highlighted and auto-deselected */
+  flagged_when?: Record<string, string[]>;
   [field: string]: unknown;
 }
 
@@ -32,6 +36,8 @@ export interface ContentRendererProps {
   itemKey?: string;
   /** Current data operation — shown as per-row icon when selectable */
   dataOperation?: string;
+  /** Callback to request full data loading (e.g. for detail modal with downloadable fields) */
+  onRequestFullData?: () => void;
 }
 
 const DATA_OP_ICONS: Record<string, string> = { add: '\u2795', remove: '\u2796', transform: '\uFF1D' };
@@ -62,20 +68,24 @@ export function ContentRenderer({
   onCheckedKeysChange,
   itemKey = 'url',
   dataOperation,
+  onRequestFullData,
 }: ContentRendererProps) {
   const parentRef = useRef<HTMLDivElement>(null);
 
   const selectable = renderSchema?.selectable === true && !!checkedKeys && !!onCheckedKeysChange;
   const detailSchema = (renderSchema?.detail_schema as DetailSchema | undefined) ?? null;
+  const downloadableFields = renderSchema?.downloadable_fields;
+  const flaggedWhen = renderSchema?.flagged_when;
 
-  // Detail modal state
-  const [detailItem, setDetailItem] = useState<{ item: Record<string, unknown>; index: number } | null>(null);
+  // Detail modal state — stores index only; reads live from entities for freshest data
+  const [detailItem, setDetailItem] = useState<{ index: number } | null>(null);
+  const detailItemData = detailItem ? entities[detailItem.index] : null;
 
   // Derive columns from renderSchema field definitions (exclude meta fields) or from props/data
   const columns = useMemo(() => {
     if (columnsProp) return columnsProp;
     if (renderSchema) {
-      const metaFields = new Set(['display_type', 'selectable', 'detail_schema']);
+      const metaFields = new Set(['display_type', 'selectable', 'detail_schema', 'flagged_when', 'downloadable_fields']);
       return Object.keys(renderSchema).filter((k) => !metaFields.has(k));
     }
     return entities.length > 0 ? Object.keys(entities[0]) : [];
@@ -143,10 +153,11 @@ export function ContentRenderer({
   };
 
   // --- Row click handler ---
-  const handleRowClick = (entity: Record<string, unknown>, index: number, key: string) => {
+  const handleRowClick = (_entity: Record<string, unknown>, index: number, key: string) => {
     if (detailSchema) {
       // Has detail_schema: row click opens modal (checkbox has stopPropagation)
-      setDetailItem({ item: entity, index });
+      onRequestFullData?.(); // Trigger loading of full data (downloadable fields)
+      setDetailItem({ index });
     } else if (selectable) {
       // No detail_schema + selectable: row click toggles checkbox
       toggleItem(key);
@@ -234,8 +245,9 @@ export function ContentRenderer({
             const entity = entities[virtualItem.index];
             const key = String(entity[itemKey] ?? `row-${virtualItem.index}`);
             const isChecked = selectable ? checkedKeys!.has(key) : true;
-            const isFlagged = entity.status === 'duplicate' || entity.status === 'excluded'
-              || entity.status === 'dead_link' || entity.relevance === 'DROP';
+            const isFlagged = flaggedWhen ? Object.entries(flaggedWhen).some(
+              ([field, values]) => values.includes(String(entity[field] ?? ''))
+            ) : false;
             const isClickable = selectable || !!detailSchema;
 
             return (
@@ -307,21 +319,22 @@ export function ContentRenderer({
       </div>
 
       {/* Detail modal — only rendered when an item is selected for inspection */}
-      {detailItem && detailSchema && (
+      {detailItem && detailItemData && detailSchema && (
         <DetailModal
-          item={detailItem.item}
+          item={detailItemData}
           index={detailItem.index}
           totalItems={entities.length}
           detailSchema={detailSchema}
           onClose={() => setDetailItem(null)}
           onNavigate={(newIndex) => {
             if (newIndex >= 0 && newIndex < entities.length) {
-              setDetailItem({ item: entities[newIndex], index: newIndex });
+              setDetailItem({ index: newIndex });
             }
           }}
+          downloadableFields={downloadableFields}
           {...(selectable ? {
-            isChecked: checkedKeys!.has(String(detailItem.item[itemKey] ?? '')),
-            onToggle: () => toggleItem(String(detailItem.item[itemKey] ?? '')),
+            isChecked: checkedKeys!.has(String(detailItemData[itemKey] ?? '')),
+            onToggle: () => toggleItem(String(detailItemData[itemKey] ?? '')),
           } : {})}
         />
       )}

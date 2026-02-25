@@ -1,4 +1,6 @@
 import { useEffect, useCallback } from 'react';
+import type { DownloadableField } from '../../types/step';
+import { sanitizeFilename } from '../../utils/sanitize';
 
 // --- Types ---
 
@@ -30,6 +32,8 @@ interface DetailModalProps {
   /** When set, shows an approve/reject checkbox in the header */
   isChecked?: boolean;
   onToggle?: () => void;
+  /** When set, shows a download button for the entity's content */
+  downloadableFields?: DownloadableField[];
 }
 
 // --- Badge colors ---
@@ -55,10 +59,29 @@ export function DetailModal({
   onNavigate,
   isChecked,
   onToggle,
+  downloadableFields,
 }: DetailModalProps) {
   const showCheckbox = isChecked !== undefined && !!onToggle;
   const hasPrev = index > 0;
   const hasNext = index < totalItems - 1;
+
+  const handleDownload = () => {
+    if (!downloadableFields?.[0]) return;
+    const df = downloadableFields[0];
+    const raw = item[df.field];
+    if (!raw) return;
+    const safeName = sanitizeFilename(String(item.entity_name || 'entity'));
+    const content = typeof raw === 'object' && raw !== null
+      ? JSON.stringify(raw, null, 2)
+      : String(raw);
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${safeName}.${df.extension}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -99,6 +122,14 @@ export function DetailModal({
                 />
                 {isChecked ? 'Approved' : 'Rejected'}
               </label>
+            )}
+            {downloadableFields && downloadableFields.length > 0 && item[downloadableFields[0].field] && (
+              <button
+                onClick={handleDownload}
+                className="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-700 hover:bg-gray-200"
+              >
+                {'\u2193'} Download
+              </button>
             )}
             <button
               onClick={() => onNavigate(index - 1)}

@@ -10,6 +10,7 @@ import submodulesRouter from './routes/submodules.js';
 import submoduleConfigRouter from './routes/submoduleConfig.js';
 import stepContextRouter from './routes/stepContext.js';
 import { executeRouter, submoduleRunRouter, latestRunsRouter } from './routes/submoduleRuns.js';
+import referenceDocsRouter from './routes/referenceDocs.js';
 import { loadModules } from './services/moduleLoader.js';
 
 // Import worker — starts BullMQ worker in the same process
@@ -36,6 +37,7 @@ app.use('/api/runs/:runId/steps/:stepIndex/submodules/:submoduleId', executeRout
 app.use('/api/runs/:runId/steps/:stepIndex/context', stepContextRouter);
 app.use('/api/runs/:runId/steps/:stepIndex/submodule-runs', latestRunsRouter);
 app.use('/api/submodule-runs', submoduleRunRouter);
+app.use('/api/projects/:projectId/reference-docs', referenceDocsRouter);
 
 // Load submodule manifests from MODULES_PATH
 loadModules();

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { parse } from 'csv-parse';
+import XLSX from 'xlsx';
 import supabase from '../services/db.js';
 import { getSubmodules } from '../services/moduleLoader.js';
 
@@ -52,45 +53,60 @@ router.post('/', upload.single('file'), async (req, res) => {
   }
 
   const ext = req.file.originalname.split('.').pop()?.toLowerCase();
-  if (ext !== 'csv') {
-    return res.status(415).json({ error: 'Unsupported file type. Supported: CSV' });
+  const SUPPORTED_EXTS = ['csv', 'xlsx', 'xls'];
+  if (!SUPPORTED_EXTS.includes(ext)) {
+    return res.status(415).json({ error: `Unsupported file type. Supported: ${SUPPORTED_EXTS.join(', ')}` });
   }
 
-  // Parse CSV
+  // Parse file — CSV or XLSX/XLS
   let records;
   try {
-    let content = req.file.buffer.toString('utf-8');
-
-    // Detect double-encoded CSV: when a spreadsheet app (Numbers/Excel) re-saves a CSV,
-    // it can wrap each row as a single quoted field with doubled internal quotes.
-    // e.g. header becomes: "url,""priority"",""last_modified"""  (one field instead of four)
-    // Fix: strip the outer quoting layer and un-escape doubled quotes.
-    const firstLine = content.split(/\r?\n/)[0];
-    const testParse = await parseCsvAsync(firstLine + '\n', { columns: false, skip_empty_lines: true, bom: true, relax_column_count: true });
-    if (testParse.length > 0 && testParse[0].length === 1 && testParse[0][0].includes(',')) {
-      console.log('[stepContext] Detected double-encoded CSV — stripping outer quoting layer');
-      // Each line is a single quoted field. Un-wrap: strip outer quotes and unescape "" → "
-      const lines = content.split(/\r?\n/);
-      const fixed = lines.map((line) => {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-          // Remove outer quotes and unescape doubled quotes
-          return trimmed.slice(1, -1).replace(/""/g, '"');
+    if (ext === 'xlsx' || ext === 'xls') {
+      // Parse Excel with SheetJS — first sheet only, header row auto-detected
+      const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      if (!sheetName) throw new Error('Workbook has no sheets');
+      records = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' });
+      // Convert all values to strings (sheet_to_json returns numbers/dates as native types)
+      records = records.map(row => {
+        const stringRow = {};
+        for (const [key, value] of Object.entries(row)) {
+          stringRow[key] = value == null ? '' : String(value);
         }
-        return trimmed;
+        return stringRow;
       });
-      content = fixed.join('\n');
-    }
+      console.log(`[stepContext] Parsed ${ext.toUpperCase()}: ${records.length} rows from sheet "${sheetName}"`);
+    } else {
+      // Parse CSV
+      let content = req.file.buffer.toString('utf-8');
 
-    records = await parseCsvAsync(content, {
-      columns: true,
-      skip_empty_lines: true,
-      trim: true,
-      bom: true,
-      relax_column_count: true,
-    });
+      // Detect double-encoded CSV: when a spreadsheet app (Numbers/Excel) re-saves a CSV,
+      // it can wrap each row as a single quoted field with doubled internal quotes.
+      const firstLine = content.split(/\r?\n/)[0];
+      const testParse = await parseCsvAsync(firstLine + '\n', { columns: false, skip_empty_lines: true, bom: true, relax_column_count: true });
+      if (testParse.length > 0 && testParse[0].length === 1 && testParse[0][0].includes(',')) {
+        console.log('[stepContext] Detected double-encoded CSV — stripping outer quoting layer');
+        const lines = content.split(/\r?\n/);
+        const fixed = lines.map((line) => {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+            return trimmed.slice(1, -1).replace(/""/g, '"');
+          }
+          return trimmed;
+        });
+        content = fixed.join('\n');
+      }
+
+      records = await parseCsvAsync(content, {
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+        bom: true,
+        relax_column_count: true,
+      });
+    }
   } catch (err) {
-    return res.status(400).json({ error: `CSV parse error: ${err.message}` });
+    return res.status(400).json({ error: `Parse error: ${err.message}` });
   }
 
   if (records.length === 0) {

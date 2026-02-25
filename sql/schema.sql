@@ -109,3 +109,33 @@ CREATE TABLE IF NOT EXISTS decision_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_decision_log_run_id ON decision_log(run_id);
+
+-- Phase 9c: Project-level reference documents (style guides, templates, brand voice)
+CREATE TABLE IF NOT EXISTS project_reference_docs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  filename TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'text/plain',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(project_id, filename)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_reference_docs_project_id
+  ON project_reference_docs(project_id);
+
+-- Separate storage for large downloadable fields (e.g. text_content from page-scraper).
+-- The main submodule_runs row stores metadata only; full content lives here (one row per item per field).
+-- This avoids Supabase row size limits when scraping 1000+ pages.
+CREATE TABLE IF NOT EXISTS submodule_run_item_data (
+  submodule_run_id UUID NOT NULL REFERENCES submodule_runs(id) ON DELETE CASCADE,
+  item_key TEXT NOT NULL,
+  field_name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  PRIMARY KEY (submodule_run_id, item_key, field_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_submodule_run_item_data_run_id
+  ON submodule_run_item_data(submodule_run_id);

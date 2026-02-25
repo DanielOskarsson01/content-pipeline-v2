@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useProjects } from '../../hooks/useProjects';
+import { useProjects, useDeleteProject } from '../../hooks/useProjects';
+import { useAppStore } from '../../stores/appStore';
 import type { Project } from '../../types/step';
 
 export function ProjectsList() {
@@ -50,6 +52,30 @@ export function ProjectsList() {
 }
 
 function ProjectRow({ project }: { project: Project }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const deleteMutation = useDeleteProject();
+  const showToast = useAppStore((s) => s.showToast);
+
+  const handleDelete = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    deleteMutation.mutate(project.id, {
+      onSuccess: () => {
+        showToast(`Deleted "${project.name}"`, 'success');
+      },
+    });
+  };
+
+  const handleCancelDelete = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setConfirmDelete(false);
+  };
+
   return (
     <Link
       to={`/projects/${project.id}/runs/latest`}
@@ -69,6 +95,33 @@ function ProjectRow({ project }: { project: Project }) {
           <span className="text-xs text-gray-400">
             {new Date(project.created_at).toLocaleDateString()}
           </span>
+          {confirmDelete ? (
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleDelete}
+                disabled={deleteMutation.isPending}
+                className="px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded disabled:opacity-50"
+              >
+                {deleteMutation.isPending ? 'Deleting...' : 'Confirm'}
+              </button>
+              <button
+                onClick={handleCancelDelete}
+                className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={handleDelete}
+              className="p-1 text-gray-300 hover:text-red-500 rounded hover:bg-red-50 transition-colors"
+              title="Delete project"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
     </Link>

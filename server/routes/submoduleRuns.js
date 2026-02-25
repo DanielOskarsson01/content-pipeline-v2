@@ -46,7 +46,7 @@ executeRouter.post('/run', async (req, res) => {
     // 3. Check no active run (409 if pending/running exists)
     const { data: activeRuns } = await db
       .from('submodule_runs')
-      .select('id, status, created_at')
+      .select('id, status, started_at')
       .eq('run_id', runId)
       .eq('submodule_id', submoduleId)
       .in('status', ['pending', 'running']);
@@ -57,9 +57,9 @@ executeRouter.post('/run', async (req, res) => {
       const now = Date.now();
       let allCleared = true;
       for (const run of activeRuns) {
-        const createdAt = run.created_at ? new Date(run.created_at).getTime() : now;
-        if (now - createdAt > STUCK_THRESHOLD_MS) {
-          console.warn(`[execute] Auto-failing stuck run ${run.id} (status: ${run.status}, created: ${run.created_at})`);
+        const startedAt = run.started_at ? new Date(run.started_at).getTime() : 0;
+        if (now - startedAt > STUCK_THRESHOLD_MS) {
+          console.warn(`[execute] Auto-failing stuck run ${run.id} (status: ${run.status}, started: ${run.started_at})`);
           await db
             .from('submodule_runs')
             .update({ status: 'failed', error: 'Auto-cleared: stuck for >10 minutes', completed_at: new Date().toISOString() })
@@ -121,9 +121,24 @@ executeRouter.post('/run', async (req, res) => {
 
     // Priority 0: Entities sent directly in request body (for ＝ operations or first chaining submodule)
     if (!inputData && req.body?.entities?.length > 0) {
-      inputData = { entities: req.body.entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+      let entities = req.body.entities;
       inputFromPool = !!req.body.from_previous_step;
-      console.log(`[execute] Priority 0: ${req.body.entities.length} entities from request body${inputFromPool ? ' (from previous step)' : ''}`);
+
+      // When entities come from previous step pool, they're flat items that need re-grouping
+      // into { name, items: [] } format expected by submodule execute functions
+      if (inputFromPool && entities.length > 0 && !entities[0].items) {
+        const entityMap = new Map();
+        for (const item of entities) {
+          const name = item.entity_name || 'unknown';
+          if (!entityMap.has(name)) entityMap.set(name, { name, items: [] });
+          entityMap.get(name).items.push(item);
+        }
+        entities = Array.from(entityMap.values());
+        console.log(`[execute] Priority 0: Re-grouped ${req.body.entities.length} flat items into ${entities.length} entities`);
+      }
+
+      inputData = { entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+      console.log(`[execute] Priority 0: ${entities.length} entities from request body${inputFromPool ? ' (from previous step)' : ''}`);
     }
 
     // Priority 1: Check saved input_config (user explicitly saved via SAVE INPUT)
@@ -250,6 +265,26 @@ executeRouter.post('/run', async (req, res) => {
 
     const options = optConfig?.options || manifest.options_defaults || {};
 
+    // 5b. Resolve doc_selector options: replace doc ID arrays with {filename: content} maps
+    for (const optDef of (manifest.options || [])) {
+      if (optDef.type === 'doc_selector' && Array.isArray(options[optDef.name])) {
+        const docIds = options[optDef.name];
+        if (docIds.length > 0) {
+          const { data: docs } = await db
+            .from('project_reference_docs')
+            .select('filename, content')
+            .in('id', docIds);
+          const docMap = {};
+          for (const doc of (docs || [])) {
+            docMap[doc.filename] = doc.content;
+          }
+          options[optDef.name] = docMap;
+        } else {
+          options[optDef.name] = {};
+        }
+      }
+    }
+
     // 6. Create submodule_runs row
     const { data: subRun, error: insertErr } = await db
       .from('submodule_runs')
@@ -319,6 +354,50 @@ submoduleRunRouter.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Submodule run not found' });
     }
     if (error) throw error;
+
+    // Downloadable fields (e.g. text_content) are stored in a separate table
+    // (submodule_run_item_data) to avoid row-size limits.
+    // Normal poll: return as-is (already stripped by worker). Safety strip for old data.
+    // ?full=true: merge from separate table for detail modal / download.
+    if (req.query.full === 'true' && data.output_data?.results && data.output_render_schema?.downloadable_fields) {
+      // Merge downloadable fields from separate table
+      const manifest = getSubmoduleById(data.submodule_id);
+      const itemKeyField = manifest?.item_key || 'url';
+
+      const { data: itemData } = await db
+        .from('submodule_run_item_data')
+        .select('item_key, field_name, content')
+        .eq('submodule_run_id', req.params.id);
+
+      if (itemData?.length > 0) {
+        // Build lookup: item_key → { field_name: content }
+        const lookup = new Map();
+        for (const row of itemData) {
+          if (!lookup.has(row.item_key)) lookup.set(row.item_key, {});
+          lookup.get(row.item_key)[row.field_name] = row.content;
+        }
+        // Merge into result items
+        for (const entity of data.output_data.results) {
+          for (const item of (entity.items || [])) {
+            const key = String(item[itemKeyField] ?? '');
+            const extra = lookup.get(key);
+            if (extra) Object.assign(item, extra);
+          }
+        }
+      }
+    } else if (data.output_data?.results && data.output_render_schema?.downloadable_fields) {
+      // Safety strip for normal poll (handles old runs where worker didn't strip)
+      const downloadFields = new Set(
+        data.output_render_schema.downloadable_fields.map((d) => d.field)
+      );
+      for (const entity of data.output_data.results) {
+        for (const item of (entity.items || [])) {
+          for (const field of downloadFields) {
+            delete item[field];
+          }
+        }
+      }
+    }
 
     res.json(data);
   } catch (err) {
@@ -396,6 +475,7 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         approvedItems.push(...approved.map((item) => ({
           ...item,
           entity_name: entityResult.entity_name,
+          source_submodule: subRun.submodule_id,
         })));
       }
     }
@@ -412,36 +492,64 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
     let currentPool = stageRow.working_pool || [];
 
+    console.log(`[approve] Pool BEFORE: ${currentPool.length} items, dataOperation=${dataOperation}, itemKey=${itemKey}, approvedKeys=${approvedKeySet.size}, stageId=${subRun.stage_id}`);
+
+    // Pool dedup key: when items have source_submodule (Step 5 chaining),
+    // use composite key so items from different submodules coexist.
+    // Otherwise, use item_key alone (Steps 1-4, single-submodule items).
+    const poolKey = (item) => {
+      const base = item[itemKey];
+      return item.source_submodule ? `${item.source_submodule}:${base}` : base;
+    };
+
     if (dataOperation === 'add') {
-      // Merge approved items into pool, deduplicate by item_key (later wins)
+      // Merge approved items into pool, deduplicate by pool key (later wins)
       const poolMap = new Map();
       for (const item of currentPool) {
-        poolMap.set(item[itemKey], item);
+        poolMap.set(poolKey(item), item);
       }
       for (const item of approvedItems) {
-        poolMap.set(item[itemKey], item);
+        poolMap.set(poolKey(item), item);
       }
       currentPool = Array.from(poolMap.values());
     } else if (dataOperation === 'remove') {
-      // Replace pool with approved items only (filter operation)
-      currentPool = approvedItems;
+      // Filter pool: keep only items whose key was approved, AND deduplicate.
+      // The pool may contain multiple items with the same key (e.g. same URL
+      // discovered by two Step 1 submodules). The remove filter keeps only
+      // the first occurrence per approved key — matching dedup behavior.
+      const seen = new Set();
+      currentPool = currentPool.filter((item) => {
+        const keyVal = String(item[itemKey] ?? '');
+        if (!approvedKeySet.has(keyVal)) return false;
+        if (seen.has(keyVal)) return false;
+        seen.add(keyVal);
+        return true;
+      });
     } else if (dataOperation === 'transform') {
       // Accumulate: merge approved items into pool (independent submodules, ＝)
       const poolMap = new Map();
       for (const item of currentPool) {
-        poolMap.set(item[itemKey], item);
+        poolMap.set(poolKey(item), item);
       }
       for (const item of approvedItems) {
-        poolMap.set(item[itemKey], item);
+        poolMap.set(poolKey(item), item);
       }
       currentPool = Array.from(poolMap.values());
     }
 
+    console.log(`[approve] Pool AFTER: ${currentPool.length} items`);
+
     // 6. Write updated pool back
-    await db
+    const { error: poolUpdateErr } = await db
       .from('pipeline_stages')
       .update({ working_pool: currentPool })
       .eq('id', subRun.stage_id);
+
+    if (poolUpdateErr) {
+      console.error(`[approve] POOL UPDATE FAILED:`, poolUpdateErr);
+    } else {
+      console.log(`[approve] Pool written to DB successfully (${currentPool.length} items, stage ${subRun.stage_id})`);
+    }
 
     // 7. Update submodule_runs
     await db
