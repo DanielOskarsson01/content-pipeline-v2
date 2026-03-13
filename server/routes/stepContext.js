@@ -9,6 +9,73 @@ const router = Router({ mergeParams: true });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 /**
+ * Column alias map: common header variations → canonical column name.
+ * Keys are lowercase. First match wins.
+ */
+const COLUMN_ALIASES = {
+  // name
+  'company name': 'name',
+  'company_name': 'name',
+  'companyname': 'name',
+  'company': 'name',
+  'entity': 'name',
+  'entity name': 'name',
+  'entity_name': 'name',
+  'brand': 'name',
+  'brand name': 'name',
+  'brand_name': 'name',
+  'operator': 'name',
+  'provider': 'name',
+  // website
+  'url': 'website',
+  'site': 'website',
+  'site url': 'website',
+  'site_url': 'website',
+  'company url': 'website',
+  'company_url': 'website',
+  'homepage': 'website',
+  'home page': 'website',
+  'domain': 'website',
+  'web': 'website',
+  'link': 'website',
+  // youtube
+  'youtube url': 'youtube',
+  'youtube_url': 'youtube',
+  'youtube channel': 'youtube',
+  'youtube_channel': 'youtube',
+  // linkedin
+  'linkedin url': 'linkedin',
+  'linkedin_url': 'linkedin',
+  'linkedin page': 'linkedin',
+  'linkedin_page': 'linkedin',
+};
+
+/**
+ * Rename columns in a record using the alias map.
+ * Only renames if the canonical column isn't already present.
+ */
+function applyColumnAliases(row) {
+  const result = {};
+  const lowered = {};
+  // First pass: lowercase all keys
+  for (const [key, value] of Object.entries(row)) {
+    lowered[key.toLowerCase().trim()] = value;
+  }
+  // Second pass: apply aliases (only if canonical target not already present)
+  for (const [key, value] of Object.entries(lowered)) {
+    const canonical = COLUMN_ALIASES[key];
+    if (canonical && !(canonical in result) && !(canonical in lowered)) {
+      result[canonical] = value;
+    }
+    // Always keep the original (possibly overwritten by canonical above)
+    if (!(key in result)) {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+/**
  * R008 fix: async CSV parse wrapper (non-blocking).
  * Uses csv-parse callback API instead of csv-parse/sync.
  */
@@ -117,22 +184,29 @@ router.post('/', upload.single('file'), async (req, res) => {
     return res.status(400).json({ error: `Too many rows (${records.length}). Maximum: 10,000` });
   }
 
-  // Validate columns against step's union of requires_columns
+  // Apply column aliases to determine what canonical columns are present
+  const sampleAliased = applyColumnAliases(records[0]);
   const requiredColumns = getStepRequiredColumns(step);
   const foundColumns = Object.keys(records[0]);
-  const normalizedFound = foundColumns.map(c => c.toLowerCase().trim());
-  const columnsMissing = requiredColumns.filter(c => !normalizedFound.includes(c.toLowerCase()));
-  const columnsFound = requiredColumns.filter(c => normalizedFound.includes(c.toLowerCase()));
+  const aliasedKeys = Object.keys(sampleAliased);
+  const columnsMissing = requiredColumns.filter(c => !aliasedKeys.includes(c.toLowerCase()));
+  const columnsFound = requiredColumns.filter(c => aliasedKeys.includes(c.toLowerCase()));
 
-  // Normalize column names to lowercase + canonical aliases
-  const entities = records.map(row => {
-    const normalized = {};
-    for (const [key, value] of Object.entries(row)) {
-      normalized[key.toLowerCase().trim()] = value;
+  // Normalize column names to lowercase + apply aliases
+  const entities = records.map((row, i) => {
+    const normalized = applyColumnAliases(row);
+    // Auto-derive name from website URL if still missing
+    if (!normalized.name && normalized.website) {
+      try {
+        const url = normalized.website.startsWith('http') ? normalized.website : `https://${normalized.website}`;
+        const hostname = new URL(url).hostname.replace(/^www\./, '');
+        normalized.name = hostname.split('.')[0].charAt(0).toUpperCase() + hostname.split('.')[0].slice(1);
+      } catch { /* ignore parse errors */ }
     }
-    // Canonical alias: entity_name → name (spec guarantees every entity has `name`)
-    if (!normalized.name && normalized.entity_name) {
-      normalized.name = normalized.entity_name;
+    // Contract: every entity must have a name
+    if (!normalized.name) {
+      const firstVal = Object.values(normalized).find(v => typeof v === 'string' && v.length > 0);
+      normalized.name = firstVal || `Entity ${i + 1}`;
     }
     return normalized;
   });

@@ -51,5 +51,15 @@ export function parseTextareaToEntities(
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => ({ [primaryColumn]: line }));
+    .map((line) => {
+      const entity: Record<string, unknown> = { [primaryColumn]: line };
+      // Auto-derive entity name from URL if primary column looks like a URL
+      if (!entity.name && /^https?:\/\//i.test(line)) {
+        try {
+          const hostname = new URL(line).hostname.replace(/^www\./, '');
+          entity.name = hostname.split('.')[0].charAt(0).toUpperCase() + hostname.split('.')[0].slice(1);
+        } catch { /* ignore parse errors */ }
+      }
+      return entity;
+    });
 }

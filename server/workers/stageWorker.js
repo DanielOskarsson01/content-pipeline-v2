@@ -75,6 +75,21 @@ function buildTools(submoduleRunId, submoduleId) {
         clearTimeout(timer);
       }
     },
+    head: async (url, options = {}) => {
+      const timeout = options.timeout || 30000;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
+      try {
+        const res = await fetch(url, {
+          method: 'HEAD',
+          signal: controller.signal,
+          headers: options.headers || {},
+        });
+        return { status: res.status, headers: Object.fromEntries(res.headers) };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
     post: async (url, body, options = {}) => {
       const timeout = options.timeout || 30000;
       const controller = new AbortController();

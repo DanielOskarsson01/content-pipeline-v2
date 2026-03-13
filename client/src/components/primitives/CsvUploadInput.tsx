@@ -148,7 +148,7 @@ export function CsvUploadInput({
       </p>
       {requiredColumns.length > 0 && (
         <p className="text-[10px] text-gray-400 mt-1">
-          Expected columns: {requiredColumns.join(', ')}
+          Expected columns: {requiredColumns.join(', ')} (aliases like "Company Name", "URL", "Domain" also accepted)
         </p>
       )}
     </div>

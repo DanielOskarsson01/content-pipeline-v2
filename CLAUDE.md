@@ -194,6 +194,34 @@ Summary:
 
 ---
 
+## 🔗 Entity Name Contract
+
+Every entity flowing into submodules MUST have a `name` field. All submodules use `entity.name` for logging, grouping, and output. The skeleton enforces this at the data boundary — submodules must never defensively handle missing names.
+
+Enforcement is in `server/routes/stepContext.js` (three layers):
+1. Column aliases resolved first (see below) so canonical `name` column is present
+2. URL textarea: name auto-derived from hostname in `client/src/components/primitives/UrlTextarea.tsx` (`parseTextareaToEntities`)
+3. Final safety net in stepContext.js: first non-empty string value on the entity, or "Entity N"
+
+**Rule:** Contract enforcement belongs in the skeleton, not in individual submodules.
+
+---
+
+## 📎 Column Alias System
+
+`COLUMN_ALIASES` in `server/routes/stepContext.js` maps common CSV/Excel header variants to canonical column names before `requires_columns` validation runs:
+
+| Aliases | Canonical name |
+|---------|---------------|
+| "company name", "brand", "operator" | `name` |
+| "url", "domain", "company url", "website url" | `website` |
+| "youtube channel", "youtube url" | `youtube` |
+| "linkedin url", "linkedin profile" | `linkedin` |
+
+Drop zone hint in `client/src/components/primitives/CsvUploadInput.tsx` mentions aliases are accepted.
+
+---
+
 ## ⚠️ Common Mistakes to Avoid
 
 1. **Building the results table inside the skeleton as a fixed component.** The skeleton uses ContentRenderer which reads render_schema from the module's output_schema. Different modules produce different displays (url_list, table, content_cards, file_list).
@@ -214,22 +242,27 @@ Summary:
 
 ---
 
-## 🏷 CURRENT PHASE: 9 — End-to-End Pipeline Testing
+## 🏷 CURRENT PHASE: 11 — Step 8 Bundling (code complete, flow test pending)
 
-Phases 0–8b are complete. Phase 9 is active:
+Phases 0–10 are complete. Phase 11 Step 8 bundling submodules are code complete.
 
-**Verified (Step 1 + Step 2):**
-- Data operation semantics: ＝ (transform/accumulate), ➖ (remove/chain), ➕ (add/chain)
-- Sibling submodule chaining in Step 2 (➖ operations)
-- tools.ai integration for LLM-based submodules (url-relevance)
-- Textarea + CSV input sharing via step_context
-- Reopen Step for iterative workflows
-- Flagged item pre-deselection and visual highlighting
-- Clickable URLs in ContentRenderer
+**Complete (Phases 0-10):**
+- Full skeleton infrastructure: schema, BullMQ, React UI, step-to-step data flow
+- Steps 1-5 end-to-end verified with real data (sitemap-parser through content-writer)
+- All Phase 9/10 bug fixes applied (P9-001 through P9-011, K001/K004, R001-R009)
+- Reference docs system, source_submodule stamping, data operation semantics
 
-**Remaining:**
-- Test edge cases (empty results, error handling, large datasets)
-- Build Step 3+ submodules
-- Schema-driven row_highlight (K001 — Phase 10)
+**Phase 11 — Code complete in modules repo (3 local commits, SSH push blocked):**
+- markdown-output, html-output, json-output, meta-output, media-output built
+- Data-shape routing pattern established (see modules repo CLAUDE.md)
+- tools.http.head() added to stageWorker.js (P9-001 fix)
+
+**Phase 11 — Skeleton bug fixes (NOT YET COMMITTED as of 2026-03-13):**
+- Entity name contract: `stepContext.js` auto-derives name from URL/CSV, final safety net fallback
+- Column alias system: `COLUMN_ALIASES` in `stepContext.js`
+- `UrlTextarea.tsx`: `parseTextareaToEntities` derives name from hostname
+- `CsvUploadInput.tsx`: drop zone hint updated to mention column aliases
+
+**Next action:** Full flow test — Step 5 approve → skip 6 → skip 7 → Step 8 bundling with live data.
 
 All findings tracked in `specs/BACKLOG.md`.
