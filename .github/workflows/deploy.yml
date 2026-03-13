@@ -1,0 +1,41 @@
+name: Deploy to Hetzner
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build client
+        run: cd client && npm ci && npm run build
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.HETZNER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Sync app to server
+        run: |
+          rsync -azP --delete \
+            --exclude='node_modules' \
+            --exclude='.env' \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.DS_Store' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ root@188.245.110.34:/opt/content-pipeline-v2/
+
+      - name: Install deps and restart
+        run: |
+          ssh -i ~/.ssh/deploy_key root@188.245.110.34 \
+            "cd /opt/content-pipeline-v2 && npm install --omit=dev && pm2 restart content-pipeline-v2 && pm2 save"
