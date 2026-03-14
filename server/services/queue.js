@@ -16,7 +16,7 @@ redis.on('error', (err) => {
 });
 
 // Single queue for all pipeline stage work
-export const pipelineQueue = new Queue('pipeline-stages', { connection: redis });
+export const pipelineQueue = new Queue('pipeline-stages-v2', { connection: redis });
 
 // Cost-based job configuration (from spec Part 15)
 const COST_CONFIG = {

@@ -229,7 +229,7 @@ async function loadExecuteFunction(manifest) {
 
 // Create the worker
 const worker = new Worker(
-  'pipeline-stages',
+  'pipeline-stages-v2',
   async (job) => {
     const { submodule_run_id, submodule_id, step_index } = job.data;
 
