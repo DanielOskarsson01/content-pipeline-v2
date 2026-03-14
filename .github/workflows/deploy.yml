@@ -32,10 +32,11 @@ jobs:
             --exclude='.git' \
             --exclude='.github' \
             --exclude='.DS_Store' \
+            --exclude='logs' \
             -e "ssh -i ~/.ssh/deploy_key" \
             ./ root@188.245.110.34:/opt/content-pipeline-v2/
 
       - name: Install deps and restart
         run: |
           ssh -i ~/.ssh/deploy_key root@188.245.110.34 \
-            "cd /opt/content-pipeline-v2 && npm install --omit=dev && pm2 restart content-pipeline-v2 && pm2 save"
+            "cd /opt/content-pipeline-v2 && mkdir -p logs && npm install --omit=dev && pm2 restart content-pipeline-v2 || pm2 start ecosystem.config.cjs && pm2 save"
