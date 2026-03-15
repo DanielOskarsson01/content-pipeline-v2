@@ -172,7 +172,7 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
         savedConfig={savedConfig}
         onSaveConfig={handleSaveConfig}
         previousStepData={
-          (currentDataOp === 'remove' || currentDataOp === 'add') && Array.isArray(stage.working_pool) && (stage.working_pool as unknown[]).length > 0
+          Array.isArray(stage.working_pool) && (stage.working_pool as unknown[]).length > 0
             ? stage.working_pool as Record<string, unknown>[]
             : stage.input_data as Record<string, unknown>[] | null
         }
