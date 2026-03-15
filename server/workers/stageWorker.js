@@ -204,7 +204,15 @@ function buildTools(submoduleRunId, submoduleId) {
     },
   };
 
-  return { logger, http, progress, ai, _logs: logs };
+  const browser = {
+    fetch: async (url, options = {}) => {
+      // Lazy import — Playwright only loaded when actually called
+      const { browserFetch } = await import('../services/browserPool.js');
+      return browserFetch(url, options);
+    },
+  };
+
+  return { logger, http, browser, progress, ai, _logs: logs };
 }
 
 /**
@@ -482,6 +490,10 @@ worker.on('ready', () => {
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
+  try {
+    const { closeBrowser } = await import('../services/browserPool.js');
+    await closeBrowser();
+  } catch (_) { /* browser may not have been loaded */ }
   await worker.close();
   process.exit(0);
 });

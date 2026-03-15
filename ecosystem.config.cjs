@@ -13,7 +13,7 @@ module.exports = {
       autorestart: true,
       max_restarts: 10,
       restart_delay: 5000,
-      max_memory_restart: '1G',
+      max_memory_restart: '2G',
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
       error_file: '/opt/content-pipeline-v2/logs/error.log',
       out_file: '/opt/content-pipeline-v2/logs/output.log',
