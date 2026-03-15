@@ -899,8 +899,8 @@ function ResultsContent({
       {summary && (
         <div className="flex-shrink-0 text-xs text-gray-600">
           {resultsLabel}
-          {summary.errors.length > 0 && (
-            <span className="text-red-500 ml-2">{summary.errors.length} errors</span>
+          {(Array.isArray(summary.errors) ? summary.errors.length : summary.errors) > 0 && (
+            <span className="text-red-500 ml-2">{Array.isArray(summary.errors) ? summary.errors.length : summary.errors} errors</span>
           )}
         </div>
       )}
