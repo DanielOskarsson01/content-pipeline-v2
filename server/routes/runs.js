@@ -274,7 +274,7 @@ router.post('/:runId/steps/:stepIndex/reopen', async (req, res, next) => {
 
     const { data: stage, error: stageErr } = await db
       .from('pipeline_stages')
-      .select('id, status')
+      .select('id, status, input_data')
       .eq('run_id', runId)
       .eq('step_index', stepIndex)
       .single();
@@ -286,13 +286,15 @@ router.post('/:runId/steps/:stepIndex/reopen', async (req, res, next) => {
       return res.status(400).json({ error: `Cannot reopen step with status: ${stage.status}` });
     }
 
-    // 1. Reset the stage: clear pool and output so user builds fresh data
+    // 1. Reset the stage: reinitialize pool from input_data (not empty).
+    //    Remove operations filter the pool — an empty pool gives empty results.
+    //    input_data is the previous step's output and the correct starting point.
     const { error: updateErr } = await db
       .from('pipeline_stages')
       .update({
         status: 'active',
         completed_at: null,
-        working_pool: [],
+        working_pool: stage.input_data || [],
         output_data: null,
       })
       .eq('id', stage.id);
