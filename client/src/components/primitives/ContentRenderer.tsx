@@ -307,10 +307,19 @@ export function ContentRenderer({
                 </span>
                 {columns.map((col) => {
                   const value = String(entity[col] ?? '');
-                  const isUrl = col === 'url' || value.startsWith('http://') || value.startsWith('https://');
+                  const isImageCol = /logo_url|og_image_url|favicon_url|_image$|_thumbnail$|_photo$/.test(col);
+                  const isImageUrl = isImageCol && (value.startsWith('http://') || value.startsWith('https://'));
+                  const isUrl = !isImageUrl && (col === 'url' || value.startsWith('http://') || value.startsWith('https://'));
                   return (
                     <span key={col} className="px-2 truncate text-gray-700" title={value}>
-                      {isUrl ? (
+                      {isImageUrl ? (
+                        <img
+                          src={value}
+                          alt=""
+                          className="h-5 w-auto inline-block rounded border border-gray-200 object-contain bg-white"
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                        />
+                      ) : isUrl ? (
                         <a
                           href={value}
                           target="_blank"

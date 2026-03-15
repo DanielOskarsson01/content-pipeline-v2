@@ -14,7 +14,7 @@ type HeaderFieldEntry = string | HeaderFieldObject;
 interface SectionDef {
   field: string;
   label: string;
-  display: 'prose' | 'text' | 'badge' | 'link';
+  display: 'prose' | 'text' | 'badge' | 'link' | 'image' | 'image_grid';
 }
 
 export interface DetailSchema {
@@ -218,6 +218,17 @@ function HeaderValue({ value, display }: { value: string; display?: string }) {
     );
   }
 
+  if (display === 'image' && value) {
+    return (
+      <img
+        src={value}
+        alt="thumbnail"
+        className="h-6 w-auto rounded border border-gray-200 object-contain bg-white"
+        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+      />
+    );
+  }
+
   if (display === 'badge' || (!display && value in BADGE_COLORS)) {
     const colorClass = BADGE_COLORS[value] || 'bg-gray-100 text-gray-700';
     return (
@@ -273,6 +284,63 @@ function SectionRenderer({ value, display }: { value: string; display: string })
       ) : (
         <span className="text-sm text-gray-400 italic">Not available</span>
       );
+
+    case 'image':
+      return value ? (
+        <div>
+          <img
+            src={value}
+            alt=""
+            className="max-w-full max-h-[300px] rounded border border-gray-200 object-contain bg-white p-2"
+            onError={(e) => {
+              (e.target as HTMLImageElement).style.display = 'none';
+              const next = (e.target as HTMLImageElement).nextElementSibling as HTMLElement;
+              if (next) next.style.display = 'block';
+            }}
+          />
+          <a
+            href={value}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-cyan-600 hover:underline break-all mt-1 block"
+            style={{ display: 'none' }}
+          >
+            Image failed to load: {value}
+          </a>
+        </div>
+      ) : (
+        <span className="text-sm text-gray-400 italic">No image available</span>
+      );
+
+    case 'image_grid': {
+      let urls: string[] = [];
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) urls = parsed.filter((u: unknown) => typeof u === 'string' && (u as string).length > 0);
+      } catch {
+        urls = value.split('\n').map(s => s.trim()).filter(s => s.startsWith('http'));
+      }
+      if (urls.length === 0) {
+        return <span className="text-sm text-gray-400 italic">No images available</span>;
+      }
+      return (
+        <div className="grid grid-cols-2 gap-3">
+          {urls.map((url, i) => (
+            <a key={i} href={url} target="_blank" rel="noopener noreferrer" className="block">
+              <img
+                src={url}
+                alt={`Image ${i + 1}`}
+                className="w-full h-32 rounded border border-gray-200 object-cover bg-white hover:opacity-80 transition-opacity"
+                onError={(e) => {
+                  const img = e.target as HTMLImageElement;
+                  img.style.display = 'none';
+                }}
+              />
+            </a>
+          ))}
+        </div>
+      );
+    }
 
     default:
       return <p className="text-sm text-gray-700">{value || '\u2014'}</p>;
