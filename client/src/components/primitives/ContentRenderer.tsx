@@ -307,9 +307,12 @@ export function ContentRenderer({
                 </span>
                 {columns.map((col) => {
                   const value = String(entity[col] ?? '');
-                  const isImageCol = /logo_url|og_image_url|favicon_url|_image$|_thumbnail$|_photo$/.test(col);
-                  const isImageUrl = isImageCol && (value.startsWith('http://') || value.startsWith('https://'));
-                  const isUrl = !isImageUrl && (col === 'url' || value.startsWith('http://') || value.startsWith('https://'));
+                  const colDef = renderSchema?.[col];
+                  const colDisplay = colDef && typeof colDef === 'object' && colDef !== null
+                    ? (colDef as Record<string, unknown>).display as string | undefined
+                    : undefined;
+                  const isImageUrl = colDisplay === 'image' && (value.startsWith('http://') || value.startsWith('https://'));
+                  const isUrl = !isImageUrl && (colDisplay === 'link' || value.startsWith('http://') || value.startsWith('https://'));
                   return (
                     <span key={col} className="px-2 truncate text-gray-700" title={value}>
                       {isImageUrl ? (
