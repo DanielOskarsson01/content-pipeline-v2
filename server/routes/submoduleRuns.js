@@ -506,18 +506,42 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         return true;
       });
     } else if (dataOperation === 'transform') {
-      // Replace: merge approved items into pool by BASE key (item_key only).
-      // Transform means "same items, enriched" — source_submodule differs between
-      // the pool's existing items and the new enriched versions, so using the
-      // composite key would prevent dedup and cause item accumulation.
-      const poolMap = new Map();
-      for (const item of currentPool) {
-        poolMap.set(String(item[itemKey] ?? ''), item);
-      }
-      for (const item of approvedItems) {
-        poolMap.set(String(item[itemKey] ?? ''), item);
-      }
-      currentPool = Array.from(poolMap.values());
+      // Smart replace: remove pool items that match approved base keys, UNLESS
+      // they're from a sibling submodule at this step with a different item_key.
+      // This prevents triplication (input_data items accumulating with enriched
+      // items) while preserving cross-submodule coexistence (e.g. content-analyzer
+      // url-level items survive when SEO-planner entity-level items are approved).
+      const currentSubmoduleId = subRun.submodule_id;
+      const stepIndex = subRun.input_data?.step_index;
+      const stepSubmoduleIds = new Set(getSubmodules(stepIndex).map(m => m.id));
+      const approvedBaseKeys = new Set(
+        approvedItems.map(item => String(item[itemKey] ?? ''))
+      );
+
+      const remaining = currentPool.filter(item => {
+        const baseKey = String(item[itemKey] ?? '');
+        if (!approvedBaseKeys.has(baseKey)) return true; // no conflict
+
+        const src = item.source_submodule;
+
+        // Re-approval of same submodule → replace
+        if (src === currentSubmoduleId) return false;
+
+        // From outside this step (previous step or unknown) → replace
+        if (!src || !stepSubmoduleIds.has(src)) return false;
+
+        // Sibling at this step — check if it uses the same item_key
+        const sibManifest = getSubmoduleById(src);
+        const sibItemKey = sibManifest?.item_key || 'url';
+
+        // Same item_key → replace (e.g. browser-scraper replaces page-scraper)
+        if (sibItemKey === itemKey) return false;
+
+        // Different item_key → keep (e.g. SEO-planner doesn't affect content-analyzer)
+        return true;
+      });
+
+      currentPool = [...remaining, ...approvedItems];
     }
 
     // 6. Write updated pool back
