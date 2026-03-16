@@ -506,13 +506,16 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         return true;
       });
     } else if (dataOperation === 'transform') {
-      // Accumulate: merge approved items into pool (independent submodules, ＝)
+      // Replace: merge approved items into pool by BASE key (item_key only).
+      // Transform means "same items, enriched" — source_submodule differs between
+      // the pool's existing items and the new enriched versions, so using the
+      // composite key would prevent dedup and cause item accumulation.
       const poolMap = new Map();
       for (const item of currentPool) {
-        poolMap.set(poolKey(item), item);
+        poolMap.set(String(item[itemKey] ?? ''), item);
       }
       for (const item of approvedItems) {
-        poolMap.set(poolKey(item), item);
+        poolMap.set(String(item[itemKey] ?? ''), item);
       }
       currentPool = Array.from(poolMap.values());
     }
