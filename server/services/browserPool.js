@@ -5,6 +5,9 @@
  * executions. Each fetch creates an isolated BrowserContext (separate
  * cookies/state) that is closed after use.
  *
+ * Auto-recovers if the browser crashes mid-run — checks isConnected()
+ * before reuse and relaunches if needed.
+ *
  * Lazy-loaded by stageWorker.js — only imported when a submodule
  * actually calls tools.browser.fetch(). Zero cost for modules that
  * don't use it.
@@ -17,9 +20,16 @@ let browserLaunchPromise = null;
 
 /**
  * Get or create the shared Chromium instance.
+ * Checks isConnected() to detect crashed browsers and relaunches.
  * Promise caching prevents multiple simultaneous launches.
  */
 async function getBrowser() {
+  // If browser exists but crashed, clear it and relaunch
+  if (browserInstance && !browserInstance.isConnected()) {
+    console.warn('[browserPool] Browser disconnected — relaunching');
+    browserInstance = null;
+  }
+
   if (browserInstance) return browserInstance;
   if (browserLaunchPromise) return browserLaunchPromise;
 
@@ -30,13 +40,19 @@ async function getBrowser() {
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      '--single-process',
     ],
+  }).then((browser) => {
+    browserInstance = browser;
+    browserLaunchPromise = null;
+    console.log('[browserPool] Chromium launched');
+    return browser;
+  }).catch((err) => {
+    browserLaunchPromise = null;
+    browserInstance = null;
+    throw err;
   });
 
-  browserInstance = await browserLaunchPromise;
-  browserLaunchPromise = null;
-  return browserInstance;
+  return browserLaunchPromise;
 }
 
 /**
