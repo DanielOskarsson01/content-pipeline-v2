@@ -266,3 +266,17 @@ Phases 0–10 are complete. Phase 11 Step 8 bundling submodules are code complet
 **Next action:** Full flow test — Step 5 approve → skip 6 → skip 7 → Step 8 bundling with live data.
 
 All findings tracked in `specs/BACKLOG.md`.
+
+## Decision Log
+
+This project uses automated decision logging via a PostToolUse hook.
+A shell script fires after every Claude tool call and writes session checkpoints to Supabase every 60 minutes — zero tokens, fully automatic.
+
+For important decisions, write a detailed entry:
+
+```sql
+INSERT INTO decision_log (project_name, entry_type, summary, decision_made, alternatives_rejected, reasoning, source)
+VALUES ('content-pipeline-v2', 'decision', 'What was decided', 'The choice made', 'What was rejected', 'Why this choice', 'manual');
+```
+
+Entry types: decision | progress | blocker | idea

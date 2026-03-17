@@ -474,12 +474,18 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
     let currentPool = stageRow.working_pool || [];
 
-    // Pool dedup key: when items have source_submodule (Step 5 chaining),
-    // use composite key so items from different submodules coexist.
-    // Otherwise, use item_key alone (Steps 1-4, single-submodule items).
+    // Pool dedup key: use each item's SOURCE submodule's item_key for the base,
+    // so URL-level items (keyed by url) don't collapse when an entity-level
+    // submodule (keyed by entity_name) runs an add operation.
     const poolKey = (item) => {
-      const base = item[itemKey];
-      return item.source_submodule ? `${item.source_submodule}:${base}` : base;
+      const src = item.source_submodule;
+      if (src) {
+        const srcManifest = getSubmoduleById(src);
+        const srcKey = srcManifest?.item_key || 'url';
+        return `${src}:${item[srcKey] ?? ''}`;
+      }
+      // No source_submodule → use current submodule's item_key
+      return String(item[itemKey] ?? '');
     };
 
     if (dataOperation === 'add') {
@@ -506,11 +512,12 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         return true;
       });
     } else if (dataOperation === 'transform') {
-      // Smart replace: remove pool items that match approved base keys, UNLESS
-      // they're from a sibling submodule at this step with a different item_key.
-      // This prevents triplication (input_data items accumulating with enriched
-      // items) while preserving cross-submodule coexistence (e.g. content-analyzer
-      // url-level items survive when SEO-planner entity-level items are approved).
+      // Granularity-aware replace:
+      // 1. Previous-step items: only remove if they share the same item_key
+      //    (url→url OK, but entity_name transform keeps url-level items)
+      // 2. Siblings: only remove if sibling also uses transform with same item_key
+      //    (browser-scraper replaces page-scraper, but content-analyzer
+      //    doesn't clobber seo-planner/content-writer)
       const currentSubmoduleId = subRun.submodule_id;
       const stepIndex = subRun.input_data?.step_index;
       const stepSubmoduleIds = new Set(getSubmodules(stepIndex).map(m => m.id));
@@ -527,17 +534,22 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         // Re-approval of same submodule → replace
         if (src === currentSubmoduleId) return false;
 
-        // From outside this step (previous step or unknown) → replace
-        if (!src || !stepSubmoduleIds.has(src)) return false;
+        // From outside this step (previous step or unknown)
+        if (!src || !stepSubmoduleIds.has(src)) {
+          // Only replace if source used the same item_key granularity
+          // e.g. content-analyzer (entity_name) keeps page-scraper (url) items
+          const srcManifest = src ? getSubmoduleById(src) : null;
+          const srcItemKey = srcManifest?.item_key || 'url';
+          return srcItemKey !== itemKey;
+        }
 
-        // Sibling at this step — check if it uses the same item_key
+        // Sibling at this step — only replace transform siblings with same item_key
         const sibManifest = getSubmoduleById(src);
         const sibItemKey = sibManifest?.item_key || 'url';
+        const sibDataOp = sibManifest?.data_operation_default || 'add';
+        if (sibItemKey === itemKey && sibDataOp === 'transform') return false;
 
-        // Same item_key → replace (e.g. browser-scraper replaces page-scraper)
-        if (sibItemKey === itemKey) return false;
-
-        // Different item_key → keep (e.g. SEO-planner doesn't affect content-analyzer)
+        // Keep all other siblings (add/remove siblings coexist)
         return true;
       });
 

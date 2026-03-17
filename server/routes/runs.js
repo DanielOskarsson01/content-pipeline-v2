@@ -132,7 +132,21 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
     }
 
     // Finalize pool → output_data
-    const outputData = stage.working_pool || [];
+    // After Step 5 (generation): prune heavy text fields no longer needed.
+    // text_content (~20KB/item) and raw content_markdown (~15KB/item) are consumed
+    // by Step 5 submodules. Stripping them shrinks the pool by ~95% for downstream steps.
+    let outputData = stage.working_pool || [];
+    if (stepIndex >= 5 && Array.isArray(outputData)) {
+      outputData = outputData.map(item => {
+        const pruned = { ...item };
+        delete pruned.text_content;
+        // Strip raw scraped markdown but keep AI-written content (has section_count)
+        if (pruned.content_markdown && pruned.section_count === undefined) {
+          delete pruned.content_markdown;
+        }
+        return pruned;
+      });
+    }
     const itemsForwarded = Array.isArray(outputData) ? outputData.length : 0;
 
     // K003 fix: atomic step approval via Postgres function (single transaction)
