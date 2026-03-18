@@ -13,7 +13,20 @@
  * don't use it.
  */
 
-import { chromium } from 'playwright';
+import { chromium as playwrightChromium } from 'playwright';
+
+// Stealth mode: playwright-extra + stealth plugin to bypass Cloudflare/bot detection.
+// Falls back to vanilla playwright if not installed.
+let chromium = playwrightChromium;
+try {
+  const { chromium: stealthChromium } = await import('playwright-extra');
+  const { default: StealthPlugin } = await import('puppeteer-extra-plugin-stealth');
+  stealthChromium.use(StealthPlugin());
+  chromium = stealthChromium;
+  console.log('[browserPool] Stealth mode enabled');
+} catch {
+  console.warn('[browserPool] playwright-extra not installed — using vanilla Playwright');
+}
 
 let browserInstance = null;
 let browserLaunchPromise = null;
@@ -44,7 +57,7 @@ async function getBrowser() {
   }).then((browser) => {
     browserInstance = browser;
     browserLaunchPromise = null;
-    console.log('[browserPool] Chromium launched');
+    console.log('[browserPool] Chromium launched (stealth)');
     return browser;
   }).catch((err) => {
     browserLaunchPromise = null;
