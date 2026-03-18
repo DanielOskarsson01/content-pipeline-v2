@@ -994,13 +994,29 @@ latestRunsRouter.get('/latest', async (req, res) => {
 
     if (error) throw error;
 
-    // Get all submodule runs for this stage (with batch columns)
+    // For per-entity batch runs, aggregate item counts from entity_submodule_runs
+    const batchIds = (runs || []).filter(r => r.batch_id).map(r => r.batch_id);
+    const batchCounts = {};
+    if (batchIds.length > 0) {
+      const { data: entityRuns } = await db
+        .from('entity_submodule_runs')
+        .select('batch_id, output_data, approved_items')
+        .in('batch_id', batchIds);
+
+      for (const er of entityRuns || []) {
+        if (!batchCounts[er.batch_id]) batchCounts[er.batch_id] = { result: 0, approved: 0 };
+        batchCounts[er.batch_id].result += er.output_data?.items?.length || 0;
+        batchCounts[er.batch_id].approved += er.approved_items?.length || 0;
+      }
+    }
+
     // Group by submodule_id, take the latest (first in desc order)
     const latest = {};
     for (const run of runs || []) {
       if (!latest[run.submodule_id]) {
         // Per-entity batch run
         if (run.batch_id) {
+          const counts = batchCounts[run.batch_id] || { result: 0, approved: 0 };
           latest[run.submodule_id] = {
             id: run.id,
             status: run.status,
@@ -1008,9 +1024,11 @@ latestRunsRouter.get('/latest', async (req, res) => {
             batch_id: run.batch_id,
             entity_count: run.entity_count || 0,
             completed_count: run.completed_count || 0,
-            result_count: 0, // computed from entity runs, not output_data
-            approved_count: 0,
-            description: null,
+            result_count: counts.result,
+            approved_count: counts.approved,
+            description: counts.approved > 0
+              ? `${counts.approved} items approved across ${run.entity_count || 0} entities`
+              : null,
             completed_at: run.completed_at || null,
             error: run.error || null,
             mode: 'per_entity',
