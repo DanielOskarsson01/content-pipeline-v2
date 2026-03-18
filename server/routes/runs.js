@@ -274,7 +274,7 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
               flatItems.push({ ...item, entity_name: item.entity_name || pool.entity_name });
             }
           }
-          logger.info(`Populating step ${nextStep} input_data with ${flatItems.length} items from step ${stepIndex}`);
+          console.log(`[approve] Populating step ${nextStep} input_data with ${flatItems.length} items from step ${stepIndex}`);
           await db
             .from('pipeline_stages')
             .update({ input_data: flatItems, input_render_schema: stageOutputRenderSchema })
