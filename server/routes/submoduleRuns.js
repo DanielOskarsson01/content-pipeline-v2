@@ -740,10 +740,15 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
             return approvedKeySet.has(keyVal);
           });
         } else if (dataOperation === 'transform') {
-          // Remove items from same submodule, then add approved
-          entityPool = entityPool.filter(item =>
-            item.source_submodule !== subRun.submodule_id
-          );
+          // Transform replaces items with matching keys — remove ALL existing
+          // items that share a key with the approved items (regardless of source).
+          // Original input items (no source_submodule) and sibling submodule items
+          // are both replaced by the enriched versions.
+          const approvedUrlSet = new Set(approvedItems.map(item => String(item[itemKey] ?? '')));
+          entityPool = entityPool.filter(item => {
+            const key = String(item[itemKey] ?? '');
+            return !approvedUrlSet.has(key);
+          });
           entityPool.push(...approvedItems);
         }
 
