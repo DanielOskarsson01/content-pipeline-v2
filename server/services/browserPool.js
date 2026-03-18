@@ -46,7 +46,7 @@ async function getBrowser() {
   if (browserInstance) return browserInstance;
   if (browserLaunchPromise) return browserLaunchPromise;
 
-  browserLaunchPromise = chromium.launch({
+  const launchOptions = {
     headless: true,
     args: [
       '--no-sandbox',
@@ -54,7 +54,14 @@ async function getBrowser() {
       '--disable-dev-shm-usage',
       '--disable-gpu',
     ],
-  }).then((browser) => {
+  };
+
+  if (process.env.PROXY_URL) {
+    launchOptions.proxy = { server: process.env.PROXY_URL };
+    console.log('[browserPool] Using proxy:', process.env.PROXY_URL.replace(/:[^:@]*@/, ':***@'));
+  }
+
+  browserLaunchPromise = chromium.launch(launchOptions).then((browser) => {
     browserInstance = browser;
     browserLaunchPromise = null;
     console.log('[browserPool] Chromium launched (stealth)');
