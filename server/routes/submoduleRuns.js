@@ -315,12 +315,13 @@ executeRouter.post('/run', async (req, res) => {
       }
 
       // Build a lookup for original entity data (Step 1: entities have properties like website, linkedin)
+      // Use originalEntities (set when pools are first created) or fall back to inputData.entities
+      // (which is always available — resolved earlier from step_context, CSV, or previous step)
       const originalEntityMap = new Map();
-      if (originalEntities) {
-        for (const e of originalEntities) {
-          const name = e.name || e.entity_name || 'unknown';
-          originalEntityMap.set(name, e);
-        }
+      const entitySource = originalEntities || inputData?.entities || [];
+      for (const e of entitySource) {
+        const name = e.name || e.entity_name || 'unknown';
+        originalEntityMap.set(name, e);
       }
 
       // 7e. Create batch record in submodule_runs
