@@ -167,10 +167,7 @@ executeRouter.post('/run', async (req, res) => {
     }
 
     // Priority 2: Previous step output (re-group flat pool items into entity format)
-    // Check both output_data (legacy) and input_data on current step (per-entity mode
-    // populates input_data instead of output_data during step approval).
     if (!inputData && stepIdx > 0) {
-      // 2a. Try previous step's output_data (legacy path)
       const { data: prevStage } = await db
         .from('pipeline_stages')
         .select('output_data')
@@ -178,28 +175,10 @@ executeRouter.post('/run', async (req, res) => {
         .eq('step_index', stepIdx - 1)
         .maybeSingle();
 
-      let poolItems = null;
       if (prevStage?.output_data && Array.isArray(prevStage.output_data) && prevStage.output_data.length > 0) {
-        poolItems = prevStage.output_data;
-      }
-
-      // 2b. Fallback: current step's input_data (populated by per-entity step approval)
-      if (!poolItems) {
-        const { data: curStage } = await db
-          .from('pipeline_stages')
-          .select('input_data')
-          .eq('run_id', runId)
-          .eq('step_index', stepIdx)
-          .maybeSingle();
-
-        if (curStage?.input_data && Array.isArray(curStage.input_data) && curStage.input_data.length > 0) {
-          poolItems = curStage.input_data;
-        }
-      }
-
-      if (poolItems) {
         // Working pool is a flat array of items with entity_name.
         // Re-group into entity format: [{ name, items: [...] }]
+        const poolItems = prevStage.output_data;
         const entityMap = new Map();
         for (const item of poolItems) {
           const name = item.entity_name || 'unknown';

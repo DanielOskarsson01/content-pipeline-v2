@@ -82,9 +82,10 @@ router.get('/:runId/steps/:stepIndex', async (req, res, next) => {
     if (error && error.code !== 'PGRST116') throw error;
     if (!stage) return res.status(404).json({ error: 'Step not found' });
 
-    // Per-entity mode: if working_pool is empty, populate from entity_stage_pool
-    // Put entity summaries in a SEPARATE field (entity_pool_summary) so the UI
-    // can fall through to input_data for actual item display.
+    // Per-entity mode: if working_pool is empty, build it from entity_stage_pool.
+    // Send entity summaries (lightweight) in entity_pool_summary for sidebar/badges,
+    // but do NOT put them in working_pool — the UI treats working_pool items as
+    // actual data rows and would show 5 entity objects with empty URL cells.
     if (!stage.working_pool || (Array.isArray(stage.working_pool) && stage.working_pool.length === 0)) {
       const { data: entityPools } = await db
         .from('entity_stage_pool')
@@ -94,20 +95,14 @@ router.get('/:runId/steps/:stepIndex', async (req, res, next) => {
 
       if (entityPools && entityPools.length > 0) {
         const totalItems = entityPools.reduce((sum, ep) => sum + (ep.pool_items?.length || 0), 0);
-        // Flatten entity pool items into working_pool so the UI can display actual items
-        const flatItems = [];
-        for (const ep of entityPools) {
-          for (const item of (ep.pool_items || [])) {
-            flatItems.push({ ...item, entity_name: item.entity_name || ep.entity_name });
-          }
-        }
-        stage.working_pool = flatItems;
         stage.entity_pool_summary = entityPools.map(ep => ({
           name: ep.entity_name,
           item_count: ep.pool_items?.length || 0,
         }));
         stage.entity_count = entityPools.length;
         stage.total_item_count = totalItems;
+        // Leave working_pool empty — the UI will fall through to input_data
+        // (populated during step approval) which has the actual flattened items.
       }
     }
 
@@ -261,15 +256,10 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
 
       const nextStep = rpcResult.next_step;
 
-      // Forward data to next step (two destinations):
-      //   1. entity_stage_pool at nextStep — for per-entity execution
-      //   2. pipeline_stages.input_data at nextStep — for UI display and legacy code
-      //
-      // The RPC approve_step_v2 handles (1) via INSERT ... ON CONFLICT DO NOTHING.
-      // But if pools already existed (e.g. stale from a previous attempt), the
-      // INSERT is skipped. We verify and fix here.
+      // Populate input_data on the next stage so the UI can display forwarded items.
+      // The RPC approve_step_v2 handles entity_stage_pool forwarding (the execution
+      // source of truth). input_data is a denormalized copy for UI display only.
       if (nextStep !== null) {
-        // Read current step's approved pools (guaranteed to exist & have data)
         const { data: approvedPools } = await db
           .from('entity_stage_pool')
           .select('entity_name, pool_items')
@@ -278,54 +268,18 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
           .eq('status', 'approved');
 
         if (approvedPools && approvedPools.length > 0) {
-          // Verify next step pools were created with data by the RPC
-          const { data: nextPools } = await db
-            .from('entity_stage_pool')
-            .select('entity_name, pool_items')
-            .eq('run_id', runId)
-            .eq('step_index', nextStep);
-
-          const nextPoolsEmpty = !nextPools || nextPools.length === 0 ||
-            nextPools.every(p => !p.pool_items || p.pool_items.length === 0);
-
-          if (nextPoolsEmpty) {
-            logger.warn(`RPC did not populate next step pools — manually forwarding from step ${stepIndex}`);
-            // Delete any stale empty pools and re-create with actual data
-            if (nextPools && nextPools.length > 0) {
-              await db
-                .from('entity_stage_pool')
-                .delete()
-                .eq('run_id', runId)
-                .eq('step_index', nextStep);
-            }
-            const forwardRows = approvedPools.map(p => ({
-              run_id: runId,
-              step_index: nextStep,
-              entity_name: p.entity_name,
-              pool_items: p.pool_items || [],
-              status: 'pending',
-            }));
-            await db
-              .from('entity_stage_pool')
-              .insert(forwardRows);
-            logger.info(`Manually forwarded ${forwardRows.length} entity pools to step ${nextStep}`);
-          }
-
-          // Flatten all items for input_data (UI display)
           const flatItems = [];
           for (const pool of approvedPools) {
             for (const item of (pool.pool_items || [])) {
               flatItems.push({ ...item, entity_name: item.entity_name || pool.entity_name });
             }
           }
-          logger.info(`Forwarding ${flatItems.length} items from step ${stepIndex} to step ${nextStep} input_data`);
+          logger.info(`Populating step ${nextStep} input_data with ${flatItems.length} items from step ${stepIndex}`);
           await db
             .from('pipeline_stages')
             .update({ input_data: flatItems, input_render_schema: stageOutputRenderSchema })
             .eq('run_id', runId)
             .eq('step_index', nextStep);
-        } else {
-          logger.warn(`No approved pools found at step ${stepIndex} for run ${runId} — data not forwarded`);
         }
       }
 
