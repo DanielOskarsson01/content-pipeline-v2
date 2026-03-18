@@ -315,10 +315,26 @@ executeRouter.post('/run', async (req, res) => {
       }
 
       // Build a lookup for original entity data (Step 1: entities have properties like website, linkedin)
-      // Use originalEntities (set when pools are first created) or fall back to inputData.entities
-      // (which is always available — resolved earlier from step_context, CSV, or previous step)
+      // Use originalEntities (set when pools are first created) or fall back to step_context
+      // (which preserves the original CSV entity fields). inputData.entities may be pool-derived
+      // (re-grouped URL items from working_pool) and lack fields like website/linkedin.
       const originalEntityMap = new Map();
-      const entitySource = originalEntities || inputData?.entities || [];
+      let entitySource = originalEntities || [];
+      if (entitySource.length === 0) {
+        // Pools already existed — load original entity properties from step_context
+        const { data: ctx } = await db
+          .from('step_context')
+          .select('entities')
+          .eq('run_id', runId)
+          .eq('step_index', stepIdx)
+          .maybeSingle();
+        if (ctx?.entities) {
+          entitySource = ctx.entities;
+        } else {
+          // Last resort: use inputData.entities (may be pool-derived, missing entity fields)
+          entitySource = inputData?.entities || [];
+        }
+      }
       for (const e of entitySource) {
         const name = e.name || e.entity_name || 'unknown';
         originalEntityMap.set(name, e);
