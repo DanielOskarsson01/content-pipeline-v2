@@ -53,10 +53,15 @@ export function useReopenStep(runId: string) {
   return useMutation({
     mutationFn: (stepIndex: number) => api.reopenStep(runId, stepIndex),
     onSuccess: (data) => {
+      // Hard reset — invalidate everything since downstream steps are wiped
       queryClient.invalidateQueries({ queryKey: ['run', runId] });
-      // Refresh submodule run statuses (approved → completed after reopen)
-      queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', runId, data.step_reopened] });
-      showToast(`Step ${data.step_reopened} reopened — re-approve submodules to rebuild pool`, 'info');
+      queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns'] });
+      queryClient.invalidateQueries({ queryKey: ['stepContext'] });
+      const wiped = data.steps_wiped || [data.step_reopened];
+      const msg = wiped.length > 1
+        ? `Step ${data.step_reopened} reopened — all data from step ${wiped[0]} onwards erased`
+        : `Step ${data.step_reopened} reopened — all run data erased`;
+      showToast(msg, 'info');
     },
   });
 }

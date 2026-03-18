@@ -446,8 +446,10 @@ router.post('/:runId/steps/:stepIndex/skip', async (req, res, next) => {
 
 /**
  * POST /api/runs/:runId/steps/:stepIndex/reopen
- * Reopen a completed step so the user can re-run submodules and re-approve.
- * Per-entity mode: reset entity_stage_pool rows, delete forwarded pools at next step.
+ * Reopen a completed step — HARD RESET from this step onwards.
+ * Deletes all submodule runs, entity runs, pools, and stage data for this
+ * step AND every downstream step. Only the reopened step is set to 'active';
+ * downstream steps revert to 'pending'.
  */
 router.post('/:runId/steps/:stepIndex/reopen', async (req, res, next) => {
   try {
@@ -468,96 +470,107 @@ router.post('/:runId/steps/:stepIndex/reopen', async (req, res, next) => {
       return res.status(400).json({ error: `Cannot reopen step with status: ${stage.status}` });
     }
 
-    // Detect per-entity mode
-    const { data: entityPools } = await db
-      .from('entity_stage_pool')
-      .select('entity_name')
+    // Get ALL stages from this step onwards
+    const { data: allStages } = await db
+      .from('pipeline_stages')
+      .select('id, step_index, status')
       .eq('run_id', runId)
-      .eq('step_index', stepIndex);
+      .gte('step_index', stepIndex)
+      .order('step_index');
 
-    const isPerEntity = entityPools && entityPools.length > 0;
+    const stageIds = (allStages || []).map(s => s.id);
+    const downstreamStageIds = (allStages || []).filter(s => s.step_index > stepIndex).map(s => s.id);
+    const downstreamSteps = (allStages || []).filter(s => s.step_index > stepIndex).map(s => s.step_index);
 
-    if (isPerEntity) {
-      // 1. Reset entity pools at this step: reload from previous step's approved pools
-      const prevStep = stepIndex - 1;
-      if (prevStep >= 0) {
-        const { data: prevPools } = await db
-          .from('entity_stage_pool')
-          .select('entity_name, pool_items')
-          .eq('run_id', runId)
-          .eq('step_index', prevStep)
-          .eq('status', 'approved');
+    // --- HARD DELETE: wipe all run data from this step onwards ---
 
-        for (const pool of (prevPools || [])) {
-          await db
-            .from('entity_stage_pool')
-            .update({
-              pool_items: pool.pool_items,
-              status: 'pending',
-              error: null,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('run_id', runId)
-            .eq('step_index', stepIndex)
-            .eq('entity_name', pool.entity_name);
-        }
-      } else {
-        // Step 0 — reset to pending
-        await db
-          .from('entity_stage_pool')
-          .update({ status: 'pending', error: null, updated_at: new Date().toISOString() })
-          .eq('run_id', runId)
-          .eq('step_index', stepIndex);
+    // 1. Delete submodule_run_item_data (downloadable field storage)
+    if (stageIds.length > 0) {
+      // Get submodule_run IDs for bulk deletion
+      const { data: subRunIds } = await db
+        .from('submodule_runs')
+        .select('id')
+        .in('stage_id', stageIds);
+      const srIds = (subRunIds || []).map(r => r.id);
+      if (srIds.length > 0) {
+        await db.from('submodule_run_item_data').delete().in('submodule_run_id', srIds);
       }
 
-      // 2. Delete forwarded entity pools at next step (they'll be recreated on next approval)
-      const nextStep = stepIndex + 1;
-      if (nextStep <= 10) {
-        await db
-          .from('entity_stage_pool')
-          .delete()
-          .eq('run_id', runId)
-          .eq('step_index', nextStep);
-      }
-
-      // 3. Reset stage
-      await db
-        .from('pipeline_stages')
-        .update({
-          status: 'active',
-          completed_at: null,
-          output_data: null,
-          approved_count: 0,
-        })
-        .eq('id', stage.id);
-
-      // 4. Revert approved entity_submodule_runs
-      await db
+      // Also entity_submodule_runs item data
+      const { data: entityRunIds } = await db
         .from('entity_submodule_runs')
-        .update({ status: 'completed' })
-        .eq('run_id', runId)
-        .eq('step_index', stepIndex)
-        .eq('status', 'approved');
-    } else {
-      // Legacy: reinitialize pool from input_data
-      await db
-        .from('pipeline_stages')
-        .update({
-          status: 'active',
-          completed_at: null,
-          working_pool: stage.input_data || [],
-          output_data: null,
-        })
-        .eq('id', stage.id);
+        .select('id')
+        .in('stage_id', stageIds);
+      const erIds = (entityRunIds || []).map(r => r.id);
+      if (erIds.length > 0) {
+        await db.from('submodule_run_item_data').delete().in('submodule_run_id', erIds);
+      }
     }
 
-    // Revert approved submodule_runs back to 'completed'
+    // 2. Delete entity_submodule_runs for ALL affected steps
     await db
-      .from('submodule_runs')
-      .update({ status: 'completed' })
-      .eq('stage_id', stage.id)
-      .eq('status', 'approved');
+      .from('entity_submodule_runs')
+      .delete()
+      .eq('run_id', runId)
+      .gte('step_index', stepIndex);
 
+    // 3. Delete submodule_runs for ALL affected stages
+    if (stageIds.length > 0) {
+      await db
+        .from('submodule_runs')
+        .delete()
+        .in('stage_id', stageIds);
+    }
+
+    // 4. Delete entity_stage_pool for ALL affected steps
+    await db
+      .from('entity_stage_pool')
+      .delete()
+      .eq('run_id', runId)
+      .gte('step_index', stepIndex);
+
+    // 5. Delete step_context for ALL affected steps (uploaded CSV data)
+    await db
+      .from('step_context')
+      .delete()
+      .eq('run_id', runId)
+      .gte('step_index', stepIndex);
+
+    // 6. Delete run_submodule_config for ALL affected steps
+    await db
+      .from('run_submodule_config')
+      .delete()
+      .eq('run_id', runId)
+      .gte('step_index', stepIndex);
+
+    // 7. Reset the reopened step to 'active' with clean state
+    await db
+      .from('pipeline_stages')
+      .update({
+        status: 'active',
+        completed_at: null,
+        working_pool: null,
+        output_data: null,
+        approved_count: 0,
+      })
+      .eq('id', stage.id);
+
+    // 8. Reset downstream stages to 'pending'
+    if (downstreamStageIds.length > 0) {
+      await db
+        .from('pipeline_stages')
+        .update({
+          status: 'pending',
+          completed_at: null,
+          working_pool: null,
+          output_data: null,
+          input_data: null,
+          approved_count: 0,
+        })
+        .in('id', downstreamStageIds);
+    }
+
+    // 9. Log
     await db
       .from('decision_log')
       .insert({
@@ -566,11 +579,14 @@ router.post('/:runId/steps/:stepIndex/reopen', async (req, res, next) => {
         decision: 'step_reopened',
         context: {
           previous_status: stage.status,
-          mode: isPerEntity ? 'per_entity' : 'legacy',
+          hard_reset: true,
+          steps_wiped: [stepIndex, ...downstreamSteps],
         },
       });
 
-    res.json({ step_reopened: stepIndex });
+    console.log(`[reopen] Step ${stepIndex}: hard reset — wiped steps ${stepIndex}-${Math.max(stepIndex, ...downstreamSteps)}, deleted ${stageIds.length} stages' data`);
+
+    res.json({ step_reopened: stepIndex, steps_wiped: [stepIndex, ...downstreamSteps] });
   } catch (err) { next(err); }
 });
 

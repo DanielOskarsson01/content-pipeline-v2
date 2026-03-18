@@ -137,7 +137,17 @@ router.delete('/:id', async (req, res, next) => {
 
     // 3. Delete child tables in dependency order (no CASCADE on these FKs)
     if (runIds.length > 0) {
+      // Item data (references submodule_run IDs from both tables)
+      const { data: subRunRows } = await db.from('submodule_runs').select('id').in('run_id', runIds);
+      const { data: entityRunRows } = await db.from('entity_submodule_runs').select('id').in('run_id', runIds);
+      const allItemRunIds = [...(subRunRows || []).map(r => r.id), ...(entityRunRows || []).map(r => r.id)];
+      if (allItemRunIds.length > 0) {
+        await db.from('submodule_run_item_data').delete().in('submodule_run_id', allItemRunIds);
+      }
+
       await db.from('decision_log').delete().in('run_id', runIds);
+      await db.from('entity_submodule_runs').delete().in('run_id', runIds);
+      await db.from('entity_stage_pool').delete().in('run_id', runIds);
       await db.from('submodule_runs').delete().in('run_id', runIds);
       await db.from('run_submodule_config').delete().in('run_id', runIds);
       await db.from('step_context').delete().in('run_id', runIds);
