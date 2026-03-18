@@ -56,9 +56,13 @@ async function getBrowser() {
     ],
   };
 
+  // Residential proxy support: PROXY_URL=http://host:port, PROXY_USERNAME, PROXY_PASSWORD
+  // Playwright requires credentials separate from the server URL.
   if (process.env.PROXY_URL) {
     launchOptions.proxy = { server: process.env.PROXY_URL };
-    console.log('[browserPool] Using proxy:', process.env.PROXY_URL.replace(/:[^:@]*@/, ':***@'));
+    if (process.env.PROXY_USERNAME) launchOptions.proxy.username = process.env.PROXY_USERNAME;
+    if (process.env.PROXY_PASSWORD) launchOptions.proxy.password = process.env.PROXY_PASSWORD;
+    console.log('[browserPool] Using proxy:', process.env.PROXY_URL, '(user:', process.env.PROXY_USERNAME || 'none', ')');
   }
 
   browserLaunchPromise = chromium.launch(launchOptions).then((browser) => {
