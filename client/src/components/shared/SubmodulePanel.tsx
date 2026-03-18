@@ -3,10 +3,11 @@ import { useQueryClient } from '@tanstack/react-query';
 import JSZip from 'jszip';
 import { usePanelStore } from '../../stores/panelStore';
 import { useStepContext } from '../../hooks/useStepContext';
-import { useSubmoduleRun, useSubmoduleRunFull, useExecuteSubmodule, useApproveSubmoduleRun, useLatestSubmoduleRuns } from '../../hooks/useSubmoduleRuns';
+import { useSubmoduleRun, useSubmoduleRunFull, useExecuteSubmodule, useApproveSubmoduleRun, useApproveSubmoduleRunPerEntity, useLatestSubmoduleRuns, useEntityRunDetail } from '../../hooks/useSubmoduleRuns';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../api/client';
-import type { SubmoduleManifest, SubmoduleConfig, DownloadableField } from '../../types/step';
+import type { SubmoduleManifest, SubmoduleConfig, DownloadableField, SubmoduleRun, SubmoduleRunBatch, EntityRunStatus } from '../../types/step';
+import { isPerEntityRun } from '../../types/step';
 import { CsvUploadInput, type UploadResult } from '../primitives/CsvUploadInput';
 import { ContentRenderer, type RenderSchema } from '../primitives/ContentRenderer';
 import { SubmoduleOptions } from '../primitives/SubmoduleOptions';
@@ -135,22 +136,38 @@ export function SubmodulePanel({
   // Execution mutation
   const executeMutation = useExecuteSubmodule();
   const approveMutation = useApproveSubmoduleRun();
+  const approvePerEntityMutation = useApproveSubmoduleRunPerEntity();
+
+  // Per-entity mode detection
+  const perEntityMode = submoduleRun ? isPerEntityRun(submoduleRun) : false;
+  // Type-narrow for legacy code paths
+  const legacyRun = (!perEntityMode ? submoduleRun : null) as (SubmoduleRun | null);
+  const batchRun = (perEntityMode ? submoduleRun : null) as (SubmoduleRunBatch | null);
+
+  // Per-entity checked keys: Map<entityName, Set<itemKey>>
+  // Unexpanded entities are NOT in this map — approval sends '__all__' sentinel for them
+  const [entityCheckedKeys, setEntityCheckedKeys] = useState<Map<string, Set<string>>>(new Map());
+
+  // Reset entity checked keys when switching submodules
+  useEffect(() => {
+    setEntityCheckedKeys(new Map());
+  }, [submodule?.id]);
 
   // --- Render schema and selectable flag ---
   const renderSchema = submoduleRun?.output_render_schema as RenderSchema | null;
   const isSelectable = renderSchema?.selectable === true;
 
-  // --- Flatten results into a single list of items with entity_name ---
+  // --- Flatten results into a single list of items with entity_name (LEGACY ONLY) ---
   const flatItems = useMemo(() => {
-    if (!submoduleRun?.output_data?.results) return [];
+    if (perEntityMode || !legacyRun?.output_data?.results) return [];
     const items: Array<Record<string, unknown> & { entity_name: string }> = [];
-    for (const entityResult of submoduleRun.output_data.results) {
+    for (const entityResult of legacyRun.output_data.results) {
       for (const item of entityResult.items || []) {
         items.push({ ...item, entity_name: entityResult.entity_name });
       }
     }
     return items;
-  }, [submoduleRun?.output_data]);
+  }, [legacyRun?.output_data, perEntityMode]);
 
   const itemKey = submodule?.item_key || 'url';
 
@@ -336,10 +353,16 @@ export function SubmodulePanel({
   // Show toast when background job completes
   useEffect(() => {
     if (!submoduleRun || !submodule) return;
-    if (submoduleRun.status === 'completed' && submoduleRun.output_data) {
-      const count = submoduleRun.output_data.summary?.total_items ?? 0;
-      if (!submodulePanelOpen) {
-        showToast(`${submodule.name} completed \u2014 ${count} results`, 'success');
+    if (submoduleRun.status === 'completed') {
+      if (perEntityMode && batchRun) {
+        if (!submodulePanelOpen) {
+          showToast(`${submodule.name} completed \u2014 ${batchRun.entity_count} entities`, 'success');
+        }
+      } else if (legacyRun?.output_data) {
+        const count = legacyRun.output_data.summary?.total_items ?? 0;
+        if (!submodulePanelOpen) {
+          showToast(`${submodule.name} completed \u2014 ${count} results`, 'success');
+        }
       }
     }
     if (submoduleRun.status === 'failed') {
@@ -429,6 +452,33 @@ export function SubmodulePanel({
   const handleApprove = () => {
     if (!activeSubmoduleRunId) return;
 
+    // Per-entity approval: build entity_approvals map
+    if (perEntityMode && batchRun) {
+      const entityApprovals: Record<string, string[] | string> = {};
+      for (const entity of batchRun.entities) {
+        const checked = entityCheckedKeys.get(entity.entity_name);
+        if (checked) {
+          // User expanded and possibly modified selection
+          entityApprovals[entity.entity_name] = Array.from(checked);
+        } else {
+          // Never expanded — approve all via sentinel
+          entityApprovals[entity.entity_name] = '__all__';
+        }
+      }
+      approvePerEntityMutation.mutate(
+        { submoduleRunId: activeSubmoduleRunId, entityApprovals, runId: runId!, stepIndex },
+        {
+          onSuccess: () => {
+            closeSubmodulePanel();
+            queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', runId, stepIndex] });
+            queryClient.invalidateQueries({ queryKey: ['run', runId] });
+          },
+        }
+      );
+      return;
+    }
+
+    // Legacy approval
     let approvedKeys: string[];
     if (isSelectable) {
       approvedKeys = Array.from(checkedKeys);
@@ -475,19 +525,27 @@ export function SubmodulePanel({
       : undefined;
 
   // --- Results badge ---
-  const summary = submoduleRun?.output_data?.summary;
+  const summary = legacyRun?.output_data?.summary;
 
-  const resultsBadge = isRunning
-    ? 'running'
-    : isCompleted
-      ? isSelectable
-        ? `${checkedKeys.size}/${flatItems.length}`
-        : `${flatItems.length} items`
-      : undefined;
+  const resultsBadge = perEntityMode
+    ? (isRunning
+      ? `${batchRun?.completed_count || 0}/${batchRun?.entity_count || 0} entities`
+      : isCompleted
+        ? `${batchRun?.entity_count || 0} entities`
+        : undefined)
+    : (isRunning
+      ? 'running'
+      : isCompleted
+        ? isSelectable
+          ? `${checkedKeys.size}/${flatItems.length}`
+          : `${flatItems.length} items`
+        : undefined);
 
   // --- Results summary label — submodule-authored, skeleton just renders it ---
-  const resultsLabel = summary?.description
-    || (summary ? `${summary.total_items} items across ${summary.total_entities} entities` : undefined);
+  const resultsLabel = perEntityMode
+    ? (batchRun ? `${batchRun.entity_count} entities (${batchRun.completed_count} completed, ${batchRun.failed_count} failed)` : undefined)
+    : (summary?.description
+      || (summary ? `${summary.total_items} items across ${summary.total_entities} entities` : undefined));
 
   return (
     <div className="fixed inset-0 z-50">
@@ -543,7 +601,10 @@ export function SubmodulePanel({
           const status = latestRun.status;
           if (!['completed', 'approved', 'failed'].includes(status)) return null;
 
-          const count = latestRun.result_count || 0;
+          const isPerEntity = latestRun.mode === 'per_entity';
+          const countLabel = isPerEntity
+            ? `${latestRun.entity_count || 0} entities`
+            : `${latestRun.result_count || 0} items`;
           const agoMs = latestRun.completed_at ? Date.now() - new Date(latestRun.completed_at).getTime() : 0;
           const agoText = agoMs < 60000 ? 'just now'
             : agoMs < 3600000 ? `${Math.floor(agoMs / 60000)}m ago`
@@ -553,10 +614,10 @@ export function SubmodulePanel({
           let label = '';
           let statusIcon = '';
           if (status === 'approved') {
-            label = `Last run: ${count} items \u00b7 Approved`;
+            label = `Last run: ${countLabel} \u00b7 Approved`;
             statusIcon = '\u2713';
           } else if (status === 'completed') {
-            label = `Last run: ${count} items \u00b7 Completed`;
+            label = `Last run: ${countLabel} \u00b7 Completed`;
             statusIcon = '\u25cb';
           } else if (status === 'failed') {
             label = `Last run: Failed`;
@@ -725,23 +786,38 @@ export function SubmodulePanel({
             onToggle={() => setPanelAccordion(panelAccordion === 'results' ? null : 'results')}
             variant="pink"
           >
-            <ResultsContent
-              submoduleRun={submoduleRun ?? null}
-              flatItems={mergedFlatItems}
-              renderSchema={renderSchema}
-              itemKey={itemKey}
-              dataOperation={dataOperation}
-              checkedKeys={checkedKeys}
-              onCheckedKeysChange={isSelectable ? setCheckedKeys : undefined}
-              summary={summary}
-              resultsLabel={resultsLabel}
-              onChangeInput={handleChangeInput}
-              onChangeOptions={handleChangeOptions}
-              onTryAgain={handleTryAgain}
-              submoduleId={submodule.id}
-              submoduleRunStatus={submoduleRun?.status ?? null}
-              onRequestFullData={handleRequestFullData}
-            />
+            {perEntityMode && batchRun ? (
+              <PerEntityResultsContent
+                batchRun={batchRun}
+                renderSchema={renderSchema}
+                itemKey={itemKey}
+                isSelectable={isSelectable}
+                entityCheckedKeys={entityCheckedKeys}
+                onEntityCheckedKeysChange={setEntityCheckedKeys}
+                resultsLabel={resultsLabel}
+                onChangeInput={handleChangeInput}
+                onChangeOptions={handleChangeOptions}
+                onTryAgain={handleTryAgain}
+              />
+            ) : (
+              <ResultsContent
+                submoduleRun={submoduleRun ?? null}
+                flatItems={mergedFlatItems}
+                renderSchema={renderSchema}
+                itemKey={itemKey}
+                dataOperation={dataOperation}
+                checkedKeys={checkedKeys}
+                onCheckedKeysChange={isSelectable ? setCheckedKeys : undefined}
+                summary={summary}
+                resultsLabel={resultsLabel}
+                onChangeInput={handleChangeInput}
+                onChangeOptions={handleChangeOptions}
+                onTryAgain={handleTryAgain}
+                submoduleId={submodule.id}
+                submoduleRunStatus={submoduleRun?.status ?? null}
+                onRequestFullData={handleRequestFullData}
+              />
+            )}
           </PanelAccordionItem>
         </div>
 
@@ -776,15 +852,15 @@ export function SubmodulePanel({
 
             {/* APPROVE */}
             <button
-              disabled={!isCompleted || approveMutation.isPending}
+              disabled={!isCompleted || approveMutation.isPending || approvePerEntityMutation.isPending}
               onClick={handleApprove}
               className={`px-8 py-3 rounded text-sm font-medium transition-colors ${
-                isCompleted && !approveMutation.isPending
+                isCompleted && !approveMutation.isPending && !approvePerEntityMutation.isPending
                   ? 'bg-green-600 text-white hover:bg-green-700'
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               }`}
             >
-              {approveMutation.isPending ? 'APPROVING...' : 'APPROVE'}
+              {(approveMutation.isPending || approvePerEntityMutation.isPending) ? 'APPROVING...' : 'APPROVE'}
             </button>
           </div>
         </div>
@@ -933,6 +1009,233 @@ function ResultsContent({
         submoduleRunStatus={submoduleRunStatus}
         onRequestFullData={onRequestFullData}
       />
+    </div>
+  );
+}
+
+
+// --- Per-Entity Results Content ---
+
+function PerEntityResultsContent({
+  batchRun,
+  renderSchema,
+  itemKey,
+  isSelectable,
+  entityCheckedKeys,
+  onEntityCheckedKeysChange,
+  resultsLabel,
+  onChangeInput,
+  onChangeOptions,
+  onTryAgain,
+}: {
+  batchRun: SubmoduleRunBatch;
+  renderSchema: RenderSchema | null;
+  itemKey: string;
+  isSelectable: boolean;
+  entityCheckedKeys: Map<string, Set<string>>;
+  onEntityCheckedKeysChange: (keys: Map<string, Set<string>>) => void;
+  resultsLabel: string | undefined;
+  onChangeInput: () => void;
+  onChangeOptions: () => void;
+  onTryAgain: () => void;
+}) {
+  const [expandedEntity, setExpandedEntity] = useState<string | null>(null);
+
+  // No entities yet
+  if (!batchRun.entities || batchRun.entities.length === 0) {
+    return <p className="text-sm text-gray-400">No results yet. Configure input and click RUN TASK.</p>;
+  }
+
+  // All pending
+  if (batchRun.status === 'pending') {
+    return (
+      <div className="flex items-center gap-3 py-4">
+        <Spinner />
+        <p className="text-sm text-gray-500">Waiting to start...</p>
+      </div>
+    );
+  }
+
+  // Failed at batch level
+  if (batchRun.status === 'failed' && batchRun.completed_count === 0) {
+    return (
+      <div className="space-y-3">
+        <div className="bg-red-50 border border-red-200 rounded p-3">
+          <p className="text-sm text-red-700 font-medium">Execution failed</p>
+          <p className="text-xs text-red-600 mt-1">{batchRun.error || 'Unknown error'}</p>
+        </div>
+        <ResultsActionCTAs onChangeInput={onChangeInput} onChangeOptions={onChangeOptions} onTryAgain={onTryAgain} />
+      </div>
+    );
+  }
+
+  // Running or completed/approved — show entity rows with mixed status
+  const handleEntityCheckedChange = (entityName: string, keys: Set<string>) => {
+    const next = new Map(entityCheckedKeys);
+    next.set(entityName, keys);
+    onEntityCheckedKeysChange(next);
+  };
+
+  return (
+    <div className="flex flex-col gap-2 h-full">
+      {resultsLabel && (
+        <div className="flex-shrink-0 text-xs text-gray-600">{resultsLabel}</div>
+      )}
+
+      <div className="flex-1 min-h-0 overflow-y-auto space-y-1">
+        {batchRun.entities.map((entity) => (
+          <EntityAccordionItem
+            key={entity.id}
+            entity={entity}
+            batchRunId={batchRun.id}
+            isExpanded={expandedEntity === entity.entity_name}
+            onToggle={() => setExpandedEntity(expandedEntity === entity.entity_name ? null : entity.entity_name)}
+            renderSchema={renderSchema}
+            itemKey={itemKey}
+            isSelectable={isSelectable}
+            checkedKeys={entityCheckedKeys.get(entity.entity_name)}
+            onCheckedKeysChange={(keys) => handleEntityCheckedChange(entity.entity_name, keys)}
+            batchStatus={batchRun.status}
+          />
+        ))}
+      </div>
+
+      <ResultsActionCTAs onChangeInput={onChangeInput} onChangeOptions={onChangeOptions} onTryAgain={onTryAgain} />
+    </div>
+  );
+}
+
+
+// --- Entity Accordion Item (lazy-loads detail on expand) ---
+
+function EntityAccordionItem({
+  entity,
+  batchRunId,
+  isExpanded,
+  onToggle,
+  renderSchema,
+  itemKey,
+  isSelectable,
+  checkedKeys,
+  onCheckedKeysChange,
+  batchStatus,
+}: {
+  entity: EntityRunStatus;
+  batchRunId: string;
+  isExpanded: boolean;
+  onToggle: () => void;
+  renderSchema: RenderSchema | null;
+  itemKey: string;
+  isSelectable: boolean;
+  checkedKeys: Set<string> | undefined;
+  onCheckedKeysChange: (keys: Set<string>) => void;
+  batchStatus: string;
+}) {
+  // Lazy-load entity detail only when expanded
+  const { data: detail, isLoading } = useEntityRunDetail(batchRunId, entity.id, isExpanded);
+
+  // Initialize checked keys when detail loads (only once)
+  useEffect(() => {
+    if (!detail || !isSelectable || checkedKeys) return;
+    const items = detail.output_data?.items || [];
+    if (detail.status === 'approved' && detail.approved_items) {
+      onCheckedKeysChange(new Set(detail.approved_items));
+    } else {
+      // Pre-select all items (with flagged_when deselection like legacy)
+      const flaggedWhen = (renderSchema as Record<string, unknown>)?.flagged_when as Record<string, string[]> | undefined;
+      const keys = items
+        .filter((item) => {
+          if (!flaggedWhen) return true;
+          return !Object.entries(flaggedWhen).some(
+            ([field, values]) => values.includes(String(item[field] ?? ''))
+          );
+        })
+        .map((item) => String(item[itemKey] ?? ''))
+        .filter(Boolean);
+      onCheckedKeysChange(new Set(keys));
+    }
+  }, [detail, isSelectable]);
+
+  // Status indicator
+  const statusIcon = entity.status === 'completed' || entity.status === 'approved'
+    ? '\u2713'
+    : entity.status === 'failed'
+      ? '\u2717'
+      : entity.status === 'running'
+        ? null // spinner
+        : '\u25cb'; // pending
+
+  const itemCount = detail?.output_data?.items?.length;
+  const checkedCount = checkedKeys?.size;
+
+  return (
+    <div className={`border rounded ${isExpanded ? 'border-pink-300' : 'border-gray-200'}`}>
+      {/* Entity header row */}
+      <button
+        onClick={onToggle}
+        disabled={entity.status === 'pending'}
+        className={`w-full flex items-center justify-between px-3 py-2 text-left ${
+          entity.status === 'pending' ? 'opacity-50 cursor-default' : 'hover:bg-gray-50 cursor-pointer'
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          {entity.status === 'running' ? (
+            <span className="inline-block w-3 h-3 border-2 border-sky-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+          ) : (
+            <span className={`text-xs flex-shrink-0 ${
+              entity.status === 'failed' ? 'text-red-500' :
+              entity.status === 'completed' || entity.status === 'approved' ? 'text-emerald-500' :
+              'text-gray-400'
+            }`}>{statusIcon}</span>
+          )}
+          <span className="text-sm text-gray-700 font-medium">{entity.entity_name}</span>
+        </div>
+        <div className="flex items-center gap-2 text-[10px] text-gray-500">
+          {entity.status === 'running' && entity.progress && (
+            <span>{entity.progress.current}/{entity.progress.total}</span>
+          )}
+          {itemCount != null && isSelectable && checkedCount != null && (
+            <span>{checkedCount}/{itemCount}</span>
+          )}
+          {itemCount != null && !isSelectable && (
+            <span>{itemCount} items</span>
+          )}
+          {entity.error && (
+            <span className="text-red-500" title={entity.error}>error</span>
+          )}
+          <span className={`transition-transform ${isExpanded ? 'rotate-90' : ''}`}>{'\u25B6'}</span>
+        </div>
+      </button>
+
+      {/* Expanded detail */}
+      {isExpanded && (
+        <div className="border-t border-gray-200 p-3">
+          {isLoading && (
+            <div className="flex items-center gap-2 py-2">
+              <Spinner />
+              <span className="text-xs text-gray-500">Loading...</span>
+            </div>
+          )}
+          {!isLoading && detail?.output_data?.items && detail.output_data.items.length > 0 && (
+            <ContentRenderer
+              entities={detail.output_data.items}
+              renderSchema={renderSchema}
+              itemKey={itemKey}
+              checkedKeys={isSelectable ? checkedKeys : undefined}
+              onCheckedKeysChange={isSelectable ? onCheckedKeysChange : undefined}
+              fullHeight
+            />
+          )}
+          {!isLoading && detail && (!detail.output_data?.items || detail.output_data.items.length === 0) && (
+            <p className="text-xs text-gray-400">No items returned for this entity.</p>
+          )}
+          {!isLoading && detail?.error && (
+            <div className="bg-red-50 border border-red-200 rounded p-2 mt-2">
+              <p className="text-xs text-red-600">{detail.error}</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

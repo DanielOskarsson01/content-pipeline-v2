@@ -13,8 +13,9 @@ import { executeRouter, submoduleRunRouter, latestRunsRouter } from './routes/su
 import referenceDocsRouter from './routes/referenceDocs.js';
 import { loadModules } from './services/moduleLoader.js';
 
-// Import worker — starts BullMQ worker in the same process
+// Import workers — start BullMQ workers in the same process
 import './workers/stageWorker.js';
+import './workers/batchWorker.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();

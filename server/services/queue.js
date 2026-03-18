@@ -1,4 +1,4 @@
-import { Queue } from 'bullmq';
+import { Queue, FlowProducer } from 'bullmq';
 import IORedis from 'ioredis';
 
 const redisConnection = {
@@ -18,20 +18,28 @@ redis.on('error', (err) => {
 // Single queue for all pipeline stage work
 export const pipelineQueue = new Queue('pipeline-stages-v2', { connection: redis });
 
+// Batch finalization queue — parent jobs land here when all children complete
+export const batchQueue = new Queue('batch-finalization', { connection: redis });
+
+// FlowProducer for creating parent/child job flows (per-entity architecture)
+export const flowProducer = new FlowProducer({ connection: redis });
+
 // Cost-based job configuration (from spec Part 15)
+// Per-entity mode: shorter timeouts (single entity, not N entities)
 const COST_CONFIG = {
   cheap:     { timeout: 5 * 60 * 1000,  attempts: 3, priority: 1  },
   medium:    { timeout: 15 * 60 * 1000, attempts: 2, priority: 5  },
   expensive: { timeout: 30 * 60 * 1000, attempts: 1, priority: 10 },
 };
 
+const ENTITY_COST_CONFIG = {
+  cheap:     { timeout: 2 * 60 * 1000,  attempts: 3, priority: 1  },
+  medium:    { timeout: 5 * 60 * 1000,  attempts: 2, priority: 5  },
+  expensive: { timeout: 10 * 60 * 1000, attempts: 1, priority: 10 },
+};
+
 /**
- * Enqueue a submodule execution job.
- * @param {object} params
- * @param {string} params.submoduleRunId - UUID of the submodule_runs row
- * @param {string} params.submoduleId    - Manifest id (e.g. "sitemap-parser")
- * @param {number} params.stepIndex      - Step number (0-10)
- * @param {string} params.cost           - "cheap" | "medium" | "expensive"
+ * Enqueue a submodule execution job (legacy path — all entities in one job).
  */
 export async function enqueueSubmoduleJob({ submoduleRunId, submoduleId, stepIndex, cost }) {
   const config = COST_CONFIG[cost] || COST_CONFIG.medium;
@@ -50,4 +58,57 @@ export async function enqueueSubmoduleJob({ submoduleRunId, submoduleId, stepInd
 
   console.log(`[queue] Enqueued job ${job.id} for ${submoduleId} (cost: ${cost}, timeout: ${config.timeout / 1000}s)`);
   return { jobId: job.id, timeout: config.timeout };
+}
+
+/**
+ * Enqueue a per-entity batch via FlowProducer.
+ * Creates 1 parent job + N child jobs in a single Redis call.
+ *
+ * @param {object} params
+ * @param {string} params.batchId           - UUID grouping this batch
+ * @param {string} params.submoduleRunId    - UUID of the submodule_runs batch record
+ * @param {string} params.submoduleId       - Manifest id
+ * @param {number} params.stepIndex         - Step number
+ * @param {string} params.cost              - "cheap" | "medium" | "expensive"
+ * @param {Array}  params.entityRuns        - Array of { entitySubmoduleRunId, entityName }
+ * @returns {object} { flowJobId, entityCount }
+ */
+export async function enqueueEntityBatch({ batchId, submoduleRunId, submoduleId, stepIndex, cost, entityRuns }) {
+  const config = ENTITY_COST_CONFIG[cost] || ENTITY_COST_CONFIG.medium;
+
+  const flow = await flowProducer.add({
+    name: 'batch-complete',
+    queueName: 'batch-finalization',
+    data: {
+      batch_id: batchId,
+      submodule_run_id: submoduleRunId,
+      submodule_id: submoduleId,
+      entity_count: entityRuns.length,
+    },
+    opts: {
+      removeOnComplete: 100,
+      removeOnFail: 50,
+    },
+    children: entityRuns.map(er => ({
+      name: 'entity-execute',
+      queueName: 'pipeline-stages-v2',
+      data: {
+        entity_submodule_run_id: er.entitySubmoduleRunId,
+        entity_name: er.entityName,
+        submodule_id: submoduleId,
+        step_index: stepIndex,
+        batch_id: batchId,
+      },
+      opts: {
+        attempts: config.attempts,
+        priority: config.priority,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: 100,
+        removeOnFail: 50,
+      },
+    })),
+  });
+
+  console.log(`[queue] Enqueued entity batch ${batchId} for ${submoduleId}: ${entityRuns.length} entities (cost: ${cost})`);
+  return { flowJobId: flow.job.id, entityCount: entityRuns.length };
 }

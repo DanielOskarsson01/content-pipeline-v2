@@ -50,7 +50,9 @@ import type {
   Project, CreateProjectInput, CreateProjectResponse,
   RunWithStages, PipelineStage, StepApproveResponse, StepSkipResponse,
   CategoryGroups, SubmoduleConfig,
-  SubmoduleRun, SubmoduleLatestRunMap, ApproveSubmoduleRunResponse,
+  SubmoduleRun, SubmoduleRunPolled, SubmoduleLatestRunMap,
+  ApproveSubmoduleRunResponse, ApproveSubmoduleRunPerEntityResponse,
+  EntityRunDetail, ExecuteSubmoduleResponse,
   DecisionLogEntry,
 } from '../types/step';
 
@@ -98,12 +100,12 @@ export const api = {
 
   // Submodule execution (Phase 7)
   executeSubmodule: (runId: string, stepIndex: number, submoduleId: string, body?: { entities?: Record<string, unknown>[]; from_previous_step?: boolean }) =>
-    apiFetch<{ submodule_run_id: string; status: string }>(
+    apiFetch<ExecuteSubmoduleResponse>(
       `/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/run`,
       { method: 'POST', body: JSON.stringify(body || {}) }
     ),
   getSubmoduleRun: (submoduleRunId: string) =>
-    apiFetch<SubmoduleRun>(`/api/submodule-runs/${submoduleRunId}`),
+    apiFetch<SubmoduleRunPolled>(`/api/submodule-runs/${submoduleRunId}`),
   getSubmoduleRunFull: (submoduleRunId: string) =>
     apiFetch<SubmoduleRun>(`/api/submodule-runs/${submoduleRunId}?full=true`),
   approveSubmoduleRun: (submoduleRunId: string, approvedItemKeys: string[]) =>
@@ -111,6 +113,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ approved_item_keys: approvedItemKeys }),
     }),
+  approveSubmoduleRunPerEntity: (submoduleRunId: string, entityApprovals: Record<string, string[] | string>) =>
+    apiFetch<ApproveSubmoduleRunPerEntityResponse>(`/api/submodule-runs/${submoduleRunId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ entity_approvals: entityApprovals }),
+    }),
+  getEntityRunDetail: (batchRunId: string, entityRunId: string) =>
+    apiFetch<EntityRunDetail>(`/api/submodule-runs/${batchRunId}/entities/${entityRunId}`),
   getLatestSubmoduleRuns: (runId: string, stepIndex: number) =>
     apiFetch<SubmoduleLatestRunMap>(`/api/runs/${runId}/steps/${stepIndex}/submodule-runs/latest`),
 

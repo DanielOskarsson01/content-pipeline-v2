@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, apiFetch } from '../api/client';
 import { useAppStore } from '../stores/appStore';
-import type { SubmoduleRun, SubmoduleLatestRunMap, ApproveSubmoduleRunResponse } from '../types/step';
+import type { SubmoduleRun, SubmoduleRunPolled, SubmoduleLatestRunMap, EntityRunDetail, ExecuteSubmoduleResponse } from '../types/step';
 
 /**
  * Poll a submodule run by ID.
@@ -10,7 +10,7 @@ import type { SubmoduleRun, SubmoduleLatestRunMap, ApproveSubmoduleRunResponse }
  * Pass enabled=false to pause polling (e.g. when panel is closed).
  */
 export function useSubmoduleRun(submoduleRunId: string | null, enabled = true) {
-  return useQuery<SubmoduleRun | null>({
+  return useQuery<SubmoduleRunPolled | null>({
     queryKey: ['submoduleRun', submoduleRunId],
     queryFn: () => {
       if (!submoduleRunId) return null;
@@ -102,5 +102,48 @@ export function useLatestSubmoduleRuns(runId: string | undefined, stepIndex: num
     enabled: !!runId,
     refetchInterval: 5000, // refresh every 5s to catch background job completions
     staleTime: 2000,
+  });
+}
+
+/**
+ * Lazy-load full detail for a single entity run.
+ * Called when user expands an entity accordion in per-entity mode.
+ */
+export function useEntityRunDetail(batchRunId: string | null, entityRunId: string | null, enabled = false) {
+  return useQuery<EntityRunDetail | null>({
+    queryKey: ['entityRunDetail', batchRunId, entityRunId],
+    queryFn: () => {
+      if (!batchRunId || !entityRunId) return null;
+      return api.getEntityRunDetail(batchRunId, entityRunId);
+    },
+    enabled: enabled && !!batchRunId && !!entityRunId,
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+/**
+ * Approve a per-entity batch run.
+ * Sends entity_approvals: { entityName: [keys] | '__all__' } per entity.
+ */
+export function useApproveSubmoduleRunPerEntity() {
+  const queryClient = useQueryClient();
+  const showToast = useAppStore((s) => s.showToast);
+
+  return useMutation({
+    mutationFn: ({ submoduleRunId, entityApprovals }: {
+      submoduleRunId: string;
+      entityApprovals: Record<string, string[] | string>;
+      runId: string;
+      stepIndex: number;
+    }) => api.approveSubmoduleRunPerEntity(submoduleRunId, entityApprovals),
+    onSuccess: (data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', vars.runId, vars.stepIndex] });
+      queryClient.invalidateQueries({ queryKey: ['submoduleRun', vars.submoduleRunId] });
+      queryClient.invalidateQueries({ queryKey: ['run', vars.runId] });
+      showToast(`Approved — ${data.total_approved} items across ${data.entity_count} entities`, 'success');
+    },
+    onError: (error: Error) => {
+      showToast(error.message || 'Failed to approve', 'error');
+    },
   });
 }

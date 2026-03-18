@@ -9,9 +9,12 @@
  */
 
 import { Router } from 'express';
+import { randomUUID } from 'crypto';
 import db from '../services/db.js';
 import { getSubmoduleById, getSubmodules } from '../services/moduleLoader.js';
-import { enqueueSubmoduleJob } from '../services/queue.js';
+import { enqueueSubmoduleJob, enqueueEntityBatch } from '../services/queue.js';
+
+const PER_ENTITY_MODE = process.env.PER_ENTITY_MODE === 'true';
 
 // --- Execute router (mounted at /api/runs/:runId/steps/:stepIndex/submodules/:submoduleId) ---
 export const executeRouter = Router({ mergeParams: true });
@@ -267,6 +270,154 @@ executeRouter.post('/run', async (req, res) => {
       }
     }
 
+    // ===== PER-ENTITY MODE =====
+    if (PER_ENTITY_MODE) {
+      // 6e. Bulk-read entity pools for this step (MANDATORY: 1 query, not N)
+      const { data: entityPools, error: poolErr } = await db
+        .from('entity_stage_pool')
+        .select('entity_name, pool_items')
+        .eq('run_id', runId)
+        .eq('step_index', stepIdx);
+
+      if (poolErr) throw poolErr;
+
+      // If no entity pools exist yet (Step 0/1), create them from inputData entities
+      let entities;
+      let originalEntities = null; // Keep full entity objects for input_data
+      if (entityPools && entityPools.length > 0) {
+        entities = entityPools;
+      } else if (inputData?.entities?.length > 0) {
+        // First submodule at this step — initialize entity_stage_pool from input entities
+        originalEntities = inputData.entities;
+        const poolRows = inputData.entities.map(e => ({
+          run_id: runId,
+          step_index: stepIdx,
+          entity_name: e.name || e.entity_name || 'unknown',
+          pool_items: e.items || [],
+          status: 'pending',
+        }));
+
+        const { error: initErr } = await db
+          .from('entity_stage_pool')
+          .upsert(poolRows, { onConflict: 'run_id,step_index,entity_name', ignoreDuplicates: true });
+
+        if (initErr) throw initErr;
+
+        entities = poolRows.map(r => ({ entity_name: r.entity_name, pool_items: r.pool_items }));
+
+        // Update stage entity_count
+        await db
+          .from('pipeline_stages')
+          .update({ entity_count: entities.length })
+          .eq('id', stage.id);
+      } else {
+        return res.status(400).json({ error: 'No entities available for per-entity execution' });
+      }
+
+      // Build a lookup for original entity data (Step 1: entities have properties like website, linkedin)
+      const originalEntityMap = new Map();
+      if (originalEntities) {
+        for (const e of originalEntities) {
+          const name = e.name || e.entity_name || 'unknown';
+          originalEntityMap.set(name, e);
+        }
+      }
+
+      // 7e. Create batch record in submodule_runs
+      const batchId = randomUUID();
+      const { data: batchRun, error: batchErr } = await db
+        .from('submodule_runs')
+        .insert({
+          stage_id: stage.id,
+          run_id: runId,
+          submodule_id: submoduleId,
+          status: 'pending',
+          options,
+          batch_id: batchId,
+          entity_count: entities.length,
+          completed_count: 0,
+          input_data: { step_index: stepIdx, submodule_id: submoduleId },
+          output_render_schema: manifest.output_schema || null,
+        })
+        .select()
+        .single();
+
+      if (batchErr) {
+        if (batchErr.code === '23505') {
+          return res.status(409).json({ error: 'Submodule already has an active run (concurrent request)' });
+        }
+        throw batchErr;
+      }
+
+      // 8e. Bulk-insert entity_submodule_runs (MANDATORY: 1 insert, not N)
+      const entityRunRows = entities.map(ep => {
+        // Merge full entity properties (website, linkedin, etc.) with pool items
+        const orig = originalEntityMap.get(ep.entity_name) || {};
+        const entity = {
+          ...orig,
+          name: ep.entity_name,
+          items: ep.pool_items || [],
+        };
+
+        return {
+          stage_id: stage.id,
+          run_id: runId,
+          batch_id: batchId,
+          entity_name: ep.entity_name,
+          submodule_id: submoduleId,
+          step_index: stepIdx,
+          status: 'pending',
+          options,
+          input_data: {
+            entity,
+            run_id: runId,
+            step_index: stepIdx,
+            submodule_id: submoduleId,
+          },
+          output_render_schema: manifest.output_schema || null,
+        };
+      });
+
+      const { data: insertedRuns, error: entityInsertErr } = await db
+        .from('entity_submodule_runs')
+        .insert(entityRunRows)
+        .select('id, entity_name');
+
+      if (entityInsertErr) throw entityInsertErr;
+
+      // 9e. Enqueue via FlowProducer (MANDATORY: 1 Redis call, not N)
+      try {
+        await enqueueEntityBatch({
+          batchId,
+          submoduleRunId: batchRun.id,
+          submoduleId,
+          stepIndex: stepIdx,
+          cost: manifest.cost || 'medium',
+          entityRuns: insertedRuns.map(r => ({
+            entitySubmoduleRunId: r.id,
+            entityName: r.entity_name,
+          })),
+        });
+      } catch (enqueueErr) {
+        console.error(`[execute] FlowProducer enqueue failed for batch ${batchId}:`, enqueueErr);
+        await db.from('submodule_runs').update({ status: 'failed', error: `Enqueue failed: ${enqueueErr.message}` }).eq('id', batchRun.id);
+        await db.from('entity_submodule_runs').update({ status: 'failed', error: 'Batch enqueue failed' }).eq('batch_id', batchId);
+        return res.status(500).json({ error: `Failed to enqueue entity batch: ${enqueueErr.message}` });
+      }
+
+      // Update submodule_runs to running
+      await db.from('submodule_runs').update({ status: 'running', started_at: new Date().toISOString() }).eq('id', batchRun.id);
+
+      return res.json({
+        submodule_run_id: batchRun.id,
+        batch_id: batchId,
+        entity_count: entities.length,
+        status: 'running',
+        mode: 'per_entity',
+      });
+    }
+
+    // ===== LEGACY MODE =====
     // 6. Create submodule_runs row
     const { data: subRun, error: insertErr } = await db
       .from('submodule_runs')
@@ -323,12 +474,14 @@ export const submoduleRunRouter = Router();
 /**
  * GET /api/submodule-runs/:id
  * Polling endpoint — returns status, progress, output_data, approved_items.
+ * Per-entity mode: lightweight (MANDATORY) — no output_data in batch poll.
+ * Use /api/submodule-runs/:id/entities for entity-level detail.
  */
 submoduleRunRouter.get('/:id', async (req, res) => {
   try {
     const { data, error } = await db
       .from('submodule_runs')
-      .select('id, submodule_id, status, progress, output_data, output_render_schema, approved_items, error, started_at, completed_at')
+      .select('id, submodule_id, status, progress, output_data, output_render_schema, approved_items, error, batch_id, entity_count, completed_count, started_at, completed_at')
       .eq('id', req.params.id)
       .single();
 
@@ -337,12 +490,47 @@ submoduleRunRouter.get('/:id', async (req, res) => {
     }
     if (error) throw error;
 
+    // Per-entity batch run: lightweight polling (MANDATORY — no output_data)
+    if (data.batch_id) {
+      // Compute live progress from entity_submodule_runs
+      const { data: entityStatuses } = await db
+        .from('entity_submodule_runs')
+        .select('id, entity_name, status, progress, error')
+        .eq('batch_id', data.batch_id);
+
+      const entities = (entityStatuses || []).map(e => ({
+        id: e.id,
+        entity_name: e.entity_name,
+        status: e.status,
+        progress: e.progress,
+        error: e.error,
+      }));
+
+      const completed = entities.filter(e => e.status === 'completed' || e.status === 'approved').length;
+      const failed = entities.filter(e => e.status === 'failed').length;
+
+      return res.json({
+        id: data.id,
+        submodule_id: data.submodule_id,
+        status: data.status,
+        batch_id: data.batch_id,
+        entity_count: data.entity_count || entities.length,
+        completed_count: completed,
+        failed_count: failed,
+        progress: null,
+        output_render_schema: data.output_render_schema,
+        approved_items: data.approved_items,
+        error: data.error,
+        started_at: data.started_at,
+        completed_at: data.completed_at,
+        entities,
+        mode: 'per_entity',
+      });
+    }
+
+    // Legacy mode: return full output_data
     // Downloadable fields (e.g. text_content) are stored in a separate table
-    // (submodule_run_item_data) to avoid row-size limits.
-    // Normal poll: return as-is (already stripped by worker). Safety strip for old data.
-    // ?full=true: merge from separate table for detail modal / download.
     if (req.query.full === 'true' && data.output_data?.results && data.output_render_schema?.downloadable_fields) {
-      // Merge downloadable fields from separate table
       const manifest = getSubmoduleById(data.submodule_id);
       const itemKeyField = manifest?.item_key || 'url';
 
@@ -352,13 +540,11 @@ submoduleRunRouter.get('/:id', async (req, res) => {
         .eq('submodule_run_id', req.params.id);
 
       if (itemData?.length > 0) {
-        // Build lookup: item_key → { field_name: content }
         const lookup = new Map();
         for (const row of itemData) {
           if (!lookup.has(row.item_key)) lookup.set(row.item_key, {});
           lookup.get(row.item_key)[row.field_name] = row.content;
         }
-        // Merge into result items
         for (const entity of data.output_data.results) {
           for (const item of (entity.items || [])) {
             const key = String(item[itemKeyField] ?? '');
@@ -368,7 +554,6 @@ submoduleRunRouter.get('/:id', async (req, res) => {
         }
       }
     } else if (data.output_data?.results && data.output_render_schema?.downloadable_fields) {
-      // Safety strip for normal poll (handles old runs where worker didn't strip)
       const downloadFields = new Set(
         data.output_render_schema.downloadable_fields.map((d) => d.field)
       );
@@ -389,27 +574,67 @@ submoduleRunRouter.get('/:id', async (req, res) => {
 });
 
 /**
+ * GET /api/submodule-runs/:id/entities/:entityRunId
+ * Per-entity detail — returns full output_data for a single entity run.
+ * Loaded lazily when user expands an entity in the UI.
+ */
+submoduleRunRouter.get('/:id/entities/:entityRunId', async (req, res) => {
+  try {
+    const { data, error } = await db
+      .from('entity_submodule_runs')
+      .select('id, entity_name, submodule_id, status, progress, output_data, output_render_schema, approved_items, error, logs, started_at, completed_at')
+      .eq('id', req.params.entityRunId)
+      .single();
+
+    if (error?.code === 'PGRST116' || !data) {
+      return res.status(404).json({ error: 'Entity submodule run not found' });
+    }
+    if (error) throw error;
+
+    // Merge downloadable fields if requested
+    if (req.query.full === 'true' && data.output_data?.items && data.output_render_schema?.downloadable_fields) {
+      const manifest = getSubmoduleById(data.submodule_id);
+      const itemKeyField = manifest?.item_key || 'url';
+
+      const { data: itemData } = await db
+        .from('submodule_run_item_data')
+        .select('item_key, field_name, content')
+        .eq('submodule_run_id', req.params.entityRunId);
+
+      if (itemData?.length > 0) {
+        const lookup = new Map();
+        for (const row of itemData) {
+          if (!lookup.has(row.item_key)) lookup.set(row.item_key, {});
+          lookup.get(row.item_key)[row.field_name] = row.content;
+        }
+        for (const item of (data.output_data.items || [])) {
+          const key = String(item[itemKeyField] ?? '');
+          const extra = lookup.get(key);
+          if (extra) Object.assign(item, extra);
+        }
+      }
+    }
+
+    res.json(data);
+  } catch (err) {
+    console.error('[entity-submodule-runs] GET error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * POST /api/submodule-runs/:id/approve
  * Approve (or re-approve) a submodule run.
  * Body: { approved_item_keys: [...] }
+ *
+ * Per-entity mode: Body: { entity_approvals: { entityName: [item_keys], ... } }
+ * Bulk-updates entity_submodule_runs + entity_stage_pool.
  *
  * Re-approval: if status is already "approved", updates approved_items
  * and re-runs the working pool update.
  */
 submoduleRunRouter.post('/:id/approve', async (req, res) => {
   try {
-    const { approved_item_keys } = req.body;
-
-    if (!Array.isArray(approved_item_keys)) {
-      return res.status(400).json({ error: 'approved_item_keys must be an array' });
-    }
-    if (approved_item_keys.length > 50000) {
-      return res.status(400).json({ error: 'approved_item_keys exceeds maximum length (50000)' });
-    }
-    if (approved_item_keys.some((k) => typeof k !== 'string' && typeof k !== 'number')) {
-      return res.status(400).json({ error: 'approved_item_keys must contain only strings or numbers' });
-    }
-
     // 1. Load submodule run
     const { data: subRun, error: getErr } = await db
       .from('submodule_runs')
@@ -422,16 +647,169 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
     }
     if (getErr) throw getErr;
 
-    // Allow approval from "completed" or re-approval from "approved"
     if (subRun.status !== 'completed' && subRun.status !== 'approved') {
       return res.status(400).json({ error: `Cannot approve run with status "${subRun.status}"` });
     }
 
-    // 2. Get manifest for item_key and data_operation
     const manifest = getSubmoduleById(subRun.submodule_id);
     const itemKey = manifest?.item_key || 'url';
 
-    // 3. Read data_operation from saved config or manifest default
+    // ===== PER-ENTITY APPROVAL =====
+    if (subRun.batch_id) {
+      const { entity_approvals } = req.body;
+      if (!entity_approvals || typeof entity_approvals !== 'object') {
+        return res.status(400).json({ error: 'Per-entity mode requires entity_approvals: { entityName: [item_keys] }' });
+      }
+
+      // Read data_operation
+      const { data: savedConfig } = await db
+        .from('run_submodule_config')
+        .select('data_operation')
+        .eq('run_id', subRun.run_id)
+        .eq('step_index', subRun.input_data?.step_index ?? 0)
+        .eq('submodule_id', subRun.submodule_id)
+        .maybeSingle();
+
+      const dataOperation = savedConfig?.data_operation || manifest?.data_operation_default || 'add';
+
+      // Bulk-load all entity runs for this batch
+      const { data: entityRuns, error: entityErr } = await db
+        .from('entity_submodule_runs')
+        .select('id, entity_name, output_data, status')
+        .eq('batch_id', subRun.batch_id)
+        .in('status', ['completed', 'approved']);
+
+      if (entityErr) throw entityErr;
+
+      // Bulk-load current entity pools
+      const { data: currentPools, error: poolErr } = await db
+        .from('entity_stage_pool')
+        .select('entity_name, pool_items')
+        .eq('run_id', subRun.run_id)
+        .eq('step_index', subRun.input_data?.step_index ?? 0);
+
+      if (poolErr) throw poolErr;
+
+      const poolMap = new Map();
+      for (const pool of (currentPools || [])) {
+        poolMap.set(pool.entity_name, pool.pool_items || []);
+      }
+
+      let totalApproved = 0;
+
+      // Process each entity's approval
+      for (const [entityName, approvedKeys] of Object.entries(entity_approvals)) {
+        const entityRun = entityRuns.find(r => r.entity_name === entityName);
+        if (!entityRun) continue;
+
+        const outputItems = entityRun.output_data?.items || [];
+
+        // __all__ sentinel: approve every item without the client needing to fetch detail
+        const resolvedKeys = approvedKeys === '__all__'
+          ? outputItems.map(item => String(item[itemKey] ?? '')).filter(Boolean)
+          : approvedKeys;
+
+        const approvedKeySet = new Set(resolvedKeys.map(String));
+        const approvedItems = outputItems.filter(item => {
+          const keyVal = String(item[itemKey] ?? '');
+          return approvedKeySet.has(keyVal);
+        }).map(item => ({
+          ...item,
+          entity_name: entityName,
+          source_submodule: subRun.submodule_id,
+        }));
+
+        totalApproved += approvedItems.length;
+
+        // Update entity pool based on data_operation
+        let entityPool = poolMap.get(entityName) || [];
+
+        if (dataOperation === 'add') {
+          const existingKeys = new Set(entityPool.map(item => String(item[itemKey] ?? '')));
+          for (const item of approvedItems) {
+            const key = String(item[itemKey] ?? '');
+            if (!existingKeys.has(key)) {
+              entityPool.push(item);
+              existingKeys.add(key);
+            }
+          }
+        } else if (dataOperation === 'remove') {
+          entityPool = entityPool.filter(item => {
+            const keyVal = String(item[itemKey] ?? '');
+            return approvedKeySet.has(keyVal);
+          });
+        } else if (dataOperation === 'transform') {
+          // Remove items from same submodule, then add approved
+          entityPool = entityPool.filter(item =>
+            item.source_submodule !== subRun.submodule_id
+          );
+          entityPool.push(...approvedItems);
+        }
+
+        poolMap.set(entityName, entityPool);
+
+        // Update entity_submodule_runs status
+        await db
+          .from('entity_submodule_runs')
+          .update({ status: 'approved', approved_items: resolvedKeys })
+          .eq('id', entityRun.id);
+      }
+
+      // Bulk update entity_stage_pool (UPSERT for idempotency)
+      for (const [entityName, poolItems] of poolMap) {
+        await db
+          .from('entity_stage_pool')
+          .update({ pool_items: poolItems, updated_at: new Date().toISOString() })
+          .eq('run_id', subRun.run_id)
+          .eq('step_index', subRun.input_data?.step_index ?? 0)
+          .eq('entity_name', entityName);
+      }
+
+      // Update batch record
+      await db
+        .from('submodule_runs')
+        .update({ status: 'approved' })
+        .eq('id', req.params.id);
+
+      // Log decision
+      await db
+        .from('decision_log')
+        .insert({
+          run_id: subRun.run_id,
+          step_index: subRun.input_data?.step_index ?? 0,
+          submodule_id: subRun.submodule_id,
+          decision: 'approved',
+          context: {
+            submodule_run_id: subRun.id,
+            mode: 'per_entity',
+            entity_count: Object.keys(entity_approvals).length,
+            total_approved: totalApproved,
+            data_operation: dataOperation,
+          },
+        });
+
+      return res.json({
+        status: 'approved',
+        mode: 'per_entity',
+        entity_count: Object.keys(entity_approvals).length,
+        total_approved: totalApproved,
+      });
+    }
+
+    // ===== LEGACY APPROVAL =====
+    const { approved_item_keys } = req.body;
+
+    if (!Array.isArray(approved_item_keys)) {
+      return res.status(400).json({ error: 'approved_item_keys must be an array' });
+    }
+    if (approved_item_keys.length > 50000) {
+      return res.status(400).json({ error: 'approved_item_keys exceeds maximum length (50000)' });
+    }
+    if (approved_item_keys.some((k) => typeof k !== 'string' && typeof k !== 'number')) {
+      return res.status(400).json({ error: 'approved_item_keys must contain only strings or numbers' });
+    }
+
+    // 2. Get data_operation
     const { data: savedConfig } = await db
       .from('run_submodule_config')
       .select('data_operation')
@@ -442,9 +820,9 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
     const dataOperation = savedConfig?.data_operation || manifest?.data_operation_default || 'add';
 
-    // 4. Filter output_data to approved items only
+    // 3. Filter output_data to approved items only
     const outputResults = subRun.output_data?.results || [];
-    const approvedKeySet = new Set(approved_item_keys.map(String));
+    const approvedKeySet = new Set(req.body.approved_item_keys.map(String));
     const approvedItems = [];
 
     for (const entityResult of outputResults) {
@@ -462,8 +840,7 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
       }
     }
 
-    // 5. Update working pool (with row-level lock via RPC or sequential update)
-    //    Load current pool → apply operation → write back
+    // 4. Update working pool
     const { data: stageRow, error: stageErr } = await db
       .from('pipeline_stages')
       .select('id, working_pool')
@@ -474,9 +851,6 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
     let currentPool = stageRow.working_pool || [];
 
-    // Pool dedup key: use each item's SOURCE submodule's item_key for the base,
-    // so URL-level items (keyed by url) don't collapse when an entity-level
-    // submodule (keyed by entity_name) runs an add operation.
     const poolKey = (item) => {
       const src = item.source_submodule;
       if (src) {
@@ -484,12 +858,10 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         const srcKey = srcManifest?.item_key || 'url';
         return `${src}:${item[srcKey] ?? ''}`;
       }
-      // No source_submodule → use current submodule's item_key
       return String(item[itemKey] ?? '');
     };
 
     if (dataOperation === 'add') {
-      // Merge approved items into pool, deduplicate by pool key (later wins)
       const poolMap = new Map();
       for (const item of currentPool) {
         poolMap.set(poolKey(item), item);
@@ -499,10 +871,6 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
       }
       currentPool = Array.from(poolMap.values());
     } else if (dataOperation === 'remove') {
-      // Filter pool: keep only items whose key was approved, AND deduplicate.
-      // The pool may contain multiple items with the same key (e.g. same URL
-      // discovered by two Step 1 submodules). The remove filter keeps only
-      // the first occurrence per approved key — matching dedup behavior.
       const seen = new Set();
       currentPool = currentPool.filter((item) => {
         const keyVal = String(item[itemKey] ?? '');
@@ -512,12 +880,6 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         return true;
       });
     } else if (dataOperation === 'transform') {
-      // Granularity-aware replace:
-      // 1. Previous-step items: only remove if they share the same item_key
-      //    (url→url OK, but entity_name transform keeps url-level items)
-      // 2. Siblings: only remove if sibling also uses transform with same item_key
-      //    (browser-scraper replaces page-scraper, but content-analyzer
-      //    doesn't clobber seo-planner/content-writer)
       const currentSubmoduleId = subRun.submodule_id;
       const stepIndex = subRun.input_data?.step_index;
       const stepSubmoduleIds = new Set(getSubmodules(stepIndex).map(m => m.id));
@@ -527,36 +889,29 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
       const remaining = currentPool.filter(item => {
         const baseKey = String(item[itemKey] ?? '');
-        if (!approvedBaseKeys.has(baseKey)) return true; // no conflict
+        if (!approvedBaseKeys.has(baseKey)) return true;
 
         const src = item.source_submodule;
-
-        // Re-approval of same submodule → replace
         if (src === currentSubmoduleId) return false;
 
-        // From outside this step (previous step or unknown)
         if (!src || !stepSubmoduleIds.has(src)) {
-          // Only replace if source used the same item_key granularity
-          // e.g. content-analyzer (entity_name) keeps page-scraper (url) items
           const srcManifest = src ? getSubmoduleById(src) : null;
           const srcItemKey = srcManifest?.item_key || 'url';
           return srcItemKey !== itemKey;
         }
 
-        // Sibling at this step — only replace transform siblings with same item_key
         const sibManifest = getSubmoduleById(src);
         const sibItemKey = sibManifest?.item_key || 'url';
         const sibDataOp = sibManifest?.data_operation_default || 'add';
         if (sibItemKey === itemKey && sibDataOp === 'transform') return false;
 
-        // Keep all other siblings (add/remove siblings coexist)
         return true;
       });
 
       currentPool = [...remaining, ...approvedItems];
     }
 
-    // 6. Write updated pool back
+    // 5. Write updated pool back
     const { error: poolUpdateErr } = await db
       .from('pipeline_stages')
       .update({ working_pool: currentPool })
@@ -566,7 +921,7 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
       console.error(`[approve] POOL UPDATE FAILED:`, poolUpdateErr);
     }
 
-    // 7. Update submodule_runs
+    // 6. Update submodule_runs
     await db
       .from('submodule_runs')
       .update({
@@ -575,7 +930,7 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
       })
       .eq('id', req.params.id);
 
-    // 8. Log decision
+    // 7. Log decision
     await db
       .from('decision_log')
       .insert({
@@ -632,32 +987,51 @@ latestRunsRouter.get('/latest', async (req, res) => {
     // Get all submodule runs for this stage, ordered by creation (latest first)
     const { data: runs, error } = await db
       .from('submodule_runs')
-      .select('id, submodule_id, status, progress, approved_items, output_data, completed_at, error')
+      .select('id, submodule_id, status, progress, approved_items, output_data, batch_id, entity_count, completed_count, completed_at, error')
       .eq('stage_id', stage.id)
       .order('completed_at', { ascending: false, nullsFirst: false });
 
     if (error) throw error;
 
+    // Get all submodule runs for this stage (with batch columns)
     // Group by submodule_id, take the latest (first in desc order)
     const latest = {};
     for (const run of runs || []) {
       if (!latest[run.submodule_id]) {
-        // Count results
-        const outputResults = run.output_data?.results || [];
-        const resultCount = outputResults.reduce((sum, r) => sum + (r.items?.length || 0), 0);
-        const approvedCount = run.approved_items?.length || 0;
-        const outputSummary = run.output_data?.summary || {};
+        // Per-entity batch run
+        if (run.batch_id) {
+          latest[run.submodule_id] = {
+            id: run.id,
+            status: run.status,
+            progress: run.progress,
+            batch_id: run.batch_id,
+            entity_count: run.entity_count || 0,
+            completed_count: run.completed_count || 0,
+            result_count: 0, // computed from entity runs, not output_data
+            approved_count: 0,
+            description: null,
+            completed_at: run.completed_at || null,
+            error: run.error || null,
+            mode: 'per_entity',
+          };
+        } else {
+          // Legacy run
+          const outputResults = run.output_data?.results || [];
+          const resultCount = outputResults.reduce((sum, r) => sum + (r.items?.length || 0), 0);
+          const approvedCount = run.approved_items?.length || 0;
+          const outputSummary = run.output_data?.summary || {};
 
-        latest[run.submodule_id] = {
-          id: run.id,
-          status: run.status,
-          progress: run.progress,
-          result_count: resultCount,
-          approved_count: approvedCount,
-          description: outputSummary.description || null,
-          completed_at: run.completed_at || null,
-          error: run.error || null,
-        };
+          latest[run.submodule_id] = {
+            id: run.id,
+            status: run.status,
+            progress: run.progress,
+            result_count: resultCount,
+            approved_count: approvedCount,
+            description: outputSummary.description || null,
+            completed_at: run.completed_at || null,
+            error: run.error || null,
+          };
+        }
       }
     }
 

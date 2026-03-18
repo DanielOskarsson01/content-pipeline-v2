@@ -115,7 +115,7 @@ function SubmoduleRow({
   submodule: SubmoduleManifest;
   categoryKey: string;
   onOpen: (submoduleId: string, categoryKey: string) => void;
-  latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null; error?: string | null };
+  latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null; error?: string | null; mode?: 'per_entity'; entity_count?: number; completed_count?: number };
   currentDataOp: string;
   onCycleDataOp?: () => void;
 }) {
@@ -173,10 +173,12 @@ function SubmoduleRow({
   );
 }
 
-function SubmoduleStatusBadge({ latestRun }: { latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null; error?: string | null } }) {
+function SubmoduleStatusBadge({ latestRun }: { latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null; error?: string | null; mode?: 'per_entity'; entity_count?: number; completed_count?: number } }) {
   if (!latestRun) {
     return <span className="text-[10px] text-gray-300">idle</span>;
   }
+
+  const isPerEntity = latestRun.mode === 'per_entity';
 
   switch (latestRun.status) {
     case 'pending':
@@ -185,15 +187,19 @@ function SubmoduleStatusBadge({ latestRun }: { latestRun?: { status: string; res
       return (
         <span className="flex items-center gap-1 text-[10px] text-sky-500">
           <span className="inline-block w-3 h-3 border-2 border-sky-400 border-t-transparent rounded-full animate-spin" />
-          {latestRun.progress
-            ? `${latestRun.progress.current}/${latestRun.progress.total}`
-            : 'running'}
+          {isPerEntity
+            ? `${latestRun.completed_count || 0}/${latestRun.entity_count || 0} entities`
+            : latestRun.progress
+              ? `${latestRun.progress.current}/${latestRun.progress.total}`
+              : 'running'}
         </span>
       );
     case 'completed':
       return (
         <span className="text-[10px] font-medium text-amber-500">
-          {latestRun.result_count} result{latestRun.result_count !== 1 ? 's' : ''}
+          {isPerEntity
+            ? `${latestRun.entity_count || 0} entities`
+            : `${latestRun.result_count} result${latestRun.result_count !== 1 ? 's' : ''}`}
         </span>
       );
     case 'approved':
@@ -202,11 +208,11 @@ function SubmoduleStatusBadge({ latestRun }: { latestRun?: { status: string; res
           <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
             <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
           </svg>
-          {latestRun.approved_count}
+          {isPerEntity ? `${latestRun.entity_count || 0} entities` : latestRun.approved_count}
         </span>
       );
     case 'failed': {
-      const errMsg = latestRun.error ? (latestRun.error.length > 30 ? latestRun.error.slice(0, 30) + '…' : latestRun.error) : 'failed';
+      const errMsg = latestRun.error ? (latestRun.error.length > 30 ? latestRun.error.slice(0, 30) + '\u2026' : latestRun.error) : 'failed';
       return (
         <span className="flex items-center gap-1 text-[10px] font-medium text-red-500" title={latestRun.error || 'Execution failed'}>
           <svg className="w-3 h-3 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">

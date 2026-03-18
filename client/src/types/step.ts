@@ -133,6 +133,69 @@ export interface SubmoduleEntityResult {
   error?: string;
 }
 
+// Per-entity batch poll response (lightweight — no output_data)
+export interface SubmoduleRunBatch {
+  id: string;
+  submodule_id: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'approved';
+  batch_id: string;
+  entity_count: number;
+  completed_count: number;
+  failed_count: number;
+  progress: null;
+  output_data?: undefined;
+  output_render_schema: { display_type?: string; selectable?: boolean; [field: string]: unknown } | null;
+  approved_items: string[] | null;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  entities: EntityRunStatus[];
+  mode: 'per_entity';
+}
+
+export interface EntityRunStatus {
+  id: string;
+  entity_name: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'approved';
+  progress: { current: number; total: number; message: string } | null;
+  error: string | null;
+}
+
+// Full entity detail (lazy-loaded on expand)
+export interface EntityRunDetail {
+  id: string;
+  entity_name: string;
+  submodule_id: string;
+  status: string;
+  output_data: { items: Record<string, unknown>[] } | null;
+  output_render_schema: { display_type?: string; selectable?: boolean; [field: string]: unknown } | null;
+  approved_items: string[] | null;
+  error: string | null;
+  logs: unknown;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+// Union type for polling — server sets mode: 'per_entity' on batch responses
+export type SubmoduleRunPolled = SubmoduleRun | SubmoduleRunBatch;
+
+export function isPerEntityRun(run: SubmoduleRunPolled): run is SubmoduleRunBatch {
+  return 'mode' in run && (run as SubmoduleRunBatch).mode === 'per_entity';
+}
+
+// Execute response — per-entity adds batch_id, entity_count, mode
+export type ExecuteSubmoduleResponse =
+  | { submodule_run_id: string; status: string }
+  | { submodule_run_id: string; batch_id: string; entity_count: number; status: string; mode: 'per_entity' };
+
+// Per-entity approval response
+export interface ApproveSubmoduleRunPerEntityResponse {
+  status: string;
+  mode: string;
+  entity_count: number;
+  total_approved: number;
+}
+
 // Latest run status per submodule (from /submodule-runs/latest endpoint)
 export interface SubmoduleLatestRun {
   id: string;
@@ -142,6 +205,11 @@ export interface SubmoduleLatestRun {
   approved_count: number;
   description?: string;
   error?: string | null;
+  completed_at?: string | null;
+  mode?: 'per_entity';
+  batch_id?: string;
+  entity_count?: number;
+  completed_count?: number;
 }
 
 export type SubmoduleLatestRunMap = Record<string, SubmoduleLatestRun>;

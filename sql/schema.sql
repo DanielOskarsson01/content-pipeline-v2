@@ -33,8 +33,12 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   input_render_schema JSONB,
   output_data JSONB,
   output_render_schema JSONB,
-  working_pool JSONB,
-  working_pool_render_schema JSONB,
+  working_pool JSONB,                -- Legacy: kept for backward compat, new runs use entity_stage_pool
+  working_pool_render_schema JSONB,  -- Legacy
+  entity_count INTEGER,              -- Per-entity: total entities at this step
+  completed_count INTEGER DEFAULT 0, -- Per-entity: entities completed
+  failed_count INTEGER DEFAULT 0,    -- Per-entity: entities permanently failed
+  approved_count INTEGER DEFAULT 0,  -- Per-entity: entities approved to advance
   started_at TIMESTAMPTZ,
   completed_at TIMESTAMPTZ
 );
@@ -68,6 +72,8 @@ CREATE TABLE IF NOT EXISTS step_context (
 );
 
 -- Phase 7: Submodule runs — one execution of one submodule within a step
+-- In per-entity mode, this becomes a "batch run" record tracking the overall trigger.
+-- Individual entity results live in entity_submodule_runs.
 CREATE TABLE IF NOT EXISTS submodule_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   stage_id UUID NOT NULL REFERENCES pipeline_stages(id),
@@ -82,6 +88,9 @@ CREATE TABLE IF NOT EXISTS submodule_runs (
   progress JSONB,
   error TEXT,
   logs JSONB,
+  batch_id UUID,             -- Per-entity: groups entity_submodule_runs from same trigger
+  entity_count INTEGER,      -- Per-entity: how many entity jobs were spawned
+  completed_count INTEGER DEFAULT 0, -- Per-entity: how many finished
   started_at TIMESTAMPTZ,
   completed_at TIMESTAMPTZ
 );
@@ -139,3 +148,59 @@ CREATE TABLE IF NOT EXISTS submodule_run_item_data (
 
 CREATE INDEX IF NOT EXISTS idx_submodule_run_item_data_run_id
   ON submodule_run_item_data(submodule_run_id);
+
+-- Per-entity pool storage: one row per entity per step
+-- Replaces pipeline_stages.working_pool for new runs
+CREATE TABLE IF NOT EXISTS entity_stage_pool (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id UUID NOT NULL REFERENCES pipeline_runs(id),
+  step_index INTEGER NOT NULL,
+  entity_name TEXT NOT NULL,
+  pool_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_stage_pool_run_step
+  ON entity_stage_pool(run_id, step_index);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_stage_pool_unique
+  ON entity_stage_pool(run_id, step_index, entity_name);
+
+-- Per-entity submodule execution: one row per entity per submodule run
+CREATE TABLE IF NOT EXISTS entity_submodule_runs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  stage_id UUID NOT NULL REFERENCES pipeline_stages(id),
+  run_id UUID NOT NULL REFERENCES pipeline_runs(id),
+  batch_id UUID,
+  entity_name TEXT NOT NULL,
+  submodule_id TEXT NOT NULL,
+  step_index INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  options JSONB,
+  input_data JSONB,
+  output_data JSONB,
+  output_render_schema JSONB,
+  approved_items JSONB,
+  progress JSONB,
+  error TEXT,
+  logs JSONB,
+  retry_of UUID REFERENCES entity_submodule_runs(id),
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_submodule_runs_batch
+  ON entity_submodule_runs(batch_id);
+CREATE INDEX IF NOT EXISTS idx_entity_submodule_runs_stage
+  ON entity_submodule_runs(stage_id);
+CREATE INDEX IF NOT EXISTS idx_entity_submodule_runs_run
+  ON entity_submodule_runs(run_id);
+
+-- Prevent duplicate active runs per entity per submodule
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_submodule_runs_one_active
+  ON entity_submodule_runs(run_id, step_index, entity_name, submodule_id)
+  WHERE status IN ('pending', 'running');
