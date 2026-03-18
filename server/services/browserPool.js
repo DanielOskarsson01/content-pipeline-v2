@@ -98,11 +98,14 @@ export async function browserFetch(url, options = {}) {
   } = options;
 
   const browser = await getBrowser();
-  const context = await browser.newContext({
+  const contextOptions = {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1920, height: 1080 },
     locale: 'en-US',
-  });
+  };
+  // Residential proxies use their own SSL certs for HTTPS interception
+  if (process.env.PROXY_URL) contextOptions.ignoreHTTPSErrors = true;
+  const context = await browser.newContext(contextOptions);
 
   const page = await context.newPage();
 
