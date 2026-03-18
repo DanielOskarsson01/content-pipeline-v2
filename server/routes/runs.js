@@ -252,6 +252,30 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
 
       const nextStep = rpcResult.next_step;
 
+      // Populate input_data on the next stage so the UI and non-per-entity
+      // code paths can display/use the forwarded items.
+      if (nextStep !== null) {
+        const { data: forwardedPools } = await db
+          .from('entity_stage_pool')
+          .select('entity_name, pool_items')
+          .eq('run_id', runId)
+          .eq('step_index', nextStep);
+
+        if (forwardedPools && forwardedPools.length > 0) {
+          const flatItems = [];
+          for (const pool of forwardedPools) {
+            for (const item of (pool.pool_items || [])) {
+              flatItems.push({ ...item, entity_name: item.entity_name || pool.entity_name });
+            }
+          }
+          await db
+            .from('pipeline_stages')
+            .update({ input_data: flatItems, input_render_schema: stageOutputRenderSchema })
+            .eq('run_id', runId)
+            .eq('step_index', nextStep);
+        }
+      }
+
       await db
         .from('decision_log')
         .insert({
