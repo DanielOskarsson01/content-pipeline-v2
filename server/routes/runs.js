@@ -82,11 +82,14 @@ router.get('/:runId/steps/:stepIndex', async (req, res, next) => {
     if (error && error.code !== 'PGRST116') throw error;
     if (!stage) return res.status(404).json({ error: 'Step not found' });
 
-    // Per-entity mode: if working_pool is empty, build it from entity_stage_pool.
-    // Send entity summaries (lightweight) in entity_pool_summary for sidebar/badges,
-    // but do NOT put them in working_pool — the UI treats working_pool items as
-    // actual data rows and would show 5 entity objects with empty URL cells.
-    if (!stage.working_pool || (Array.isArray(stage.working_pool) && stage.working_pool.length === 0)) {
+    // Per-entity mode: populate input_data from entity_stage_pool if missing.
+    // Step approval writes input_data, but if that failed (e.g. crash) or this
+    // is a legacy run, we lazy-populate it here and persist so subsequent GETs
+    // are fast.
+    const hasWorkingPool = Array.isArray(stage.working_pool) && stage.working_pool.length > 0;
+    const hasInputData = Array.isArray(stage.input_data) && stage.input_data.length > 0;
+
+    if (!hasWorkingPool) {
       const { data: entityPools } = await db
         .from('entity_stage_pool')
         .select('entity_name, pool_items')
@@ -101,8 +104,24 @@ router.get('/:runId/steps/:stepIndex', async (req, res, next) => {
         }));
         stage.entity_count = entityPools.length;
         stage.total_item_count = totalItems;
-        // Leave working_pool empty — the UI will fall through to input_data
-        // (populated during step approval) which has the actual flattened items.
+
+        // Lazy-populate input_data if it's empty but entity pools have items
+        if (!hasInputData && totalItems > 0) {
+          const flatItems = [];
+          for (const ep of entityPools) {
+            for (const item of (ep.pool_items || [])) {
+              flatItems.push({ ...item, entity_name: item.entity_name || ep.entity_name });
+            }
+          }
+          stage.input_data = flatItems;
+          // Persist so subsequent GETs don't re-flatten
+          db.from('pipeline_stages')
+            .update({ input_data: flatItems })
+            .eq('run_id', runId)
+            .eq('step_index', parseInt(stepIndex))
+            .then(() => {})
+            .catch(err => console.error('[get-stage] Failed to persist input_data:', err));
+        }
       }
     }
 
