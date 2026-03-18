@@ -26,7 +26,41 @@ router.get('/:id', async (req, res, next) => {
 
     if (stagesErr) throw stagesErr;
 
-    res.json({ ...run, stages: stages || [] });
+    // Per-entity mode: enrich stages with entity pool summaries where working_pool is empty
+    const stagesWithPools = stages || [];
+    const emptyPoolSteps = stagesWithPools
+      .filter(s => !s.working_pool || (Array.isArray(s.working_pool) && s.working_pool.length === 0))
+      .map(s => s.step_index);
+
+    if (emptyPoolSteps.length > 0) {
+      const { data: entityPools } = await db
+        .from('entity_stage_pool')
+        .select('step_index, entity_name, pool_items')
+        .eq('run_id', req.params.id)
+        .in('step_index', emptyPoolSteps);
+
+      if (entityPools && entityPools.length > 0) {
+        const poolsByStep = {};
+        for (const ep of entityPools) {
+          if (!poolsByStep[ep.step_index]) poolsByStep[ep.step_index] = [];
+          poolsByStep[ep.step_index].push(ep);
+        }
+
+        for (const stage of stagesWithPools) {
+          const stepPools = poolsByStep[stage.step_index];
+          if (stepPools) {
+            stage.working_pool = stepPools.map(ep => ({
+              name: ep.entity_name,
+              item_count: ep.pool_items?.length || 0,
+            }));
+            stage.entity_count = stepPools.length;
+            stage.total_item_count = stepPools.reduce((sum, ep) => sum + (ep.pool_items?.length || 0), 0);
+          }
+        }
+      }
+    }
+
+    res.json({ ...run, stages: stagesWithPools });
   } catch (err) { next(err); }
 });
 
@@ -47,6 +81,26 @@ router.get('/:runId/steps/:stepIndex', async (req, res, next) => {
 
     if (error && error.code !== 'PGRST116') throw error;
     if (!stage) return res.status(404).json({ error: 'Step not found' });
+
+    // Per-entity mode: if working_pool is empty, populate from entity_stage_pool
+    // Returns entity summary objects (name + item_count) so the client can display input info
+    if (!stage.working_pool || (Array.isArray(stage.working_pool) && stage.working_pool.length === 0)) {
+      const { data: entityPools } = await db
+        .from('entity_stage_pool')
+        .select('entity_name, pool_items')
+        .eq('run_id', runId)
+        .eq('step_index', parseInt(stepIndex));
+
+      if (entityPools && entityPools.length > 0) {
+        const totalItems = entityPools.reduce((sum, ep) => sum + (ep.pool_items?.length || 0), 0);
+        stage.working_pool = entityPools.map(ep => ({
+          name: ep.entity_name,
+          item_count: ep.pool_items?.length || 0,
+        }));
+        stage.entity_count = entityPools.length;
+        stage.total_item_count = totalItems;
+      }
+    }
 
     res.json(stage);
   } catch (err) { next(err); }
