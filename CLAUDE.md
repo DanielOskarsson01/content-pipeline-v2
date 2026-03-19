@@ -280,3 +280,26 @@ VALUES ('content-pipeline-v2', 'decision', 'What was decided', 'The choice made'
 ```
 
 Entry types: decision | progress | blocker | idea
+
+## Session Log
+
+### Session: 2026-03-19 00:30 - Per-entity URL forwarding fixes
+**Accomplished:**
+- Fixed URL forwarding between steps in per-entity mode — root cause was GET endpoint putting entity summary objects into `working_pool`, which UI treated as data rows showing "5 in working pool" with empty cells
+- Fixed transform approval doubling items (281→562) — key-based replacement instead of source_submodule filter
+- Fixed deep-links not working — load entity properties from step_context instead of pool-derived data
+- Implemented hard reset on step reopen — cascade delete of all data from reopened step onwards (submodule_runs, entity_submodule_runs, entity_stage_pool, step_context, run_submodule_config, item_data)
+- Fixed ReferenceError: `logger` not defined in runs.js — crashed post-RPC code during step approval, leaving UI stuck
+- Added lazy-populate for input_data from entity_stage_pool in GET endpoint
+- CTO self-review: removed over-engineered bandaids (manual pool verification, dead code fallback), kept only root cause fix
+
+**Decisions:**
+- Entity summaries go to `entity_pool_summary` (separate response field), never `working_pool` — UI treats working_pool items as data rows
+- `input_data` on pipeline_stages is a denormalized copy for UI display only; entity_stage_pool is the execution source of truth
+- Lazy-populate pattern: GET endpoint writes input_data from entity pools when missing, persists to DB for subsequent requests
+
+**Blockers/Questions:**
+- UI may still show stale "5 in working pool" due to browser cache — user needs hard refresh (Cmd+Shift+R)
+- Browser-crawler has connection failures for Cloudflare-protected sites (punterslounge.com, playngo.com, tipstly.com)
+
+**Updated by:** session-closer agent
