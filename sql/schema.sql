@@ -204,3 +204,139 @@ CREATE INDEX IF NOT EXISTS idx_entity_submodule_runs_run
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_submodule_runs_one_active
   ON entity_submodule_runs(run_id, step_index, entity_name, submodule_id)
   WHERE status IN ('pending', 'running');
+
+-- ============================================================
+-- RPC: approve_step (Legacy flat-pool mode)
+-- Atomic step approval: completes current step, activates next.
+-- ============================================================
+CREATE OR REPLACE FUNCTION approve_step(
+  p_stage_id UUID,
+  p_output_data JSONB,
+  p_output_render_schema JSONB
+)
+RETURNS TABLE(next_step INTEGER, run_completed BOOLEAN) AS $$
+DECLARE
+  v_run_id UUID;
+  v_step_index INTEGER;
+  v_is_last BOOLEAN;
+  v_next_step INTEGER;
+BEGIN
+  SELECT run_id, step_index INTO v_run_id, v_step_index
+  FROM pipeline_stages
+  WHERE id = p_stage_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Stage not found: %', p_stage_id;
+  END IF;
+
+  v_is_last := v_step_index >= 10;
+  v_next_step := CASE WHEN v_is_last THEN NULL ELSE v_step_index + 1 END;
+
+  UPDATE pipeline_stages SET
+    status = 'completed',
+    completed_at = NOW(),
+    output_data = p_output_data,
+    output_render_schema = p_output_render_schema
+  WHERE id = p_stage_id;
+
+  IF v_is_last THEN
+    UPDATE pipeline_runs SET
+      status = 'completed',
+      completed_at = NOW()
+    WHERE id = v_run_id;
+
+    RETURN QUERY SELECT NULL::INTEGER AS next_step, TRUE AS run_completed;
+  ELSE
+    UPDATE pipeline_stages SET
+      status = 'active',
+      input_data = p_output_data,
+      input_render_schema = p_output_render_schema,
+      working_pool = p_output_data,
+      started_at = NOW()
+    WHERE run_id = v_run_id AND step_index = v_next_step;
+
+    UPDATE pipeline_runs SET
+      current_step = v_next_step
+    WHERE id = v_run_id;
+
+    RETURN QUERY SELECT v_next_step AS next_step, FALSE AS run_completed;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================
+-- RPC: approve_step_v2 (Per-entity mode)
+-- Forwards approved entity pools to the next step.
+-- ============================================================
+CREATE OR REPLACE FUNCTION approve_step_v2(
+  p_stage_id UUID,
+  p_output_render_schema JSONB,
+  p_entity_count INTEGER,
+  p_approved_count INTEGER
+)
+RETURNS TABLE(next_step INTEGER, run_completed BOOLEAN) AS $$
+DECLARE
+  v_run_id UUID;
+  v_step_index INTEGER;
+  v_is_last BOOLEAN;
+  v_next_step INTEGER;
+BEGIN
+  SELECT run_id, step_index INTO v_run_id, v_step_index
+  FROM pipeline_stages
+  WHERE id = p_stage_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Stage not found: %', p_stage_id;
+  END IF;
+
+  v_is_last := v_step_index >= 10;
+  v_next_step := CASE WHEN v_is_last THEN NULL ELSE v_step_index + 1 END;
+
+  UPDATE pipeline_stages SET
+    status = 'completed',
+    completed_at = NOW(),
+    output_render_schema = p_output_render_schema,
+    entity_count = p_entity_count,
+    approved_count = p_approved_count
+  WHERE id = p_stage_id;
+
+  IF v_is_last THEN
+    UPDATE pipeline_runs SET
+      status = 'completed',
+      completed_at = NOW()
+    WHERE id = v_run_id;
+
+    RETURN QUERY SELECT NULL::INTEGER AS next_step, TRUE AS run_completed;
+  ELSE
+    UPDATE pipeline_stages SET
+      status = 'active',
+      started_at = NOW(),
+      entity_count = p_approved_count,
+      completed_count = 0,
+      failed_count = 0,
+      approved_count = 0
+    WHERE run_id = v_run_id AND step_index = v_next_step;
+
+    INSERT INTO entity_stage_pool (run_id, step_index, entity_name, pool_items, status)
+    SELECT
+      v_run_id,
+      v_next_step,
+      esp.entity_name,
+      esp.pool_items,
+      'pending'
+    FROM entity_stage_pool esp
+    WHERE esp.run_id = v_run_id
+      AND esp.step_index = v_step_index
+      AND esp.status = 'approved'
+    ON CONFLICT (run_id, step_index, entity_name) DO NOTHING;
+
+    UPDATE pipeline_runs SET
+      current_step = v_next_step
+    WHERE id = v_run_id;
+
+    RETURN QUERY SELECT v_next_step AS next_step, FALSE AS run_completed;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;

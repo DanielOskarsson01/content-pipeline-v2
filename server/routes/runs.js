@@ -26,7 +26,8 @@ router.get('/:id', async (req, res, next) => {
 
     if (stagesErr) throw stagesErr;
 
-    // Per-entity mode: enrich stages with entity pool summaries where working_pool is empty
+    // Per-entity mode: enrich stages with entity counts from entity_stage_pool.
+    // working_pool stays null — the UI reads entity_count/total_item_count instead.
     const stagesWithPools = stages || [];
     const emptyPoolSteps = stagesWithPools
       .filter(s => !s.working_pool || (Array.isArray(s.working_pool) && s.working_pool.length === 0))
@@ -49,11 +50,10 @@ router.get('/:id', async (req, res, next) => {
         for (const stage of stagesWithPools) {
           const stepPools = poolsByStep[stage.step_index];
           if (stepPools) {
-            stage.working_pool = stepPools.map(ep => ({
-              name: ep.entity_name,
-              item_count: ep.pool_items?.length || 0,
-            }));
-            stage.entity_count = stepPools.length;
+            // Do NOT populate working_pool — that causes the UI to render
+            // entity summaries as items ("5 in working pool" with empty cells).
+            // The UI uses entity_count and total_item_count for per-entity display.
+            stage.entity_count = stage.entity_count || stepPools.length;
             stage.total_item_count = stepPools.reduce((sum, ep) => sum + (ep.pool_items?.length || 0), 0);
           }
         }
@@ -250,13 +250,14 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
         }
       }
 
-      // Mark all entity pools at this step as 'approved'
+      // Mark completed entity pools at this step as 'approved'
+      // Guard: only transition 'completed' → 'approved' (idempotent on retry)
       await db
         .from('entity_stage_pool')
         .update({ status: 'approved', updated_at: new Date().toISOString() })
         .eq('run_id', runId)
         .eq('step_index', stepIndex)
-        .neq('status', 'failed');
+        .eq('status', 'completed');
 
       const approvedCount = entityPools.filter(p => p.status !== 'failed').length;
       const entityCount = entityPools.length;
