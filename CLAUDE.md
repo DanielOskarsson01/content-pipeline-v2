@@ -303,3 +303,22 @@ Entry types: decision | progress | blocker | idea
 - Browser-crawler has connection failures for Cloudflare-protected sites (punterslounge.com, playngo.com, tipstly.com)
 
 **Updated by:** session-closer agent
+
+### Session: 2026-03-19 01:00 - Null byte sanitization fix
+**Accomplished:**
+- Investigated url-filter HEAD request behavior — Cloudflare returns 403 to HEAD requests, removing all URLs from protected sites; option only useful for stale URL lists
+- Diagnosed Play'n GO Step 3 failure: "unsupported Unicode escape sequence" — null bytes in scraped HTML rejected by PostgreSQL JSONB column
+- Root cause: per-entity mode processes entities individually, keeping text_content under the 1MB stripping threshold, so null bytes reach output_data JSONB (legacy mode combined all entities, exceeding threshold, stripping fields)
+- Fixed stageWorker.js: added null byte sanitization before DB write in both per-entity and legacy paths — global fix for all submodules
+- Committed and pushed (4f50390), auto-deploys via GitHub Actions
+
+**Decisions:**
+- url-filter check_status_codes is counterproductive for Cloudflare-protected iGaming sites — leave disabled
+- Null byte sanitization in stageWorker.js (central worker) rather than per-submodule — single fix covers all
+- 1MB stripping threshold inconsistency between legacy/per-entity is benign (content always saved to item_data table first)
+
+**Blockers/Questions:**
+- SSH access to Hetzner (188.245.110.34) broken — cannot check PM2 logs directly
+- Systematic per-entity audit still pending (CTO recommendation from previous session)
+
+**Updated by:** session-closer agent
