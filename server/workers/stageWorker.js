@@ -458,11 +458,14 @@ async function handleEntityJob(job) {
   }
 
   // 10. Write result to entity_submodule_runs
+  //     Sanitize: PostgreSQL JSONB rejects \u0000 (null bytes) in text.
+  //     Scraped HTML/content may contain them. Strip before writing.
+  const sanitizedResult = JSON.parse(JSON.stringify(result).replace(/\\u0000/g, ''));
   const { error: writeErr } = await db
     .from('entity_submodule_runs')
     .update({
       status: 'completed',
-      output_data: result,
+      output_data: sanitizedResult,
       output_render_schema: manifest.output_schema || null,
       logs: tools._logs,
       progress: { current: 1, total: 1, message: 'Done' },
@@ -688,9 +691,11 @@ async function handleLegacyJob(job) {
   }
 
   // 10. Write result to main submodule_runs row
+  //     Sanitize: PostgreSQL JSONB rejects \u0000 (null bytes) in text.
+  const sanitizedResult = JSON.parse(JSON.stringify(result).replace(/\\u0000/g, ''));
   const writePayload = {
     status: 'completed',
-    output_data: result,
+    output_data: sanitizedResult,
     output_render_schema: manifest.output_schema || null,
     logs: tools._logs,
     progress: { current: 1, total: 1, message: 'Done' },
