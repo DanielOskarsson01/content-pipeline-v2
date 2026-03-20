@@ -30,9 +30,18 @@ try {
 
 let browserInstance = null;
 let browserLaunchPromise = null;
+let directBrowserInstance = null;
+let directBrowserLaunchPromise = null;
+
+const BASE_LAUNCH_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+];
 
 /**
- * Get or create the shared Chromium instance.
+ * Get or create the shared Chromium instance (with proxy if configured).
  * Checks isConnected() to detect crashed browsers and relaunches.
  * Promise caching prevents multiple simultaneous launches.
  */
@@ -46,15 +55,7 @@ async function getBrowser() {
   if (browserInstance) return browserInstance;
   if (browserLaunchPromise) return browserLaunchPromise;
 
-  const launchOptions = {
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-    ],
-  };
+  const launchOptions = { headless: true, args: [...BASE_LAUNCH_ARGS] };
 
   // Residential proxy support: PROXY_URL=http://host:port, PROXY_USERNAME, PROXY_PASSWORD
   // Playwright requires credentials separate from the server URL.
@@ -80,31 +81,55 @@ async function getBrowser() {
 }
 
 /**
- * Fetch a URL with a real browser. Returns same shape as tools.http.get()
- * so Readability extraction works identically on browser output.
- *
- * @param {string} url
- * @param {Object} options
- * @param {number} [options.timeout=30000]
- * @param {boolean} [options.waitForNetworkIdle=false]
- * @param {string} [options.waitForSelector]
- * @returns {Promise<{status: number, body: string, url: string, headers: Object}>}
+ * Get or create a direct (no-proxy) browser instance.
+ * Used as fallback when proxy tunnel fails (ERR_TUNNEL_CONNECTION_FAILED).
+ * Only launched on first fallback need — zero cost if proxy always works.
  */
-export async function browserFetch(url, options = {}) {
+async function getDirectBrowser() {
+  if (directBrowserInstance && !directBrowserInstance.isConnected()) {
+    console.warn('[browserPool] Direct browser disconnected — relaunching');
+    directBrowserInstance = null;
+  }
+
+  if (directBrowserInstance) return directBrowserInstance;
+  if (directBrowserLaunchPromise) return directBrowserLaunchPromise;
+
+  directBrowserLaunchPromise = chromium.launch({
+    headless: true,
+    args: [...BASE_LAUNCH_ARGS],
+    // No proxy — direct connection
+  }).then((browser) => {
+    directBrowserInstance = browser;
+    directBrowserLaunchPromise = null;
+    console.log('[browserPool] Direct browser launched (no proxy, fallback)');
+    return browser;
+  }).catch((err) => {
+    directBrowserLaunchPromise = null;
+    directBrowserInstance = null;
+    throw err;
+  });
+
+  return directBrowserLaunchPromise;
+}
+
+/**
+ * Fetch a page with a given browser instance.
+ * Returns same shape as tools.http.get() so Readability extraction
+ * works identically on browser output.
+ */
+async function fetchWithBrowser(browser, url, options, useProxy) {
   const {
     timeout = 30000,
     waitForNetworkIdle = false,
     waitForSelector = null,
   } = options;
 
-  const browser = await getBrowser();
   const contextOptions = {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1920, height: 1080 },
     locale: 'en-US',
   };
-  // Residential proxies use their own SSL certs for HTTPS interception
-  if (process.env.PROXY_URL) contextOptions.ignoreHTTPSErrors = true;
+  if (useProxy) contextOptions.ignoreHTTPSErrors = true;
   const context = await browser.newContext(contextOptions);
 
   const page = await context.newPage();
@@ -140,16 +165,36 @@ export async function browserFetch(url, options = {}) {
   }
 }
 
+export async function browserFetch(url, options = {}) {
+  const hasProxy = !!process.env.PROXY_URL;
+
+  try {
+    const browser = await getBrowser();
+    return await fetchWithBrowser(browser, url, options, hasProxy);
+  } catch (err) {
+    // Proxy tunnel failure — retry without proxy (direct connection)
+    if (hasProxy && err.message?.includes('ERR_TUNNEL_CONNECTION_FAILED')) {
+      console.warn(`[browserPool] Proxy tunnel failed for ${url} — retrying direct`);
+      const directBrowser = await getDirectBrowser();
+      return await fetchWithBrowser(directBrowser, url, options, false);
+    }
+    throw err;
+  }
+}
+
 /**
  * Close the shared browser instance. Called on process shutdown.
  */
 export async function closeBrowser() {
-  if (browserInstance) {
-    try {
-      await browserInstance.close();
-    } catch (_) {
-      // Browser may already be closed
+  const instances = [
+    { ref: 'browserInstance', inst: browserInstance },
+    { ref: 'directBrowserInstance', inst: directBrowserInstance },
+  ];
+  for (const { ref, inst } of instances) {
+    if (inst) {
+      try { await inst.close(); } catch (_) { /* may already be closed */ }
     }
-    browserInstance = null;
   }
+  browserInstance = null;
+  directBrowserInstance = null;
 }
