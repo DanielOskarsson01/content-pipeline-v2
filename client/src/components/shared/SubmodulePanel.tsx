@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import JSZip from 'jszip';
 import { usePanelStore } from '../../stores/panelStore';
@@ -1134,14 +1134,16 @@ function EntityAccordionItem({
   // Lazy-load entity detail only when expanded
   const { data: detail, isLoading } = useEntityRunDetail(batchRunId, entity.id, isExpanded);
 
-  // Initialize checked keys when detail loads (only once)
+  // Initialize checked keys when detail loads (only once per detail+renderSchema)
+  const initializedRef = useRef(false);
   useEffect(() => {
-    if (!detail || !isSelectable || checkedKeys) return;
+    if (!detail || !isSelectable || initializedRef.current) return;
     const items = detail.output_data?.items || [];
     if (detail.status === 'approved' && detail.approved_items) {
       onCheckedKeysChange(new Set(detail.approved_items));
+      initializedRef.current = true;
     } else {
-      // Pre-select all items (with flagged_when deselection like legacy)
+      // Pre-select non-flagged items using manifest-declared flagged_when rules
       const flaggedWhen = (renderSchema as Record<string, unknown>)?.flagged_when as Record<string, string[]> | undefined;
       const keys = items
         .filter((item) => {
@@ -1153,8 +1155,11 @@ function EntityAccordionItem({
         .map((item) => String(item[itemKey] ?? ''))
         .filter(Boolean);
       onCheckedKeysChange(new Set(keys));
+      // Only mark initialized if renderSchema was available (so flaggedWhen could apply).
+      // If renderSchema is null, re-run when it arrives to apply flagging rules.
+      if (renderSchema) initializedRef.current = true;
     }
-  }, [detail, isSelectable]);
+  }, [detail, isSelectable, renderSchema]);
 
   // Status indicator
   const statusIcon = entity.status === 'completed' || entity.status === 'approved'
@@ -1195,7 +1200,7 @@ function EntityAccordionItem({
             <span>{entity.progress.current}/{entity.progress.total}</span>
           )}
           {itemCount != null && isSelectable && checkedCount != null && (
-            <span>{checkedCount}/{itemCount}</span>
+            <span>{checkedCount}/{itemCount}{itemCount > checkedCount ? ` · ${itemCount - checkedCount} rejected` : ''}</span>
           )}
           {itemCount != null && !isSelectable && (
             <span>{itemCount} items</span>

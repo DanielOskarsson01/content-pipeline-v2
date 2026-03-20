@@ -722,9 +722,22 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         const outputItems = entityRun.output_data?.items || [];
 
         // __all__ sentinel: approve every item without the client needing to fetch detail
-        const resolvedKeys = approvedKeys === '__all__'
-          ? outputItems.map(item => String(item[itemKey] ?? '')).filter(Boolean)
-          : approvedKeys;
+        // BUT respect flagged_when rules — flagged items (e.g. DROP) are excluded
+        let resolvedKeys;
+        if (approvedKeys === '__all__') {
+          const flaggedWhen = manifest?.output_schema?.flagged_when;
+          resolvedKeys = outputItems
+            .filter(item => {
+              if (!flaggedWhen) return true;
+              return !Object.entries(flaggedWhen).some(
+                ([field, values]) => values.includes(String(item[field] ?? ''))
+              );
+            })
+            .map(item => String(item[itemKey] ?? ''))
+            .filter(Boolean);
+        } else {
+          resolvedKeys = approvedKeys;
+        }
 
         const approvedKeySet = new Set(resolvedKeys.map(String));
         const approvedItems = outputItems.filter(item => {
