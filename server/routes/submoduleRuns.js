@@ -755,9 +755,12 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         let entityPool = poolMap.get(entityName) || [];
 
         if (dataOperation === 'add') {
-          const existingKeys = new Set(entityPool.map(item => String(item[itemKey] ?? '')));
+          // Use composite key (itemKey + source_submodule) so different submodules
+          // can each contribute items with the same item_key (e.g. entity_name)
+          const compositeKey = (item) => `${String(item[itemKey] ?? '')}::${item.source_submodule || ''}`;
+          const existingKeys = new Set(entityPool.map(compositeKey));
           for (const item of approvedItems) {
-            const key = String(item[itemKey] ?? '');
+            const key = compositeKey(item);
             if (!existingKeys.has(key)) {
               entityPool.push(item);
               existingKeys.add(key);
