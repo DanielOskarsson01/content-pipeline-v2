@@ -267,6 +267,23 @@ Phases 0–10 are complete. Phase 11 Step 8 bundling submodules are code complet
 
 All findings tracked in `specs/BACKLOG.md`.
 
+---
+
+## 🧩 Parallel Submodule Development (decided 2026-03-20)
+
+**Decision:** Submodules can be specced and built in parallel with skeleton bug fixes. They are pure functions with a defined contract (`input.entity` in, `{ entity_name, items, meta }` out), live in the modules repo, and don't touch the skeleton. A second Claude Code session, a freelancer, or work in claude.ai can produce them independently.
+
+**28 research briefs** are ready at `Content-Pipeline/specs/submodule-briefs/`. Each brief follows the research brief template: what goes in, what comes out, approach, external dependencies, edge cases, cost estimate, and a concrete example output in per-entity format. Each can be handed to any developer to build the manifest + execute.js independently.
+
+**Key corrections to the original submodule plan:**
+- PSE Directories — one submodule with a configurable directory list (not one per directory)
+- Curated List Import — separate from PSE; imports pre-built Google Sheets lists
+- AI Discovery Scout runs first — generates search strategies and leads for downstream submodules
+- Image & Logo Search — added to Step 1 (was missing)
+- SEO Keyword Researcher — added to Step 5 using real tools (Ahrefs, SERPApi, GSC), not LLM-guessed
+- Media Transcript Fetcher — moved from Step 5 to Step 3 (scraping is where it belongs)
+- Step 5 media enrichment — split into three: Image Generator, Video Generator, Audio/TTS Generator
+
 ## Decision Log
 
 This project uses automated decision logging via a PostToolUse hook.
@@ -320,5 +337,25 @@ Entry types: decision | progress | blocker | idea
 **Blockers/Questions:**
 - SSH access to Hetzner (188.245.110.34) broken — cannot check PM2 logs directly
 - Systematic per-entity audit still pending (CTO recommendation from previous session)
+
+**Updated by:** session-closer agent
+
+### Session: 2026-03-21 21:00 - API scraper + pool dedup fix
+**Accomplished:**
+- Created api-scraper submodule (Step 3.3) — ScrapFly API fallback for Cloudflare-protected sites, only processes pages that failed page-scraper and browser-scraper
+- Iteratively fixed Cloudflare block page detection through 5 commits: raw HTML detection, extracted text detection, duplicate text detection across pages, partition logic for upstream block pages
+- Fixed critical per-entity pool dedup bug — `add` data_operation was deduplicating by `item_key` alone, causing sibling submodule items (seo-planner) to be silently dropped when they shared the same `item_key` (entity_name) as content-analyzer
+- Deployed SCRAPFLY_KEY to both local .env and Hetzner production
+- All changes auto-deployed via GitHub Actions CI/CD
+
+**Decisions:**
+- Per-entity `add` approval uses composite key (item_key + source_submodule) — aligns with non-per-entity path which already did this correctly
+- ScrapFly geo-location defaults to empty (auto-select) — no hardcoded country
+- Duplicate text detection threshold: 3+ pages with identical text_content = block page (demote to error)
+- api-scraper is a separate submodule (not integrated into browser-scraper) because it costs money per request
+
+**Blockers/Questions:**
+- api-scraper live test pending — need to re-run Step 5 submodules (content-analyzer → seo-planner → content-writer) after pool dedup fix
+- ScrapFly returned Cloudflare block pages for Punters Lounge — may need different ASP settings or proxy country
 
 **Updated by:** session-closer agent
