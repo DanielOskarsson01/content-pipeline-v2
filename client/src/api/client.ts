@@ -119,7 +119,7 @@ export const api = {
       body: JSON.stringify({ entity_approvals: entityApprovals }),
     }),
   getEntityRunDetail: (batchRunId: string, entityRunId: string) =>
-    apiFetch<EntityRunDetail>(`/api/submodule-runs/${batchRunId}/entities/${entityRunId}`),
+    apiFetch<EntityRunDetail>(`/api/submodule-runs/${batchRunId}/entities/${entityRunId}?full=true`),
   getLatestSubmoduleRuns: (runId: string, stepIndex: number) =>
     apiFetch<SubmoduleLatestRunMap>(`/api/runs/${runId}/steps/${stepIndex}/submodule-runs/latest`),
 
