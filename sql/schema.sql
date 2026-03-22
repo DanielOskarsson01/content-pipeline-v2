@@ -139,7 +139,7 @@ CREATE INDEX IF NOT EXISTS idx_project_reference_docs_project_id
 -- The main submodule_runs row stores metadata only; full content lives here (one row per item per field).
 -- This avoids Supabase row size limits when scraping 1000+ pages.
 CREATE TABLE IF NOT EXISTS submodule_run_item_data (
-  submodule_run_id UUID NOT NULL REFERENCES submodule_runs(id) ON DELETE CASCADE,
+  submodule_run_id UUID NOT NULL,  -- Polymorphic: submodule_runs(id) or entity_submodule_runs(id). No FK — PG can't enforce one column referencing two tables.
   item_key TEXT NOT NULL,
   field_name TEXT NOT NULL,
   content TEXT NOT NULL,
