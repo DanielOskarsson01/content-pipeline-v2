@@ -14,7 +14,7 @@ interface UrlTextareaProps {
 export function UrlTextarea({
   value,
   onChange,
-  placeholder = 'https://example.com\nhttps://another.com\n...',
+  placeholder = 'https://example.com\nCompany Name; https://another.com\n...',
 }: UrlTextareaProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -42,7 +42,14 @@ export function UrlTextarea({
   );
 }
 
-/** Parse raw textarea text into entity objects. One line = one entity. */
+/**
+ * Parse raw textarea text into entity objects. One line = one entity.
+ * Supports formats:
+ *   https://example.com           → name auto-derived from hostname
+ *   example.com                   → name auto-derived from hostname
+ *   Company Name; https://example.com  → explicit name + URL
+ *   Company Name; example.com          → explicit name + URL
+ */
 export function parseTextareaToEntities(
   text: string,
   primaryColumn: string
@@ -52,14 +59,35 @@ export function parseTextareaToEntities(
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const entity: Record<string, unknown> = { [primaryColumn]: line };
-      // Auto-derive entity name from URL if primary column looks like a URL
-      if (!entity.name && /^https?:\/\//i.test(line)) {
+      let name: string | undefined;
+      let value = line;
+
+      // Check for "Name; url" format (semicolon separator)
+      const semicolonIdx = line.indexOf(';');
+      if (semicolonIdx > 0) {
+        const before = line.slice(0, semicolonIdx).trim();
+        const after = line.slice(semicolonIdx + 1).trim();
+        // Only treat as name;url if the part after semicolon looks like a URL/domain
+        if (after && /^(https?:\/\/|www\.|[a-z0-9-]+\.[a-z]{2,})/i.test(after)) {
+          name = before;
+          value = after;
+        }
+      }
+
+      const entity: Record<string, unknown> = { [primaryColumn]: value };
+      if (name) {
+        entity.name = name;
+      }
+
+      // Auto-derive entity name from URL if not explicitly provided
+      if (!entity.name) {
         try {
-          const hostname = new URL(line).hostname.replace(/^www\./, '');
+          const urlStr = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+          const hostname = new URL(urlStr).hostname.replace(/^www\./, '');
           entity.name = hostname.split('.')[0].charAt(0).toUpperCase() + hostname.split('.')[0].slice(1);
         } catch { /* ignore parse errors */ }
       }
+
       return entity;
     });
 }
