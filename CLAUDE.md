@@ -360,3 +360,24 @@ Entry types: decision | progress | blocker | idea
 - ScrapFly returned Cloudflare block pages for Punters Lounge — may need different ASP settings or proxy country
 
 **Updated by:** session-closer agent
+
+### Session: 2026-03-23 01:00 - Failure display, Download All CTA, code review skill
+**Accomplished:**
+- Fixed ROOT CAUSE of empty extracted text: FK constraint on `submodule_run_item_data` silently rejected all per-entity inserts (table had 0 rows ever). Dropped FK, updated schema.sql. Added `?full=true` to per-entity detail endpoint.
+- Created `/code-review` skill — mandatory pre-commit code review by independent agent. Added as rule 18 (skeleton) and rule 9 (modules).
+- Fixed all-or-nothing entity failure display: stageWorker catch block now writes synthetic error items to output_data. Added diagnostic logging for entities with 0 input items. UI now has three mutually exclusive states (items / empty / error).
+- Added Download All CTA for per-entity batch mode: new `GET /api/submodule-runs/:id/all-items` endpoint aggregates items across all entity runs. Both CSV and ZIP downloads work. `ResultsActionCTAs` now supports `batchRunId` prop.
+- Fixed hardcoded `url` in enrichment logic → now uses `manifest.item_key`
+
+**Decisions:**
+- Synthetic error items in stageWorker catch block — defensive fix even if root cause may be empty pool_items (CTO review finding)
+- Three mutually exclusive UI display states instead of overlapping "No items returned" + error messages
+- Server-side batch item aggregation (single endpoint) rather than N+1 client-side fetches for downloads
+- FK constraint permanently removed — polymorphic column references two parent tables (PG can't enforce)
+
+**Blockers/Questions:**
+- Root cause of "Play'n GO 0 items" unknown — diagnostic logging added, needs next run to confirm if pool_items are empty
+- Existing runs before FK fix have no text_content stored — need re-run to populate detail view
+- No SSH access to Hetzner for direct PM2 log inspection
+
+**Updated by:** session-closer agent
