@@ -92,6 +92,7 @@ The spec ALWAYS wins. Rewrite the code to match the spec. Do not adapt the spec 
 15. **Each phase must compile and run.** No broken builds between phases. `npm run dev` must work after every phase.
 16. **No TODO/FIXME stubs for future phases.** If it's not needed now, don't write it.
 17. **No silent modifications to previous phases.** If Phase 5 needs a Phase 2 change, flag it and wait for approval.
+18. **Run `/code-review` before every commit.** Spawn a review agent to check the diff for regressions, unintended side effects, scope creep, and breaking changes. Do NOT commit until the review passes. If the review finds issues, fix them first.
 
 ---
 
