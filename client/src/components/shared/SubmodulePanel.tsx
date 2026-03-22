@@ -1221,7 +1221,7 @@ function EntityAccordionItem({
               <span className="text-xs text-gray-500">Loading...</span>
             </div>
           )}
-          {!isLoading && detail?.output_data?.items && detail.output_data.items.length > 0 && (
+          {!isLoading && !detail?.error && detail?.output_data?.items && detail.output_data.items.length > 0 && (
             <ContentRenderer
               entities={detail.output_data.items}
               renderSchema={renderSchema}
@@ -1231,12 +1231,12 @@ function EntityAccordionItem({
               fullHeight
             />
           )}
-          {!isLoading && detail && (!detail.output_data?.items || detail.output_data.items.length === 0) && (
+          {!isLoading && detail && (!detail.output_data?.items || detail.output_data.items.length === 0) && !detail.error && (
             <p className="text-xs text-gray-400">No items returned for this entity.</p>
           )}
           {!isLoading && detail?.error && (
             <div className="bg-red-50 border border-red-200 rounded p-2 mt-2">
-              <p className="text-xs text-red-600">{detail.error}</p>
+              <p className="text-xs text-red-600 font-medium">Failed: {detail.error}</p>
             </div>
           )}
         </div>

@@ -361,6 +361,13 @@ async function handleEntityJob(job) {
   //    Compatibility shim: wrap single entity into legacy array format until
   //    execute.js files are migrated to single-entity input.
   //    Once migrated, the shim detects `input.entity` support and passes directly.
+  const entityItemCount = input?.entity?.items?.length ?? 0;
+  if (entityItemCount === 0) {
+    console.warn(`[worker:entity] WARNING: "${entity_name}" has 0 input items for ${submodule_id} (step ${step_index}). Pool may be empty or items missing url field. Entity keys: ${Object.keys(input?.entity || {}).join(', ')}`);
+  } else {
+    console.log(`[worker:entity] "${entity_name}" has ${entityItemCount} input items for ${submodule_id}`);
+  }
+
   const legacyInput = {
     ...input,
     entities: [input.entity],
@@ -379,11 +386,25 @@ async function handleEntityJob(job) {
       result = rawResult;
     }
   } catch (err) {
+    // Build synthetic error items from the input so the user sees what failed
+    // instead of a blank "No items returned" message.
+    const inputItems = input?.entity?.items || [];
+    const itemKeyField = manifest.item_key || 'url';
+    const syntheticItems = inputItems.map(item => ({
+      [itemKeyField]: item[itemKeyField] || 'unknown',
+      status: 'error',
+      error: `Execution failed: ${err.message}`,
+      entity_name: entity_name,
+    }));
+
     await db
       .from('entity_submodule_runs')
       .update({
         status: 'failed',
         error: err.message,
+        output_data: syntheticItems.length > 0
+          ? { items: syntheticItems, meta: { error: err.message } }
+          : null,
         logs: tools._logs,
         completed_at: new Date().toISOString(),
       })
