@@ -321,8 +321,9 @@ async function handleEntityJob(job) {
         .filter(id => id !== entity_submodule_run_id);
 
       if (upstreamRunIds.length > 0) {
+        const itemKeyField = manifest.item_key || 'url';
         const itemKeys = [...new Set(
-          entityItems.map(item => String(item.url ?? '')).filter(Boolean)
+          entityItems.map(item => String(item[itemKeyField] ?? '')).filter(Boolean)
         )];
 
         const ENRICH_BATCH = 200;
@@ -344,7 +345,7 @@ async function handleEntityJob(job) {
 
         let mergedCount = 0;
         for (const item of entityItems) {
-          const key = String(item.url ?? '');
+          const key = String(item[itemKeyField] ?? '');
           const extra = lookup.get(key);
           if (extra) {
             Object.assign(item, extra);
@@ -568,8 +569,9 @@ async function handleLegacyJob(job) {
           .filter(id => id !== submodule_run_id);
 
         if (upstreamRunIds.length > 0) {
+          const itemKeyField = manifest.item_key || 'url';
           const itemKeys = [...new Set(
-            allItems.map(item => String(item.url ?? '')).filter(Boolean)
+            allItems.map(item => String(item[itemKeyField] ?? '')).filter(Boolean)
           )];
 
           const ENRICH_BATCH = 200;
@@ -592,7 +594,7 @@ async function handleLegacyJob(job) {
           let mergedCount = 0;
           for (const entity of input.entities) {
             for (const item of (entity.items || [])) {
-              const key = String(item.url ?? '');
+              const key = String(item[itemKeyField] ?? '');
               const extra = lookup.get(key);
               if (extra) {
                 Object.assign(item, extra);
