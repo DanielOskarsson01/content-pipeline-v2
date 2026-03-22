@@ -640,6 +640,76 @@ submoduleRunRouter.get('/:id/entities/:entityRunId', async (req, res) => {
 });
 
 /**
+ * GET /api/submodule-runs/:id/all-items
+ * Returns aggregated items across ALL entity runs for a batch.
+ * Used by the Download All CTA in per-entity mode.
+ * Supports ?full=true to merge downloadable fields (text_content etc.).
+ */
+submoduleRunRouter.get('/:id/all-items', async (req, res) => {
+  try {
+    // 1. Load the batch run to get submodule_id
+    const { data: batchRun, error: batchErr } = await db
+      .from('submodule_runs')
+      .select('id, submodule_id, batch_id')
+      .eq('id', req.params.id)
+      .single();
+
+    if (batchErr?.code === 'PGRST116' || !batchRun) {
+      return res.status(404).json({ error: 'Batch run not found' });
+    }
+    if (batchErr) throw batchErr;
+
+    const manifest = getSubmoduleById(batchRun.submodule_id);
+    const itemKeyField = manifest?.item_key || 'url';
+
+    // 2. Load all completed/approved entity runs for this batch
+    const { data: entityRuns, error: entityErr } = await db
+      .from('entity_submodule_runs')
+      .select('id, entity_name, output_data')
+      .eq('batch_id', batchRun.batch_id)
+      .in('status', ['completed', 'approved']);
+
+    if (entityErr) throw entityErr;
+
+    // 3. Flatten all items across entities
+    const allItems = [];
+    const entityRunIds = [];
+    for (const er of (entityRuns || [])) {
+      entityRunIds.push(er.id);
+      for (const item of (er.output_data?.items || [])) {
+        allItems.push({ ...item, entity_name: item.entity_name || er.entity_name });
+      }
+    }
+
+    // 4. Merge downloadable fields if requested
+    if (req.query.full === 'true' && entityRunIds.length > 0) {
+      const { data: itemData } = await db
+        .from('submodule_run_item_data')
+        .select('item_key, field_name, content')
+        .in('submodule_run_id', entityRunIds);
+
+      if (itemData?.length > 0) {
+        const lookup = new Map();
+        for (const row of itemData) {
+          if (!lookup.has(row.item_key)) lookup.set(row.item_key, {});
+          lookup.get(row.item_key)[row.field_name] = row.content;
+        }
+        for (const item of allItems) {
+          const key = String(item[itemKeyField] ?? '');
+          const extra = lookup.get(key);
+          if (extra) Object.assign(item, extra);
+        }
+      }
+    }
+
+    res.json({ items: allItems, total: allItems.length });
+  } catch (err) {
+    console.error('[submodule-runs] GET all-items error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * POST /api/submodule-runs/:id/approve
  * Approve (or re-approve) a submodule run.
  * Body: { approved_item_keys: [...] }

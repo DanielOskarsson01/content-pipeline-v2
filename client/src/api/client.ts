@@ -120,6 +120,10 @@ export const api = {
     }),
   getEntityRunDetail: (batchRunId: string, entityRunId: string) =>
     apiFetch<EntityRunDetail>(`/api/submodule-runs/${batchRunId}/entities/${entityRunId}?full=true`),
+  getBatchAllItems: (batchRunId: string, full = false) =>
+    apiFetch<{ items: Record<string, unknown>[]; total: number }>(
+      `/api/submodule-runs/${batchRunId}/all-items${full ? '?full=true' : ''}`
+    ),
   getLatestSubmoduleRuns: (runId: string, stepIndex: number) =>
     apiFetch<SubmoduleLatestRunMap>(`/api/runs/${runId}/steps/${stepIndex}/submodule-runs/latest`),
 

@@ -1100,7 +1100,16 @@ function PerEntityResultsContent({
         ))}
       </div>
 
-      <ResultsActionCTAs onChangeInput={onChangeInput} onChangeOptions={onChangeOptions} onTryAgain={onTryAgain} />
+      <ResultsActionCTAs
+        onChangeInput={onChangeInput}
+        onChangeOptions={onChangeOptions}
+        onTryAgain={onTryAgain}
+        showDownload
+        renderSchema={renderSchema}
+        submoduleId={batchRun.submodule_id}
+        itemKey={itemKey}
+        batchRunId={batchRun.id}
+      />
     </div>
   );
 }
@@ -1260,6 +1269,7 @@ function ResultsActionCTAs({
   itemKey,
   submoduleRunStatus,
   onRequestFullData,
+  batchRunId,
 }: {
   onChangeInput: () => void;
   onChangeOptions: () => void;
@@ -1272,6 +1282,7 @@ function ResultsActionCTAs({
   itemKey?: string;
   submoduleRunStatus?: string | null;
   onRequestFullData?: () => void;
+  batchRunId?: string;
 }) {
   const showToast = useAppStore((s) => s.showToast);
   const [zipping, setZipping] = useState(false);
@@ -1309,14 +1320,14 @@ function ResultsActionCTAs({
     URL.revokeObjectURL(url);
   };
 
-  // Core zip creation logic (called when data is ready)
-  const performDownloadAll = useCallback(async () => {
-    if (!entities?.length || !downloadableFields?.length) return;
+  // Core zip creation logic — works with any items array
+  const generateZip = useCallback(async (items: Record<string, unknown>[]) => {
+    if (!items.length || !downloadableFields?.length) return;
     try {
       setZipping(true);
       const zip = new JSZip();
 
-      for (const entity of entities) {
+      for (const entity of items) {
         const entityName = String(entity.entity_name || 'entity');
         const safeName = sanitizeFilename(entityName);
         const isRejected = submoduleRunStatus === 'approved'
@@ -1363,26 +1374,83 @@ function ResultsActionCTAs({
     } finally {
       setZipping(false);
     }
-  }, [entities, downloadableFields, submoduleId, checkedKeys, itemKey, submoduleRunStatus, showToast]);
+  }, [downloadableFields, submoduleId, checkedKeys, itemKey, submoduleRunStatus, showToast]);
 
-  // Auto-trigger download when pending and full data arrives
+  // Auto-trigger download when pending and full data arrives (legacy mode)
   useEffect(() => {
-    if (downloadPending && hasFullData) {
+    if (downloadPending && hasFullData && entities?.length) {
       setDownloadPending(false);
-      performDownloadAll();
+      generateZip(entities);
     }
-  }, [downloadPending, hasFullData, performDownloadAll]);
+  }, [downloadPending, hasFullData, entities, generateZip]);
 
-  const handleDownloadAll = () => {
-    if (!entities?.length || !downloadableFields?.length) return;
+  const handleDownloadAll = async () => {
+    if (!downloadableFields?.length) return;
+
+    // Batch mode: fetch all items from the batch endpoint
+    if (batchRunId) {
+      try {
+        setZipping(true);
+        showToast('Loading full content...', 'info');
+        const { items } = await api.getBatchAllItems(batchRunId, true);
+        if (items.length === 0) {
+          showToast('No items to download', 'error');
+          setZipping(false);
+          return;
+        }
+        await generateZip(items);
+      } catch (err) {
+        console.error('Batch download failed:', err);
+        showToast('Download failed', 'error');
+        setZipping(false);
+      }
+      return;
+    }
+
+    // Legacy mode: use pre-loaded entities
+    if (!entities?.length) return;
     if (hasFullData) {
-      // Data already loaded — download immediately
-      performDownloadAll();
+      generateZip(entities);
     } else {
-      // Request full data, download will auto-trigger when it arrives
       onRequestFullData?.();
       setDownloadPending(true);
       showToast('Loading full content...', 'info');
+    }
+  };
+
+  // Batch mode: CSV download fetches from endpoint too
+  const handleBatchDownload = async () => {
+    if (!batchRunId) return;
+    try {
+      const { items } = await api.getBatchAllItems(batchRunId, false);
+      if (items.length === 0) {
+        showToast('No items to download', 'error');
+        return;
+      }
+      const metaFields = new Set(['display_type', 'selectable', 'detail_schema', 'downloadable_fields', 'flagged_when']);
+      const columns = renderSchema
+        ? Object.keys(renderSchema).filter((k) => !metaFields.has(k))
+        : Object.keys(items[0]);
+      const headerRow = columns.map((c) => `"${c}"`).join(',');
+      const rows = items.map((item) =>
+        columns
+          .map((col) => {
+            const val = String(item[col] ?? '');
+            return `"${val.replace(/"/g, '""')}"`;
+          })
+          .join(',')
+      );
+      const csv = [headerRow, ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `results-${items.length}-rows.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Batch CSV download failed:', err);
+      showToast('Download failed', 'error');
     }
   };
 
@@ -1402,7 +1470,7 @@ function ResultsActionCTAs({
       </button>
       {showDownload && (
         <button
-          onClick={handleDownload}
+          onClick={batchRunId ? handleBatchDownload : handleDownload}
           className="text-xs text-gray-500 hover:underline"
         >
           Download
