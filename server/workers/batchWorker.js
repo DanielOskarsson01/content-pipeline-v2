@@ -1,6 +1,9 @@
 /**
  * Batch Finalization Worker — handles FlowProducer parent job completion.
  *
+ * Runs as a standalone PM2 process (not imported by server.js).
+ * Entry point: node server/workers/batchWorker.js
+ *
  * When all entity child jobs for a submodule batch finish, BullMQ auto-processes
  * the parent job on the 'batch-finalization' queue. This worker:
  *   1. Counts completed/failed entity_submodule_runs
@@ -8,6 +11,7 @@
  *   3. Updates the pipeline_stages entity counts
  */
 
+import 'dotenv/config';
 import { Worker } from 'bullmq';
 import db from '../services/db.js';
 import { redis } from '../services/queue.js';

@@ -13,9 +13,8 @@ import { executeRouter, submoduleRunRouter, latestRunsRouter } from './routes/su
 import referenceDocsRouter from './routes/referenceDocs.js';
 import { loadModules } from './services/moduleLoader.js';
 
-// Import workers — start BullMQ workers in the same process
-import './workers/stageWorker.js';
-import './workers/batchWorker.js';
+// Workers run as separate PM2 processes — see ecosystem.config.cjs
+// DO NOT import workers here. The API server should never spawn Playwright or process jobs.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();

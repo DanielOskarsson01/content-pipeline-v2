@@ -21,44 +21,15 @@ export const pipelineQueue = new Queue('pipeline-stages-v2', { connection: redis
 // Batch finalization queue — parent jobs land here when all children complete
 export const batchQueue = new Queue('batch-finalization', { connection: redis });
 
-// FlowProducer for creating parent/child job flows (per-entity architecture)
+// FlowProducer for creating parent/child job flows
 export const flowProducer = new FlowProducer({ connection: redis });
 
-// Cost-based job configuration (from spec Part 15)
-// Per-entity mode: shorter timeouts (single entity, not N entities)
+// Cost-based job configuration — per-entity timeouts (single entity per job)
 const COST_CONFIG = {
-  cheap:     { timeout: 5 * 60 * 1000,  attempts: 3, priority: 1  },
-  medium:    { timeout: 15 * 60 * 1000, attempts: 2, priority: 5  },
-  expensive: { timeout: 30 * 60 * 1000, attempts: 1, priority: 10 },
-};
-
-const ENTITY_COST_CONFIG = {
   cheap:     { timeout: 2 * 60 * 1000,  attempts: 3, priority: 1  },
   medium:    { timeout: 5 * 60 * 1000,  attempts: 2, priority: 5  },
   expensive: { timeout: 10 * 60 * 1000, attempts: 1, priority: 10 },
 };
-
-/**
- * Enqueue a submodule execution job (legacy path — all entities in one job).
- */
-export async function enqueueSubmoduleJob({ submoduleRunId, submoduleId, stepIndex, cost }) {
-  const config = COST_CONFIG[cost] || COST_CONFIG.medium;
-
-  const job = await pipelineQueue.add(
-    'execute-submodule',
-    { submodule_run_id: submoduleRunId, submodule_id: submoduleId, step_index: stepIndex },
-    {
-      attempts: config.attempts,
-      priority: config.priority,
-      backoff: { type: 'exponential', delay: 5000 },
-      removeOnComplete: 100,
-      removeOnFail: 50,
-    }
-  );
-
-  console.log(`[queue] Enqueued job ${job.id} for ${submoduleId} (cost: ${cost}, timeout: ${config.timeout / 1000}s)`);
-  return { jobId: job.id, timeout: config.timeout };
-}
 
 /**
  * Enqueue a per-entity batch via FlowProducer.
@@ -74,7 +45,7 @@ export async function enqueueSubmoduleJob({ submoduleRunId, submoduleId, stepInd
  * @returns {object} { flowJobId, entityCount }
  */
 export async function enqueueEntityBatch({ batchId, submoduleRunId, submoduleId, stepIndex, cost, entityRuns }) {
-  const config = ENTITY_COST_CONFIG[cost] || ENTITY_COST_CONFIG.medium;
+  const config = COST_CONFIG[cost] || COST_CONFIG.medium;
 
   const flow = await flowProducer.add({
     name: 'batch-complete',

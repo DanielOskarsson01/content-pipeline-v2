@@ -33,8 +33,8 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   input_render_schema JSONB,
   output_data JSONB,
   output_render_schema JSONB,
-  working_pool JSONB,                -- Legacy: kept for backward compat, new runs use entity_stage_pool
-  working_pool_render_schema JSONB,  -- Legacy
+  working_pool JSONB,                -- DEAD: legacy flat-pool column, drop after P6 data cleanup
+  working_pool_render_schema JSONB,  -- DEAD: legacy flat-pool column, drop after P6 data cleanup
   entity_count INTEGER,              -- Per-entity: total entities at this step
   completed_count INTEGER DEFAULT 0, -- Per-entity: entities completed
   failed_count INTEGER DEFAULT 0,    -- Per-entity: entities permanently failed
@@ -206,8 +206,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_submodule_runs_one_active
   WHERE status IN ('pending', 'running');
 
 -- ============================================================
--- RPC: approve_step (Legacy flat-pool mode)
--- Atomic step approval: completes current step, activates next.
+-- DEAD: approve_step — legacy flat-pool RPC, drop after P6 data cleanup
+-- Was: Atomic step approval for flat-pool mode. Replaced by approve_step_v2.
 -- ============================================================
 CREATE OR REPLACE FUNCTION approve_step(
   p_stage_id UUID,

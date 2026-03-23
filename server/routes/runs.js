@@ -26,19 +26,16 @@ router.get('/:id', async (req, res, next) => {
 
     if (stagesErr) throw stagesErr;
 
-    // Per-entity mode: enrich stages with entity counts from entity_stage_pool.
-    // working_pool stays null — the UI reads entity_count/total_item_count instead.
+    // Enrich stages with entity counts from entity_stage_pool
     const stagesWithPools = stages || [];
-    const emptyPoolSteps = stagesWithPools
-      .filter(s => !s.working_pool || (Array.isArray(s.working_pool) && s.working_pool.length === 0))
-      .map(s => s.step_index);
+    const stepIndices = stagesWithPools.map(s => s.step_index);
 
-    if (emptyPoolSteps.length > 0) {
+    if (stepIndices.length > 0) {
       const { data: entityPools } = await db
         .from('entity_stage_pool')
         .select('step_index, entity_name, pool_items')
         .eq('run_id', req.params.id)
-        .in('step_index', emptyPoolSteps);
+        .in('step_index', stepIndices);
 
       if (entityPools && entityPools.length > 0) {
         const poolsByStep = {};
@@ -50,9 +47,6 @@ router.get('/:id', async (req, res, next) => {
         for (const stage of stagesWithPools) {
           const stepPools = poolsByStep[stage.step_index];
           if (stepPools) {
-            // Do NOT populate working_pool — that causes the UI to render
-            // entity summaries as items ("5 in working pool" with empty cells).
-            // The UI uses entity_count and total_item_count for per-entity display.
             stage.entity_count = stage.entity_count || stepPools.length;
             stage.total_item_count = stepPools.reduce((sum, ep) => sum + (ep.pool_items?.length || 0), 0);
           }
@@ -83,13 +77,11 @@ router.get('/:runId/steps/:stepIndex', async (req, res, next) => {
     if (!stage) return res.status(404).json({ error: 'Step not found' });
 
     // Per-entity mode: populate input_data from entity_stage_pool if missing.
-    // Step approval writes input_data, but if that failed (e.g. crash) or this
-    // is a legacy run, we lazy-populate it here and persist so subsequent GETs
-    // are fast.
-    const hasWorkingPool = Array.isArray(stage.working_pool) && stage.working_pool.length > 0;
+    // Populate entity pool summary from entity_stage_pool.
+    // Also lazy-populate input_data if it's empty (e.g. crash during approval).
     const hasInputData = Array.isArray(stage.input_data) && stage.input_data.length > 0;
 
-    if (!hasWorkingPool) {
+    {
       const { data: entityPools } = await db
         .from('entity_stage_pool')
         .select('entity_name, pool_items')
@@ -155,12 +147,9 @@ router.get('/:runId/steps/:stepIndex/submodule-configs', async (req, res, next) 
 
 /**
  * POST /api/runs/:runId/steps/:stepIndex/approve
- * Approve step — full version (Phase 8).
+ * Approve step — per-entity mode.
  * Step 0: unconditional advance. Steps 1-10: require at least one approved submodule.
- * Finalizes working_pool → output_data, flows data to next step.
- *
- * Per-entity mode: detected by presence of entity_stage_pool rows.
- * Uses approve_step_v2 RPC — pools forwarded via entity_stage_pool, not output_data.
+ * Uses approve_step_v2 RPC — pools forwarded via entity_stage_pool.
  */
 router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
   try {
@@ -179,7 +168,7 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
     if (!stage) return res.status(404).json({ error: 'Step not found' });
     if (stage.status !== 'active') return res.status(400).json({ error: 'Step is not active' });
 
-    // Detect per-entity mode: check if entity_stage_pool rows exist for this step
+    // Load entity pools for this step
     const { data: entityPools, error: poolCheckErr } = await db
       .from('entity_stage_pool')
       .select('entity_name, status')
@@ -187,8 +176,6 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
       .eq('step_index', stepIndex);
 
     if (poolCheckErr) throw poolCheckErr;
-
-    const isPerEntity = entityPools && entityPools.length > 0;
 
     // For steps with submodules (step > 0): validate at least one approved submodule_run
     let approvedRuns = [];
@@ -222,137 +209,84 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
       stageOutputRenderSchema = mergedSchema;
     }
 
-    // ===== PER-ENTITY STEP APPROVAL =====
-    if (isPerEntity) {
-      // Prune entity pools after Step 5 (same logic as legacy)
-      if (stepIndex >= 5) {
-        const { data: allPools } = await db
-          .from('entity_stage_pool')
-          .select('id, pool_items')
-          .eq('run_id', runId)
-          .eq('step_index', stepIndex);
-
-        for (const pool of (allPools || [])) {
-          if (Array.isArray(pool.pool_items)) {
-            const pruned = pool.pool_items.map(item => {
-              const p = { ...item };
-              delete p.text_content;
-              if (p.content_markdown && p.section_count === undefined) {
-                delete p.content_markdown;
-              }
-              return p;
-            });
-            await db
-              .from('entity_stage_pool')
-              .update({ pool_items: pruned })
-              .eq('id', pool.id);
-          }
-        }
-      }
-
-      // Mark completed entity pools at this step as 'approved'
-      // Guard: only transition 'completed' → 'approved' (idempotent on retry)
-      await db
+    // Prune entity pools after Step 5
+    if (stepIndex >= 5) {
+      const { data: allPools } = await db
         .from('entity_stage_pool')
-        .update({ status: 'approved', updated_at: new Date().toISOString() })
+        .select('id, pool_items')
         .eq('run_id', runId)
-        .eq('step_index', stepIndex)
-        .eq('status', 'completed');
+        .eq('step_index', stepIndex);
 
-      const approvedCount = entityPools.filter(p => p.status !== 'failed').length;
-      const entityCount = entityPools.length;
-
-      // Use approve_step_v2 — pools forwarded in the RPC function itself
-      const { data: rpcResult, error: rpcErr } = await db
-        .rpc('approve_step_v2', {
-          p_stage_id: stage.id,
-          p_output_render_schema: stageOutputRenderSchema,
-          p_entity_count: entityCount,
-          p_approved_count: approvedCount,
-        })
-        .single();
-
-      if (rpcErr) throw rpcErr;
-
-      const nextStep = rpcResult.next_step;
-
-      // Populate input_data on the next stage so the UI can display forwarded items.
-      // The RPC approve_step_v2 handles entity_stage_pool forwarding (the execution
-      // source of truth). input_data is a denormalized copy for UI display only.
-      if (nextStep !== null) {
-        const { data: approvedPools } = await db
-          .from('entity_stage_pool')
-          .select('entity_name, pool_items')
-          .eq('run_id', runId)
-          .eq('step_index', stepIndex)
-          .eq('status', 'approved');
-
-        if (approvedPools && approvedPools.length > 0) {
-          const flatItems = [];
-          for (const pool of approvedPools) {
-            for (const item of (pool.pool_items || [])) {
-              flatItems.push({ ...item, entity_name: item.entity_name || pool.entity_name });
+      for (const pool of (allPools || [])) {
+        if (Array.isArray(pool.pool_items)) {
+          const pruned = pool.pool_items.map(item => {
+            const p = { ...item };
+            delete p.text_content;
+            if (p.content_markdown && p.section_count === undefined) {
+              delete p.content_markdown;
             }
-          }
-          console.log(`[approve] Populating step ${nextStep} input_data with ${flatItems.length} items from step ${stepIndex}`);
+            return p;
+          });
           await db
-            .from('pipeline_stages')
-            .update({ input_data: flatItems, input_render_schema: stageOutputRenderSchema })
-            .eq('run_id', runId)
-            .eq('step_index', nextStep);
+            .from('entity_stage_pool')
+            .update({ pool_items: pruned })
+            .eq('id', pool.id);
         }
       }
-
-      await db
-        .from('decision_log')
-        .insert({
-          run_id: runId,
-          step_index: stepIndex,
-          decision: 'step_approved',
-          context: {
-            mode: 'per_entity',
-            approved_submodule_count: approvedRuns.length,
-            entity_count: entityCount,
-            approved_entity_count: approvedCount,
-            next_step: nextStep,
-          },
-        });
-
-      return res.json({
-        step_completed: stepIndex,
-        next_step: nextStep,
-        entity_count: entityCount,
-        approved_entity_count: approvedCount,
-        mode: 'per_entity',
-      });
     }
 
-    // ===== LEGACY STEP APPROVAL =====
-    // Finalize pool → output_data
-    let outputData = stage.working_pool || [];
-    if (stepIndex >= 5 && Array.isArray(outputData)) {
-      outputData = outputData.map(item => {
-        const pruned = { ...item };
-        delete pruned.text_content;
-        if (pruned.content_markdown && pruned.section_count === undefined) {
-          delete pruned.content_markdown;
-        }
-        return pruned;
-      });
-    }
-    const itemsForwarded = Array.isArray(outputData) ? outputData.length : 0;
+    // Mark completed entity pools at this step as 'approved'
+    // Guard: only transition 'completed' → 'approved' (idempotent on retry)
+    await db
+      .from('entity_stage_pool')
+      .update({ status: 'approved', updated_at: new Date().toISOString() })
+      .eq('run_id', runId)
+      .eq('step_index', stepIndex)
+      .eq('status', 'completed');
 
+    const approvedCount = entityPools ? entityPools.filter(p => p.status !== 'failed').length : 0;
+    const entityCount = entityPools ? entityPools.length : 0;
+
+    // Approve via RPC — pools forwarded in the RPC function itself
     const { data: rpcResult, error: rpcErr } = await db
-      .rpc('approve_step', {
+      .rpc('approve_step_v2', {
         p_stage_id: stage.id,
-        p_output_data: outputData,
         p_output_render_schema: stageOutputRenderSchema,
+        p_entity_count: entityCount,
+        p_approved_count: approvedCount,
       })
       .single();
 
     if (rpcErr) throw rpcErr;
 
     const nextStep = rpcResult.next_step;
+
+    // Populate input_data on the next stage so the UI can display forwarded items.
+    // The RPC approve_step_v2 handles entity_stage_pool forwarding (the execution
+    // source of truth). input_data is a denormalized copy for UI display only.
+    if (nextStep !== null) {
+      const { data: approvedPools } = await db
+        .from('entity_stage_pool')
+        .select('entity_name, pool_items')
+        .eq('run_id', runId)
+        .eq('step_index', stepIndex)
+        .eq('status', 'approved');
+
+      if (approvedPools && approvedPools.length > 0) {
+        const flatItems = [];
+        for (const pool of approvedPools) {
+          for (const item of (pool.pool_items || [])) {
+            flatItems.push({ ...item, entity_name: item.entity_name || pool.entity_name });
+          }
+        }
+        console.log(`[approve] Populating step ${nextStep} input_data with ${flatItems.length} items from step ${stepIndex}`);
+        await db
+          .from('pipeline_stages')
+          .update({ input_data: flatItems, input_render_schema: stageOutputRenderSchema })
+          .eq('run_id', runId)
+          .eq('step_index', nextStep);
+      }
+    }
 
     await db
       .from('decision_log')
@@ -362,7 +296,8 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
         decision: 'step_approved',
         context: {
           approved_submodule_count: approvedRuns.length,
-          items_forwarded: itemsForwarded,
+          entity_count: entityCount,
+          approved_entity_count: approvedCount,
           next_step: nextStep,
         },
       });
@@ -370,15 +305,15 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
     res.json({
       step_completed: stepIndex,
       next_step: nextStep,
-      items_forwarded: itemsForwarded,
+      entity_count: entityCount,
+      approved_entity_count: approvedCount,
     });
   } catch (err) { next(err); }
 });
 
 /**
  * POST /api/runs/:runId/steps/:stepIndex/skip
- * Skip step — pass input_data -> output_data unchanged, advance.
- * Per-entity mode: forward entity_stage_pool rows unchanged to next step.
+ * Skip step — forward entity_stage_pool rows unchanged to next step.
  */
 router.post('/:runId/steps/:stepIndex/skip', async (req, res, next) => {
   try {
@@ -396,14 +331,12 @@ router.post('/:runId/steps/:stepIndex/skip', async (req, res, next) => {
     if (!stage) return res.status(404).json({ error: 'Step not found' });
     if (stage.status !== 'active') return res.status(400).json({ error: 'Step is not active' });
 
-    // Detect per-entity mode
     const { data: entityPools } = await db
       .from('entity_stage_pool')
       .select('entity_name, pool_items')
       .eq('run_id', runId)
       .eq('step_index', stepIndex);
 
-    const isPerEntity = entityPools && entityPools.length > 0;
     const isLastStep = stepIndex >= 10;
     let nextStep = isLastStep ? null : stepIndex + 1;
 
@@ -412,7 +345,6 @@ router.post('/:runId/steps/:stepIndex/skip', async (req, res, next) => {
       .from('pipeline_stages')
       .update({
         status: 'skipped',
-        output_data: isPerEntity ? null : stage.input_data,
         output_render_schema: stage.input_render_schema,
         completed_at: new Date().toISOString(),
       })
@@ -421,47 +353,32 @@ router.post('/:runId/steps/:stepIndex/skip', async (req, res, next) => {
     if (skipErr) throw skipErr;
 
     if (!isLastStep) {
-      if (isPerEntity) {
-        // Forward entity pools to next step (UPSERT for idempotency)
-        for (const pool of entityPools) {
-          await db
-            .from('entity_stage_pool')
-            .upsert({
-              run_id: runId,
-              step_index: nextStep,
-              entity_name: pool.entity_name,
-              pool_items: pool.pool_items,
-              status: 'pending',
-            }, { onConflict: 'run_id,step_index,entity_name', ignoreDuplicates: true });
-        }
-
-        // Activate next step
+      // Forward entity pools to next step (UPSERT for idempotency)
+      for (const pool of (entityPools || [])) {
         await db
-          .from('pipeline_stages')
-          .update({
-            status: 'active',
-            entity_count: entityPools.length,
-            completed_count: 0,
-            failed_count: 0,
-            approved_count: 0,
-            started_at: new Date().toISOString(),
-          })
-          .eq('run_id', runId)
-          .eq('step_index', nextStep);
-      } else {
-        // Legacy: copy input_data to next step
-        await db
-          .from('pipeline_stages')
-          .update({
-            status: 'active',
-            input_data: stage.input_data,
-            input_render_schema: stage.input_render_schema,
-            working_pool: stage.input_data,
-            started_at: new Date().toISOString(),
-          })
-          .eq('run_id', runId)
-          .eq('step_index', nextStep);
+          .from('entity_stage_pool')
+          .upsert({
+            run_id: runId,
+            step_index: nextStep,
+            entity_name: pool.entity_name,
+            pool_items: pool.pool_items,
+            status: 'pending',
+          }, { onConflict: 'run_id,step_index,entity_name', ignoreDuplicates: true });
       }
+
+      // Activate next step
+      await db
+        .from('pipeline_stages')
+        .update({
+          status: 'active',
+          entity_count: (entityPools || []).length,
+          completed_count: 0,
+          failed_count: 0,
+          approved_count: 0,
+          started_at: new Date().toISOString(),
+        })
+        .eq('run_id', runId)
+        .eq('step_index', nextStep);
 
       await db
         .from('pipeline_runs')
@@ -481,9 +398,7 @@ router.post('/:runId/steps/:stepIndex/skip', async (req, res, next) => {
         step_index: stepIndex,
         decision: 'step_skipped',
         context: {
-          mode: isPerEntity ? 'per_entity' : 'legacy',
-          entity_count: isPerEntity ? entityPools.length : undefined,
-          items_passed_through: isPerEntity ? undefined : (Array.isArray(stage.input_data) ? stage.input_data.length : 0),
+          entity_count: (entityPools || []).length,
           next_step: nextStep,
         },
       });

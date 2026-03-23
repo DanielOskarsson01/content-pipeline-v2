@@ -1,30 +1,27 @@
 /**
  * Pipeline Stage Worker — BullMQ worker that executes submodules.
  *
+ * Runs as a standalone PM2 process (not imported by server.js).
+ * Entry point: node server/workers/stageWorker.js
+ *
  * Job payload: { submodule_run_id, submodule_id, step_index }
  * The worker loads input_data and options from the submodule_runs row,
  * then loads execute.js from MODULES_PATH and calls it.
  */
 
+import 'dotenv/config';
 import { Worker } from 'bullmq';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import db from '../services/db.js';
 import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
-import { notifyCompletion, notifyFailure } from '../services/webhookNotifier.js';
 
 // Load submodule manifests (worker is a separate process from server.js)
 loadModules();
 
+// Per-entity timeouts — single entity per job
 const COST_TIMEOUTS = {
-  cheap: 5 * 60 * 1000,
-  medium: 15 * 60 * 1000,
-  expensive: 30 * 60 * 1000,
-};
-
-// Per-entity: shorter timeouts (single entity, not N entities)
-const ENTITY_COST_TIMEOUTS = {
   cheap: 2 * 60 * 1000,
   medium: 5 * 60 * 1000,
   expensive: 30 * 60 * 1000,
@@ -47,11 +44,11 @@ const MODEL_MAP = {
 /**
  * Build the tools object that gets passed to execute().
  * See spec Part 12.
- * @param {string} runId - Row ID to write progress to
+ * @param {string} runId - entity_submodule_runs row ID to write progress to
  * @param {string} submoduleId - For logging prefix
- * @param {string} progressTable - 'submodule_runs' (legacy) or 'entity_submodule_runs' (per-entity)
  */
-function buildTools(runId, submoduleId, progressTable = 'submodule_runs') {
+function buildTools(runId, submoduleId) {
+  const progressTable = 'entity_submodule_runs';
   const logs = [];
 
   const logger = {
@@ -287,12 +284,12 @@ async function handleEntityJob(job) {
   // 4. Load execute function
   const executeFn = await loadExecuteFunction(manifest);
 
-  // 5. Build tools (progress writes to entity_submodule_runs)
-  const tools = buildTools(entity_submodule_run_id, submodule_id, 'entity_submodule_runs');
+  // 5. Build tools
+  const tools = buildTools(entity_submodule_run_id, submodule_id);
 
   // 6. Timeout
   const cost = manifest.cost || 'medium';
-  const timeout = ENTITY_COST_TIMEOUTS[cost] || ENTITY_COST_TIMEOUTS.medium;
+  const timeout = COST_TIMEOUTS[cost] || COST_TIMEOUTS.medium;
   let timeoutTimer;
   const timeoutPromise = new Promise((_, reject) => {
     timeoutTimer = setTimeout(() => reject(new Error(`Execution timed out after ${timeout / 1000}s`)), timeout);
@@ -564,259 +561,13 @@ async function handleEntityJob(job) {
   return result;
 }
 
-/**
- * Legacy job handler — processes all entities in one job.
- * Unchanged from the original implementation.
- */
-async function handleLegacyJob(job) {
-  const { submodule_run_id, submodule_id, step_index } = job.data;
-
-  console.log(`[worker] Processing job ${job.id}: ${submodule_id} (step ${step_index})`);
-
-  // 1. Load submodule_runs row
-  const { data: run, error: runErr } = await db
-    .from('submodule_runs')
-    .select('*')
-    .eq('id', submodule_run_id)
-    .single();
-
-  if (runErr || !run) {
-    throw new Error(`submodule_runs row not found: ${submodule_run_id}`);
-  }
-
-  // 2. Look up manifest
-  const manifest = getSubmoduleById(submodule_id);
-  if (!manifest) {
-    throw new Error(`Submodule not found in registry: ${submodule_id}`);
-  }
-
-  // 3. Mark as running
-  await db
-    .from('submodule_runs')
-    .update({ status: 'running', started_at: new Date().toISOString() })
-    .eq('id', submodule_run_id);
-
-  // 4. Load execute function
-  const executeFn = await loadExecuteFunction(manifest);
-
-  // 5. Build tools
-  const tools = buildTools(submodule_run_id, submodule_id);
-
-  // 6. Set up timeout (with cleanup to prevent leaked timers)
-  const cost = manifest.cost || 'medium';
-  const timeout = COST_TIMEOUTS[cost] || COST_TIMEOUTS.medium;
-  let timeoutTimer;
-  const timeoutPromise = new Promise((_, reject) => {
-    timeoutTimer = setTimeout(() => reject(new Error(`Execution timed out after ${timeout / 1000}s`)), timeout);
-  });
-
-  // 7. Prepare input + options
-  const input = run.input_data;
-  const options = run.options || manifest.options_defaults || {};
-
-  // 7b. Enrich input items with downloadable fields from upstream submodule runs.
-  const requiresColumns = manifest.requires_columns || [];
-  if (requiresColumns.length > 0 && input?.entities?.length > 0) {
-    const allItems = input.entities.flatMap(e => e.items || []);
-    if (allItems.length > 0) {
-      const sampleItems = allItems.slice(0, 10);
-      const missingColumns = requiresColumns.filter(col =>
-        sampleItems.every(item => !item[col] || String(item[col]).length === 0)
-      );
-
-      if (missingColumns.length > 0) {
-        console.log(`[worker] Enriching: ${missingColumns.join(', ')} missing from ${allItems.length} items`);
-
-        const pipelineRunId = input.run_id || run.run_id;
-        const { data: upstreamRuns } = await db
-          .from('submodule_runs')
-          .select('id')
-          .eq('run_id', pipelineRunId)
-          .in('status', ['completed', 'approved']);
-
-        const upstreamRunIds = (upstreamRuns || []).map(r => r.id)
-          .filter(id => id !== submodule_run_id);
-
-        if (upstreamRunIds.length > 0) {
-          const itemKeyField = manifest.item_key || 'url';
-          const itemKeys = [...new Set(
-            allItems.map(item => String(item[itemKeyField] ?? '')).filter(Boolean)
-          )];
-
-          const ENRICH_BATCH = 200;
-          const lookup = new Map();
-          for (let i = 0; i < itemKeys.length; i += ENRICH_BATCH) {
-            const keyBatch = itemKeys.slice(i, i + ENRICH_BATCH);
-            const { data: itemData } = await db
-              .from('submodule_run_item_data')
-              .select('item_key, field_name, content')
-              .in('submodule_run_id', upstreamRunIds)
-              .in('field_name', missingColumns)
-              .in('item_key', keyBatch);
-
-            for (const row of (itemData || [])) {
-              if (!lookup.has(row.item_key)) lookup.set(row.item_key, {});
-              lookup.get(row.item_key)[row.field_name] = row.content;
-            }
-          }
-
-          let mergedCount = 0;
-          for (const entity of input.entities) {
-            for (const item of (entity.items || [])) {
-              const key = String(item[itemKeyField] ?? '');
-              const extra = lookup.get(key);
-              if (extra) {
-                Object.assign(item, extra);
-                mergedCount++;
-              }
-            }
-          }
-          console.log(`[worker] Enriched ${mergedCount}/${allItems.length} items with ${missingColumns.join(', ')}`);
-        }
-      }
-    }
-  }
-
-  // 8. Execute with timeout
-  let result;
-  try {
-    result = await Promise.race([executeFn(input, options, tools), timeoutPromise]);
-  } catch (err) {
-    await db
-      .from('submodule_runs')
-      .update({
-        status: 'failed',
-        error: err.message,
-        logs: tools._logs,
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', submodule_run_id);
-    notifyFailure({ submoduleId: submodule_id, submoduleRunId: submodule_run_id, runId: run.run_id, stepIndex: step_index, error: err.message });
-    throw err;
-  } finally {
-    clearTimeout(timeoutTimer);
-  }
-
-  // 9. Store downloadable fields separately
-  const downloadFieldDefs = manifest.output_schema?.downloadable_fields || [];
-  if (downloadFieldDefs.length > 0 && result?.results) {
-    const downloadFieldNames = downloadFieldDefs.map((d) => d.field);
-    const itemKeyField = manifest.item_key || 'url';
-    const itemDataRows = [];
-
-    for (const entityResult of result.results) {
-      for (const item of (entityResult.items || [])) {
-        const key = String(item[itemKeyField] ?? '');
-        if (!key) continue;
-        for (const field of downloadFieldNames) {
-          const content = item[field];
-          if (content != null) {
-            const serialized = (typeof content === 'object')
-              ? JSON.stringify(content)
-              : String(content);
-            if (serialized.length > 0) {
-              itemDataRows.push({
-                submodule_run_id: submodule_run_id,
-                item_key: key,
-                field_name: field,
-                content: serialized,
-              });
-            }
-          }
-        }
-      }
-    }
-
-    if (itemDataRows.length > 0) {
-      const BATCH_SIZE = 500;
-      let storedCount = 0;
-      let insertFailed = false;
-      for (let i = 0; i < itemDataRows.length; i += BATCH_SIZE) {
-        const batch = itemDataRows.slice(i, i + BATCH_SIZE);
-        const { error: itemErr } = await db
-          .from('submodule_run_item_data')
-          .insert(batch);
-        if (itemErr) {
-          console.warn(`[worker] Failed to store item data batch ${i}/${itemDataRows.length} for ${submodule_id}: ${itemErr.message}`);
-          insertFailed = true;
-        } else {
-          storedCount += batch.length;
-        }
-      }
-      console.log(`[worker] Stored ${storedCount}/${itemDataRows.length} downloadable field entries for ${submodule_id}`);
-    }
-
-    const totalDownloadableSize = itemDataRows.reduce((sum, row) => sum + row.content.length, 0);
-    const STRIP_THRESHOLD = 1 * 1024 * 1024;
-
-    if (insertFailed) {
-      console.warn(`[worker] Keeping downloadable fields inline for ${submodule_id} because item_data insert failed`);
-    } else if (totalDownloadableSize > STRIP_THRESHOLD) {
-      console.log(`[worker] Stripping ${downloadFieldNames.join(', ')} from output (${(totalDownloadableSize / 1024 / 1024).toFixed(1)}MB exceeds 1MB threshold)`);
-      for (const entityResult of result.results) {
-        for (const item of (entityResult.items || [])) {
-          for (const field of downloadFieldNames) {
-            delete item[field];
-          }
-        }
-      }
-    } else {
-      console.log(`[worker] Keeping downloadable fields in output (${(totalDownloadableSize / 1024).toFixed(0)}KB under 1MB threshold)`);
-    }
-  }
-
-  // 10. Check if run was aborted while we were executing
-  const { data: currentLegacyRun } = await db
-    .from('submodule_runs')
-    .select('status')
-    .eq('id', submodule_run_id)
-    .single();
-  if (currentLegacyRun?.status === 'failed') {
-    console.log(`[worker] ${submodule_id} was aborted during execution — discarding results`);
-    return;
-  }
-
-  // 11. Write result to main submodule_runs row
-  //     Sanitize: PostgreSQL JSONB rejects \u0000 (null bytes) in text.
-  const sanitizedResult = JSON.parse(JSON.stringify(result).replace(/\\u0000/g, ''));
-  const writePayload = {
-    status: 'completed',
-    output_data: sanitizedResult,
-    output_render_schema: manifest.output_schema || null,
-    logs: tools._logs,
-    progress: { current: 1, total: 1, message: 'Done' },
-    completed_at: new Date().toISOString(),
-  };
-
-  const { error: writeErr } = await db
-    .from('submodule_runs')
-    .update(writePayload)
-    .eq('id', submodule_run_id);
-
-  if (writeErr) {
-    console.error(`[worker] Output write failed for ${submodule_id}: ${writeErr.message}`);
-    await db
-      .from('submodule_runs')
-      .update({ status: 'failed', error: `Output write failed: ${writeErr.message}`, logs: tools._logs, completed_at: new Date().toISOString() })
-      .eq('id', submodule_run_id);
-    throw writeErr;
-  }
-
-  console.log(`[worker] Completed: ${submodule_id} (run ${submodule_run_id})`);
-  notifyCompletion({ submoduleId: submodule_id, submoduleRunId: submodule_run_id, runId: run.run_id, stepIndex: step_index, result });
-  return result;
-}
-
-// Create the worker — dispatches to per-entity or legacy handler based on job data
+// Create the worker — per-entity only (legacy flat-pool removed)
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '2', 10);
 
 const worker = new Worker(
   'pipeline-stages-v2',
   async (job) => {
-    if (job.data.entity_submodule_run_id) {
-      return handleEntityJob(job);
-    }
-    return handleLegacyJob(job);
+    return handleEntityJob(job);
   },
   {
     connection: redis,
