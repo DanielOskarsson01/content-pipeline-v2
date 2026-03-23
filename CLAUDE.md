@@ -381,3 +381,24 @@ Entry types: decision | progress | blocker | idea
 - No SSH access to Hetzner for direct PM2 log inspection
 
 **Updated by:** session-closer agent
+
+### Session: 2026-03-23 16:00 - Scraper fixes, boilerplate detection, deploy verification
+**Accomplished:**
+- Fixed ROOT CAUSE of text_content data loss: FK constraint on `submodule_run_item_data` silently rejected per-entity inserts. Added `insertFailed` guard to prevent stripping when inserts fail. Created migration SQL to drop FK.
+- Added Abort button for running/pending submodule runs (server endpoint + worker abort-awareness + UI)
+- Implemented partial results on timeout via `tools._partialItems` — completed items survive entity timeouts
+- Increased expensive entity timeout from 10 to 30 minutes
+- Fixed zip filename collisions: URLs with same last path segment overwrote each other (525 items → 295 files). Now uses full URL path + dedup counter.
+- Added `/api/version` endpoint — CI writes `build-info.json`, server reads it. Shows deployed commit for both repos.
+- Investigated Play'n GO download gap: queried production API, found 525/525 success but 198 pages had identical footer text. Boilerplate detection was the correct trigger for browser re-scrape.
+
+**Decisions:**
+- FK constraint permanently removed — polymorphic column references two parent tables
+- Zip filenames use full URL path joined with underscores + counter for duplicates
+- Version endpoint reads build-info.json from disk (rsync excludes .git)
+
+**Blockers/Questions:**
+- SSH to Hetzner broken — password auth denied, can only verify via API
+- og:description truncation detection added to page-scraper (needs flow test)
+
+**Updated by:** session-closer agent
