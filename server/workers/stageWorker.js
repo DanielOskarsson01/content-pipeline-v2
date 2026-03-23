@@ -237,6 +237,16 @@ async function loadExecuteFunction(manifest) {
 }
 
 /**
+ * Log an execution metric. Non-blocking — failures are silently ignored.
+ */
+function logMetric({ run_id, submodule_id, entity_name, status, duration_ms, step_index, cost, error }) {
+  db.from('pipeline_metrics')
+    .insert({ run_id, submodule_id, entity_name, status, duration_ms, step_index, cost, error })
+    .then(() => {})
+    .catch(() => {}); // Table may not exist yet — fail silently
+}
+
+/**
  * Per-entity job handler.
  * Processes a single entity through a submodule's execute function.
  * Reads from / writes to entity_submodule_runs table.
@@ -275,7 +285,8 @@ async function handleEntityJob(job) {
     throw new Error(`Submodule not found in registry: ${submodule_id}`);
   }
 
-  // 3. Mark as running
+  // 3. Mark as running + start timer
+  const startTime = Date.now();
   await db
     .from('entity_submodule_runs')
     .update({ status: 'running', started_at: new Date().toISOString() })
@@ -447,6 +458,10 @@ async function handleEntityJob(job) {
       .eq('step_index', step_index)
       .eq('entity_name', entity_name);
 
+    const duration_ms = Date.now() - startTime;
+    const metricStatus = isTimeout ? 'timeout' : (partialItems.length > 0 ? 'partial' : 'failed');
+    logMetric({ run_id: entityRun.run_id, submodule_id, entity_name, status: metricStatus, duration_ms, step_index, cost: manifest.cost || 'medium', error: err.message });
+
     if (partialItems.length > 0) return; // Don't throw — partial success
     throw err;
   } finally {
@@ -558,7 +573,9 @@ async function handleEntityJob(job) {
     .eq('step_index', step_index)
     .eq('entity_name', entity_name);
 
-  console.log(`[worker:entity] Completed: ${submodule_id} for "${entity_name}"`);
+  const duration_ms = Date.now() - startTime;
+  console.log(`[worker:entity] Completed: ${submodule_id} for "${entity_name}" (${(duration_ms / 1000).toFixed(1)}s)`);
+  logMetric({ run_id: entityRun.run_id, submodule_id, entity_name, status: 'completed', duration_ms, step_index, cost: manifest.cost || 'medium' });
   return result;
 }
 

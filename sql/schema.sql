@@ -341,3 +341,24 @@ BEGIN
   END IF;
 END;
 $$ LANGUAGE plpgsql;
+
+-- ============================================================
+-- Pipeline Metrics — lightweight execution metrics for observability
+-- One row per entity job completion (success or failure).
+-- ============================================================
+CREATE TABLE IF NOT EXISTS pipeline_metrics (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id UUID NOT NULL REFERENCES pipeline_runs(id),
+  submodule_id TEXT NOT NULL,
+  entity_name TEXT NOT NULL,
+  status TEXT NOT NULL,              -- completed | failed | timeout
+  duration_ms INTEGER NOT NULL,      -- Wall-clock execution time
+  step_index INTEGER NOT NULL,
+  cost TEXT,                         -- cheap | medium | expensive
+  error TEXT,                        -- Error message if failed
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_metrics_run_id ON pipeline_metrics(run_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_metrics_submodule_id ON pipeline_metrics(submodule_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_metrics_created_at ON pipeline_metrics(created_at);

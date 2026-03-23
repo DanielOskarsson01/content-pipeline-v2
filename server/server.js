@@ -12,6 +12,7 @@ import stepContextRouter from './routes/stepContext.js';
 import { executeRouter, submoduleRunRouter, latestRunsRouter } from './routes/submoduleRuns.js';
 import referenceDocsRouter from './routes/referenceDocs.js';
 import { loadModules } from './services/moduleLoader.js';
+import db from './services/db.js';
 
 // Workers run as separate PM2 processes — see ecosystem.config.cjs
 // DO NOT import workers here. The API server should never spawn Playwright or process jobs.
@@ -50,6 +51,45 @@ app.use('/api/runs/:runId/steps/:stepIndex/context', stepContextRouter);
 app.use('/api/runs/:runId/steps/:stepIndex/submodule-runs', latestRunsRouter);
 app.use('/api/submodule-runs', submoduleRunRouter);
 app.use('/api/projects/:projectId/reference-docs', referenceDocsRouter);
+
+// Metrics endpoint — execution stats per submodule
+app.get('/api/metrics/summary', async (_req, res, next) => {
+  try {
+    const { data, error } = await db
+      .from('pipeline_metrics')
+      .select('submodule_id, status, duration_ms, cost, created_at')
+      .order('created_at', { ascending: false })
+      .limit(1000);
+
+    if (error) return res.json({ error: error.message, metrics: [] });
+
+    // Group by submodule
+    const bySubmodule = {};
+    for (const row of (data || [])) {
+      if (!bySubmodule[row.submodule_id]) {
+        bySubmodule[row.submodule_id] = { total: 0, completed: 0, failed: 0, timeout: 0, avg_duration_ms: 0, durations: [] };
+      }
+      const s = bySubmodule[row.submodule_id];
+      s.total++;
+      if (row.status === 'completed') s.completed++;
+      else if (row.status === 'failed') s.failed++;
+      else if (row.status === 'timeout') s.timeout++;
+      s.durations.push(row.duration_ms);
+    }
+
+    const metrics = Object.entries(bySubmodule).map(([id, s]) => ({
+      submodule_id: id,
+      total: s.total,
+      completed: s.completed,
+      failed: s.failed,
+      timeout: s.timeout,
+      avg_duration_ms: Math.round(s.durations.reduce((a, b) => a + b, 0) / s.durations.length),
+      p95_duration_ms: Math.round(s.durations.sort((a, b) => a - b)[Math.floor(s.durations.length * 0.95)] || 0),
+    }));
+
+    res.json({ metrics });
+  } catch (err) { next(err); }
+});
 
 // Load submodule manifests from MODULES_PATH
 loadModules();
