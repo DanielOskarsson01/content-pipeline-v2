@@ -30,6 +30,18 @@ app.use(express.static(clientBuildPath));
 
 // Routes
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+
+// Version endpoint — confirms what's actually deployed
+// Reads build-info.json written by CI/CD before rsync
+function readBuildInfo(filePath) {
+  try { return JSON.parse(fs.readFileSync(filePath, 'utf-8')); }
+  catch { return { commit: 'unknown', message: '', time: '' }; }
+}
+const modulesDir = path.resolve(__dirname, '..', '..', 'content-pipeline-modules-v2');
+app.get('/api/version', (_req, res) => res.json({
+  skeleton: readBuildInfo(path.join(__dirname, '..', 'build-info.json')),
+  modules: readBuildInfo(path.join(modulesDir, 'build-info.json')),
+}));
 app.use('/api/projects', projectsRouter);
 app.use('/api/runs', runsRouter);
 app.use('/api/submodules', submodulesRouter);

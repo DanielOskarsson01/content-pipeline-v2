@@ -24,6 +24,10 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           echo "${{ secrets.KNOWN_HOSTS }}" > ~/.ssh/known_hosts
 
+      - name: Write build info
+        run: |
+          echo "{\"commit\":\"$(git rev-parse --short HEAD)\",\"message\":\"$(git log -1 --format=%s)\",\"time\":\"$(git log -1 --format=%ci)\"}" > build-info.json
+
       - name: Sync app to server
         run: |
           rsync -azP --delete \
