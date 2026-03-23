@@ -149,7 +149,13 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
     });
 
     if (waitForSelector) {
-      await page.waitForSelector(waitForSelector, { timeout: timeout / 2 });
+      try {
+        await page.waitForSelector(waitForSelector, { timeout: timeout / 2 });
+      } catch (_) {
+        // Non-fatal: selector didn't appear before timeout.
+        // Continue with whatever content is on the page.
+        console.warn(`[browserPool] waitForSelector timed out for "${waitForSelector}" on ${url} — continuing`);
+      }
     }
 
     // Small delay for final JS execution
