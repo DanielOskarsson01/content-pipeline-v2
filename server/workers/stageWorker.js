@@ -266,6 +266,12 @@ async function handleEntityJob(job) {
     throw new Error(`entity_submodule_runs row not found: ${entity_submodule_run_id}`);
   }
 
+  // 1b. Check if run was aborted before we start
+  if (entityRun.status === 'failed' && entityRun.error === 'Aborted by user') {
+    console.log(`[worker:entity] Skipping ${submodule_id}/${entity_name} — aborted by user`);
+    return;
+  }
+
   // 2. Look up manifest
   const manifest = getSubmoduleById(submodule_id);
   if (!manifest) {
@@ -484,7 +490,18 @@ async function handleEntityJob(job) {
     }
   }
 
-  // 10. Write result to entity_submodule_runs
+  // 10. Check if run was aborted while we were executing
+  const { data: currentRun } = await db
+    .from('entity_submodule_runs')
+    .select('status')
+    .eq('id', entity_submodule_run_id)
+    .single();
+  if (currentRun?.status === 'failed') {
+    console.log(`[worker:entity] ${submodule_id}/${entity_name} was aborted during execution — discarding results`);
+    return;
+  }
+
+  // 11. Write result to entity_submodule_runs
   //     Sanitize: PostgreSQL JSONB rejects \u0000 (null bytes) in text.
   //     Scraped HTML/content may contain them. Strip before writing.
   const sanitizedResult = JSON.parse(JSON.stringify(result).replace(/\\u0000/g, ''));
@@ -722,7 +739,18 @@ async function handleLegacyJob(job) {
     }
   }
 
-  // 10. Write result to main submodule_runs row
+  // 10. Check if run was aborted while we were executing
+  const { data: currentLegacyRun } = await db
+    .from('submodule_runs')
+    .select('status')
+    .eq('id', submodule_run_id)
+    .single();
+  if (currentLegacyRun?.status === 'failed') {
+    console.log(`[worker] ${submodule_id} was aborted during execution — discarding results`);
+    return;
+  }
+
+  // 11. Write result to main submodule_runs row
   //     Sanitize: PostgreSQL JSONB rejects \u0000 (null bytes) in text.
   const sanitizedResult = JSON.parse(JSON.stringify(result).replace(/\\u0000/g, ''));
   const writePayload = {

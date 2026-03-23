@@ -710,6 +710,55 @@ submoduleRunRouter.get('/:id/all-items', async (req, res) => {
 });
 
 /**
+ * POST /api/submodule-runs/:id/abort
+ * Abort a running or pending submodule run.
+ * Marks the batch run + all pending/running entity runs as 'failed'.
+ * Running worker jobs will check for abort status before writing results.
+ */
+submoduleRunRouter.post('/:id/abort', async (req, res) => {
+  try {
+    const { data: subRun, error: getErr } = await db
+      .from('submodule_runs')
+      .select('id, status, batch_id')
+      .eq('id', req.params.id)
+      .single();
+
+    if (getErr?.code === 'PGRST116' || !subRun) {
+      return res.status(404).json({ error: 'Submodule run not found' });
+    }
+    if (getErr) throw getErr;
+
+    if (subRun.status !== 'pending' && subRun.status !== 'running') {
+      return res.status(400).json({ error: `Cannot abort run with status "${subRun.status}"` });
+    }
+
+    const now = new Date().toISOString();
+
+    // Mark the batch run as failed
+    await db.from('submodule_runs')
+      .update({ status: 'failed', error: 'Aborted by user', completed_at: now })
+      .eq('id', subRun.id);
+
+    // Mark all pending/running entity runs as failed
+    let abortedCount = 0;
+    if (subRun.batch_id) {
+      const { data: aborted } = await db.from('entity_submodule_runs')
+        .update({ status: 'failed', error: 'Aborted by user', completed_at: now })
+        .in('status', ['pending', 'running'])
+        .eq('batch_id', subRun.batch_id)
+        .select('id');
+      abortedCount = aborted?.length || 0;
+    }
+
+    console.log(`[submodule-runs] Aborted run ${subRun.id}, ${abortedCount} entity runs cancelled`);
+    res.json({ aborted: true, entity_runs_cancelled: abortedCount });
+  } catch (err) {
+    console.error('[submodule-runs] POST abort error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * POST /api/submodule-runs/:id/approve
  * Approve (or re-approve) a submodule run.
  * Body: { approved_item_keys: [...] }

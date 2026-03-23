@@ -118,6 +118,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ entity_approvals: entityApprovals }),
     }),
+  abortSubmoduleRun: (submoduleRunId: string) =>
+    apiFetch<{ aborted: boolean; entity_runs_cancelled: number }>(`/api/submodule-runs/${submoduleRunId}/abort`, {
+      method: 'POST',
+    }),
   getEntityRunDetail: (batchRunId: string, entityRunId: string) =>
     apiFetch<EntityRunDetail>(`/api/submodule-runs/${batchRunId}/entities/${entityRunId}?full=true`),
   getBatchAllItems: (batchRunId: string, full = false) =>

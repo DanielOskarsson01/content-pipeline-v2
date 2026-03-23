@@ -507,6 +507,18 @@ export function SubmodulePanel({
     handleRunTask();
   };
 
+  const handleAbort = async () => {
+    if (!activeSubmoduleRunId) return;
+    try {
+      await api.abortSubmoduleRun(activeSubmoduleRunId);
+      showToast('Run aborted', 'info');
+      queryClient.invalidateQueries({ queryKey: ['submoduleRun', activeSubmoduleRunId] });
+      queryClient.invalidateQueries({ queryKey: ['latestSubmoduleRuns', runId, stepIndex] });
+    } catch (err) {
+      showToast('Failed to abort', 'error');
+    }
+  };
+
   // Results action CTAs
   const handleChangeInput = () => setPanelAccordion('input');
   const handleChangeOptions = () => setPanelAccordion('options');
@@ -798,6 +810,7 @@ export function SubmodulePanel({
                 onChangeInput={handleChangeInput}
                 onChangeOptions={handleChangeOptions}
                 onTryAgain={handleTryAgain}
+                onAbort={handleAbort}
               />
             ) : (
               <ResultsContent
@@ -813,6 +826,7 @@ export function SubmodulePanel({
                 onChangeInput={handleChangeInput}
                 onChangeOptions={handleChangeOptions}
                 onTryAgain={handleTryAgain}
+                onAbort={handleAbort}
                 submoduleId={submodule.id}
                 submoduleRunStatus={submoduleRun?.status ?? null}
                 onRequestFullData={handleRequestFullData}
@@ -885,6 +899,7 @@ function ResultsContent({
   onChangeInput,
   onChangeOptions,
   onTryAgain,
+  onAbort,
   submoduleId,
   submoduleRunStatus,
   onRequestFullData,
@@ -901,6 +916,7 @@ function ResultsContent({
   onChangeInput: () => void;
   onChangeOptions: () => void;
   onTryAgain: () => void;
+  onAbort?: () => void;
   submoduleId: string;
   submoduleRunStatus: string | null;
   onRequestFullData?: () => void;
@@ -916,6 +932,9 @@ function ResultsContent({
       <div className="flex items-center gap-3 py-4">
         <Spinner />
         <p className="text-sm text-gray-500">Waiting to start...</p>
+        {onAbort && (
+          <button onClick={onAbort} className="ml-auto text-xs text-red-500 hover:underline">Abort</button>
+        )}
       </div>
     );
   }
@@ -932,6 +951,9 @@ function ResultsContent({
           <p className="text-sm text-gray-700">
             {progress?.message || 'Processing...'}
           </p>
+          {onAbort && (
+            <button onClick={onAbort} className="ml-auto text-xs text-red-500 hover:underline">Abort</button>
+          )}
         </div>
         <div className="w-full bg-gray-200 rounded-full h-2">
           <div
@@ -1027,6 +1049,7 @@ function PerEntityResultsContent({
   onChangeInput,
   onChangeOptions,
   onTryAgain,
+  onAbort,
 }: {
   batchRun: SubmoduleRunBatch;
   renderSchema: RenderSchema | null;
@@ -1038,6 +1061,7 @@ function PerEntityResultsContent({
   onChangeInput: () => void;
   onChangeOptions: () => void;
   onTryAgain: () => void;
+  onAbort?: () => void;
 }) {
   const [expandedEntity, setExpandedEntity] = useState<string | null>(null);
 
@@ -1052,6 +1076,9 @@ function PerEntityResultsContent({
       <div className="flex items-center gap-3 py-4">
         <Spinner />
         <p className="text-sm text-gray-500">Waiting to start...</p>
+        {onAbort && (
+          <button onClick={onAbort} className="ml-auto text-xs text-red-500 hover:underline">Abort</button>
+        )}
       </div>
     );
   }
@@ -1100,16 +1127,22 @@ function PerEntityResultsContent({
         ))}
       </div>
 
-      <ResultsActionCTAs
-        onChangeInput={onChangeInput}
-        onChangeOptions={onChangeOptions}
-        onTryAgain={onTryAgain}
-        showDownload
-        renderSchema={renderSchema}
-        submoduleId={batchRun.submodule_id}
-        itemKey={itemKey}
-        batchRunId={batchRun.id}
-      />
+      {(batchRun.status === 'running' || batchRun.status === 'pending') && onAbort ? (
+        <div className="flex items-center gap-2 flex-shrink-0 pt-2 border-t border-gray-100">
+          <button onClick={onAbort} className="text-xs text-red-500 hover:underline ml-auto">Abort</button>
+        </div>
+      ) : (
+        <ResultsActionCTAs
+          onChangeInput={onChangeInput}
+          onChangeOptions={onChangeOptions}
+          onTryAgain={onTryAgain}
+          showDownload
+          renderSchema={renderSchema}
+          submoduleId={batchRun.submodule_id}
+          itemKey={itemKey}
+          batchRunId={batchRun.id}
+        />
+      )}
     </div>
   );
 }
