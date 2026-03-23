@@ -557,6 +557,82 @@ router.post('/:runId/steps/:stepIndex/reopen', async (req, res, next) => {
 });
 
 /**
+ * POST /api/runs/:id/complete
+ * Explicitly mark a run as completed. The user decides when the run is "done"
+ * rather than relying on automatic completion after the last step.
+ */
+router.post('/:id/complete', async (req, res, next) => {
+  try {
+    const { data: run, error: runErr } = await db
+      .from('pipeline_runs')
+      .select('id, status')
+      .eq('id', req.params.id)
+      .single();
+
+    if (runErr) throw runErr;
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    if (run.status === 'completed') return res.json({ message: 'Run is already completed' });
+    if (run.status !== 'running') {
+      return res.status(400).json({ error: `Cannot complete run with status: ${run.status}` });
+    }
+
+    await db
+      .from('pipeline_runs')
+      .update({ status: 'completed', completed_at: new Date().toISOString() })
+      .eq('id', req.params.id);
+
+    await db
+      .from('decision_log')
+      .insert({
+        run_id: req.params.id,
+        step_index: 0,
+        decision: 'run_completed',
+        context: { completed_by: 'user' },
+      });
+
+    res.json({ status: 'completed' });
+  } catch (err) { next(err); }
+});
+
+/**
+ * POST /api/runs/:id/abandon
+ * Mark a run as abandoned — used for runs that were started but never finished.
+ * Abandoned runs are excluded from active run lists but preserved for audit.
+ */
+router.post('/:id/abandon', async (req, res, next) => {
+  try {
+    const { data: run, error: runErr } = await db
+      .from('pipeline_runs')
+      .select('id, status')
+      .eq('id', req.params.id)
+      .single();
+
+    if (runErr) throw runErr;
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    if (run.status === 'abandoned') return res.json({ message: 'Run is already abandoned' });
+    if (run.status === 'completed') {
+      return res.status(400).json({ error: 'Cannot abandon a completed run' });
+    }
+
+    await db
+      .from('pipeline_runs')
+      .update({ status: 'abandoned', completed_at: new Date().toISOString() })
+      .eq('id', req.params.id);
+
+    await db
+      .from('decision_log')
+      .insert({
+        run_id: req.params.id,
+        step_index: 0,
+        decision: 'run_abandoned',
+        context: { reason: req.body?.reason || 'User abandoned run' },
+      });
+
+    res.json({ status: 'abandoned' });
+  } catch (err) { next(err); }
+});
+
+/**
  * GET /api/runs/:runId/decisions
  * Returns decision log entries for a run, newest first.
  */

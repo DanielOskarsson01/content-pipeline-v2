@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 
 -- Pipeline Runs — one execution of a project through the 11-step sequence
+-- Status: running → completed | abandoned
 CREATE TABLE IF NOT EXISTS pipeline_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   project_id UUID NOT NULL REFERENCES projects(id),
