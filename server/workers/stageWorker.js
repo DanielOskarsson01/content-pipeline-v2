@@ -27,7 +27,7 @@ const COST_TIMEOUTS = {
 const ENTITY_COST_TIMEOUTS = {
   cheap: 2 * 60 * 1000,
   medium: 5 * 60 * 1000,
-  expensive: 10 * 60 * 1000,
+  expensive: 30 * 60 * 1000,
 };
 
 /**
@@ -222,7 +222,7 @@ function buildTools(runId, submoduleId, progressTable = 'submodule_runs') {
     },
   };
 
-  return { logger, http, browser, progress, ai, _logs: logs };
+  return { logger, http, browser, progress, ai, _logs: logs, _partialItems: [] };
 }
 
 /**
@@ -392,25 +392,50 @@ async function handleEntityJob(job) {
       result = rawResult;
     }
   } catch (err) {
-    // Build synthetic error items from the input so the user sees what failed
-    // instead of a blank "No items returned" message.
     const inputItems = input?.entity?.items || [];
     const itemKeyField = manifest.item_key || 'url';
-    const syntheticItems = inputItems.map(item => ({
-      [itemKeyField]: item[itemKeyField] || 'unknown',
-      status: 'error',
-      error: `Execution failed: ${err.message}`,
-      entity_name: entity_name,
-    }));
+    const isTimeout = err.message?.includes('timed out');
+
+    // If submodule pushed partial results via tools._partialItems, use those.
+    // This saves successfully scraped pages even when the overall run times out.
+    const partialItems = tools._partialItems || [];
+
+    let outputItems;
+    if (partialItems.length > 0) {
+      // Use partial results + mark remaining items as timed_out
+      const completedKeys = new Set(partialItems.map(i => String(i[itemKeyField] ?? '')));
+      const remainingItems = inputItems
+        .filter(item => !completedKeys.has(String(item[itemKeyField] ?? '')))
+        .map(item => ({
+          [itemKeyField]: item[itemKeyField] || 'unknown',
+          status: isTimeout ? 'timed_out' : 'error',
+          error: err.message,
+          entity_name: entity_name,
+        }));
+      outputItems = [...partialItems, ...remainingItems];
+      console.log(`[worker:entity] ${submodule_id}/${entity_name}: saving ${partialItems.length} partial results + ${remainingItems.length} remaining as ${isTimeout ? 'timed_out' : 'error'}`);
+    } else {
+      // No partial results — build synthetic error items
+      outputItems = inputItems.map(item => ({
+        [itemKeyField]: item[itemKeyField] || 'unknown',
+        status: 'error',
+        error: `Execution failed: ${err.message}`,
+        entity_name: entity_name,
+      }));
+    }
+
+    // Use 'completed' status if we have partial results (so they can be approved)
+    const runStatus = partialItems.length > 0 ? 'completed' : 'failed';
 
     await db
       .from('entity_submodule_runs')
       .update({
-        status: 'failed',
+        status: runStatus,
         error: err.message,
-        output_data: syntheticItems.length > 0
-          ? { items: syntheticItems, meta: { error: err.message } }
+        output_data: outputItems.length > 0
+          ? { items: outputItems, meta: { error: err.message, partial: partialItems.length > 0, completed_count: partialItems.length } }
           : null,
+        output_render_schema: runStatus === 'completed' ? (manifest.output_schema || null) : undefined,
         logs: tools._logs,
         completed_at: new Date().toISOString(),
       })
@@ -419,11 +444,12 @@ async function handleEntityJob(job) {
     // Update entity_stage_pool status
     await db
       .from('entity_stage_pool')
-      .update({ status: 'failed', error: err.message, updated_at: new Date().toISOString() })
+      .update({ status: runStatus, error: err.message, updated_at: new Date().toISOString() })
       .eq('run_id', entityRun.run_id)
       .eq('step_index', step_index)
       .eq('entity_name', entity_name);
 
+    if (partialItems.length > 0) return; // Don't throw — partial success
     throw err;
   } finally {
     clearTimeout(timeoutTimer);
