@@ -16,16 +16,10 @@ import { pathToFileURL } from 'url';
 import db from '../services/db.js';
 import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
+import { COST_CONFIG } from '../config/timeouts.js';
 
 // Load submodule manifests (worker is a separate process from server.js)
 loadModules();
-
-// Per-entity timeouts — single entity per job
-const COST_TIMEOUTS = {
-  cheap: 2 * 60 * 1000,
-  medium: 5 * 60 * 1000,
-  expensive: 30 * 60 * 1000,
-};
 
 /**
  * Model name → API model ID mapping.
@@ -289,7 +283,8 @@ async function handleEntityJob(job) {
 
   // 6. Timeout
   const cost = manifest.cost || 'medium';
-  const timeout = COST_TIMEOUTS[cost] || COST_TIMEOUTS.medium;
+  const costConfig = COST_CONFIG[cost] || COST_CONFIG.medium;
+  const timeout = costConfig.timeout;
   let timeoutTimer;
   const timeoutPromise = new Promise((_, reject) => {
     timeoutTimer = setTimeout(() => reject(new Error(`Execution timed out after ${timeout / 1000}s`)), timeout);

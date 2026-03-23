@@ -1,5 +1,6 @@
 import { Queue, FlowProducer } from 'bullmq';
 import IORedis from 'ioredis';
+import { COST_CONFIG } from '../config/timeouts.js';
 
 const redisConnection = {
   host: process.env.REDIS_HOST || '127.0.0.1',
@@ -23,13 +24,6 @@ export const batchQueue = new Queue('batch-finalization', { connection: redis })
 
 // FlowProducer for creating parent/child job flows
 export const flowProducer = new FlowProducer({ connection: redis });
-
-// Cost-based job configuration — per-entity timeouts (single entity per job)
-const COST_CONFIG = {
-  cheap:     { timeout: 2 * 60 * 1000,  attempts: 3, priority: 1  },
-  medium:    { timeout: 5 * 60 * 1000,  attempts: 2, priority: 5  },
-  expensive: { timeout: 10 * 60 * 1000, attempts: 1, priority: 10 },
-};
 
 /**
  * Enqueue a per-entity batch via FlowProducer.
