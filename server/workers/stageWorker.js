@@ -257,7 +257,13 @@ async function handleEntityJob(job) {
     throw new Error(`entity_submodule_runs row not found: ${entity_submodule_run_id}`);
   }
 
-  // 1b. Check if run was aborted before we start
+  // 1b. Idempotency guard — skip if already completed (retry after partial write)
+  if (entityRun.status === 'completed' || entityRun.status === 'approved') {
+    console.log(`[worker:entity] Skipping ${submodule_id}/${entity_name} — already ${entityRun.status}`);
+    return;
+  }
+
+  // 1c. Check if run was aborted before we start
   if (entityRun.status === 'failed' && entityRun.error === 'Aborted by user') {
     console.log(`[worker:entity] Skipping ${submodule_id}/${entity_name} — aborted by user`);
     return;
@@ -568,25 +574,39 @@ const worker = new Worker(
     connection: redis,
     concurrency: WORKER_CONCURRENCY,
     stalledInterval: 60000,
+    maxStalledCount: 2,        // Mark job as failed after 2 stall detections
+    lockDuration: 120000,      // 2 min lock — prevents premature stall detection for slow jobs
   }
 );
 
 worker.on('failed', (job, err) => {
-  console.error(`[worker] Job ${job?.id} failed: ${err.message}`);
+  console.error(`[worker] Job ${job?.id} failed (attempt ${job?.attemptsMade}/${job?.opts?.attempts}): ${err.message}`);
+});
+
+worker.on('stalled', (jobId) => {
+  console.warn(`[worker] Job ${jobId} stalled — worker may have crashed or lost connection`);
+});
+
+worker.on('error', (err) => {
+  console.error(`[worker] Worker error: ${err.message}`);
 });
 
 worker.on('ready', () => {
-  console.log('[worker] Pipeline stage worker ready');
+  console.log(`[worker] Pipeline stage worker ready (concurrency: ${WORKER_CONCURRENCY})`);
 });
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
+// Graceful shutdown — close worker and browser on SIGTERM/SIGINT
+async function shutdown() {
+  console.log('[worker] Shutting down...');
   try {
     const { closeBrowser } = await import('../services/browserPool.js');
     await closeBrowser();
   } catch (_) { /* browser may not have been loaded */ }
   await worker.close();
   process.exit(0);
-});
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 export default worker;

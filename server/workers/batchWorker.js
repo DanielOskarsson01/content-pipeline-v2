@@ -105,6 +105,8 @@ const batchWorker = new Worker(
   {
     connection: redis,
     concurrency: 5,
+    stalledInterval: 30000,
+    maxStalledCount: 2,
   }
 );
 
@@ -112,8 +114,19 @@ batchWorker.on('failed', (job, err) => {
   console.error(`[batch] Job ${job?.id} failed: ${err.message}`);
 });
 
+batchWorker.on('stalled', (jobId) => {
+  console.warn(`[batch] Job ${jobId} stalled`);
+});
+
+batchWorker.on('error', (err) => {
+  console.error(`[batch] Worker error: ${err.message}`);
+});
+
 batchWorker.on('ready', () => {
   console.log('[batch] Batch finalization worker ready');
 });
+
+process.on('SIGTERM', async () => { await batchWorker.close(); process.exit(0); });
+process.on('SIGINT', async () => { await batchWorker.close(); process.exit(0); });
 
 export default batchWorker;
