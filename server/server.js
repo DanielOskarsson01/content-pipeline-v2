@@ -22,7 +22,7 @@ const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 // Static files — serve React build in production
 const clientBuildPath = path.join(__dirname, '..', 'client', 'dist');

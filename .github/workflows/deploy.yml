@@ -40,6 +40,11 @@ jobs:
             -e "ssh -i ~/.ssh/deploy_key" \
             ./ root@188.245.110.34:/opt/content-pipeline-v2/
 
+      - name: Configure nginx body size limit
+        run: |
+          ssh -i ~/.ssh/deploy_key root@188.245.110.34 \
+            "grep -q client_max_body_size /etc/nginx/sites-available/default || sed -i '/server_name/a\\    client_max_body_size 50m;' /etc/nginx/sites-available/default && nginx -t && systemctl reload nginx"
+
       - name: Install deps and restart
         run: |
           ssh -i ~/.ssh/deploy_key root@188.245.110.34 \
