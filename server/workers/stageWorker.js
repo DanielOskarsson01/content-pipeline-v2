@@ -454,6 +454,7 @@ async function handleEntityJob(job) {
     if (itemDataRows.length > 0) {
       const BATCH_SIZE = 500;
       let storedCount = 0;
+      let insertFailed = false;
       for (let i = 0; i < itemDataRows.length; i += BATCH_SIZE) {
         const batch = itemDataRows.slice(i, i + BATCH_SIZE);
         const { error: itemErr } = await db
@@ -461,20 +462,24 @@ async function handleEntityJob(job) {
           .insert(batch);
         if (itemErr) {
           console.warn(`[worker:entity] Failed to store item data batch for ${submodule_id}/${entity_name}: ${itemErr.message}`);
+          insertFailed = true;
         } else {
           storedCount += batch.length;
         }
       }
-      console.log(`[worker:entity] Stored ${storedCount} downloadable field entries for ${submodule_id}/${entity_name}`);
-    }
+      console.log(`[worker:entity] Stored ${storedCount}/${itemDataRows.length} downloadable field entries for ${submodule_id}/${entity_name}`);
 
-    // Strip large downloadable fields from result
-    const totalSize = itemDataRows.reduce((sum, row) => sum + row.content.length, 0);
-    if (totalSize > 1 * 1024 * 1024) {
-      for (const item of result.items) {
-        for (const field of downloadFieldNames) {
-          delete item[field];
+      // Strip large downloadable fields from result ONLY if all inserts succeeded.
+      // If inserts failed (e.g. FK constraint), keep data inline so it's not lost.
+      const totalSize = itemDataRows.reduce((sum, row) => sum + row.content.length, 0);
+      if (!insertFailed && totalSize > 1 * 1024 * 1024) {
+        for (const item of result.items) {
+          for (const field of downloadFieldNames) {
+            delete item[field];
+          }
         }
+      } else if (insertFailed) {
+        console.warn(`[worker:entity] Keeping downloadable fields inline for ${submodule_id}/${entity_name} because item_data insert failed`);
       }
     }
   }
@@ -682,6 +687,7 @@ async function handleLegacyJob(job) {
     if (itemDataRows.length > 0) {
       const BATCH_SIZE = 500;
       let storedCount = 0;
+      let insertFailed = false;
       for (let i = 0; i < itemDataRows.length; i += BATCH_SIZE) {
         const batch = itemDataRows.slice(i, i + BATCH_SIZE);
         const { error: itemErr } = await db
@@ -689,6 +695,7 @@ async function handleLegacyJob(job) {
           .insert(batch);
         if (itemErr) {
           console.warn(`[worker] Failed to store item data batch ${i}/${itemDataRows.length} for ${submodule_id}: ${itemErr.message}`);
+          insertFailed = true;
         } else {
           storedCount += batch.length;
         }
@@ -699,7 +706,9 @@ async function handleLegacyJob(job) {
     const totalDownloadableSize = itemDataRows.reduce((sum, row) => sum + row.content.length, 0);
     const STRIP_THRESHOLD = 1 * 1024 * 1024;
 
-    if (totalDownloadableSize > STRIP_THRESHOLD) {
+    if (insertFailed) {
+      console.warn(`[worker] Keeping downloadable fields inline for ${submodule_id} because item_data insert failed`);
+    } else if (totalDownloadableSize > STRIP_THRESHOLD) {
       console.log(`[worker] Stripping ${downloadFieldNames.join(', ')} from output (${(totalDownloadableSize / 1024 / 1024).toFixed(1)}MB exceeds 1MB threshold)`);
       for (const entityResult of result.results) {
         for (const item of (entityResult.items || [])) {
