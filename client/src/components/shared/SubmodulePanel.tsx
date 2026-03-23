@@ -1359,6 +1359,8 @@ function ResultsActionCTAs({
     try {
       setZipping(true);
       const zip = new JSZip();
+      // Track used filenames per folder to avoid collisions
+      const usedSlugs = new Map<string, Map<string, number>>();
 
       for (const entity of items) {
         const entityName = String(entity.entity_name || 'entity');
@@ -1370,16 +1372,25 @@ function ResultsActionCTAs({
         const folder = zip.folder(folderName);
         if (!folder) continue;
 
-        // Derive unique filename per item from URL path (or key value)
+        if (!usedSlugs.has(folderName)) usedSlugs.set(folderName, new Map());
+        const folderSlugs = usedSlugs.get(folderName)!;
+
+        // Derive unique filename per item from full URL path (not just last segment)
         const keyVal = String(entity[itemKey ?? 'url'] ?? '');
         let itemSlug = safeName;
         if (keyVal.startsWith('http')) {
           try {
             const pathParts = new URL(keyVal).pathname.split('/').filter(Boolean);
-            const lastPart = pathParts[pathParts.length - 1] || pathParts[pathParts.length - 2] || safeName;
-            itemSlug = sanitizeFilename(lastPart.slice(0, 80));
+            // Use full path joined with underscores to avoid collisions
+            // e.g. /de/games/reactoonz → de_games_reactoonz
+            itemSlug = sanitizeFilename(pathParts.join('_').slice(0, 120)) || safeName;
           } catch { /* keep safeName */ }
         }
+
+        // Deduplicate: append counter if slug already used in this folder
+        const count = folderSlugs.get(itemSlug) || 0;
+        folderSlugs.set(itemSlug, count + 1);
+        const finalSlug = count > 0 ? `${itemSlug}_${count}` : itemSlug;
 
         for (const df of downloadableFields) {
           const raw = entity[df.field];
@@ -1388,7 +1399,7 @@ function ResultsActionCTAs({
             ? JSON.stringify(raw, null, 2)
             : String(raw);
           folder.file(
-            `${itemSlug}.${df.extension}`,
+            `${finalSlug}.${df.extension}`,
             content
           );
         }
