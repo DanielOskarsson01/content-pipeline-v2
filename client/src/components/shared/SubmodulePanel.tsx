@@ -1127,21 +1127,20 @@ function PerEntityResultsContent({
         ))}
       </div>
 
-      {(batchRun.status === 'running' || batchRun.status === 'pending') && onAbort ? (
+      <ResultsActionCTAs
+        onChangeInput={onChangeInput}
+        onChangeOptions={onChangeOptions}
+        onTryAgain={onTryAgain}
+        showDownload
+        renderSchema={renderSchema}
+        submoduleId={batchRun.submodule_id}
+        itemKey={itemKey}
+        batchRunId={batchRun.id}
+      />
+      {onAbort && batchRun.entities.some(e => e.status === 'running' || e.status === 'pending') && (
         <div className="flex items-center gap-2 flex-shrink-0 pt-2 border-t border-gray-100">
           <button onClick={onAbort} className="text-xs text-red-500 hover:underline ml-auto">Abort</button>
         </div>
-      ) : (
-        <ResultsActionCTAs
-          onChangeInput={onChangeInput}
-          onChangeOptions={onChangeOptions}
-          onTryAgain={onTryAgain}
-          showDownload
-          renderSchema={renderSchema}
-          submoduleId={batchRun.submodule_id}
-          itemKey={itemKey}
-          batchRunId={batchRun.id}
-        />
       )}
     </div>
   );
