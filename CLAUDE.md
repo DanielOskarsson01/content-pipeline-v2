@@ -402,3 +402,24 @@ Entry types: decision | progress | blocker | idea
 - og:description truncation detection added to page-scraper (needs flow test)
 
 **Updated by:** session-closer agent
+
+### Session: 2026-03-24 — og:description truncation detection across Step 3 scrapers
+**Accomplished:**
+- Investigated why Play'n GO PokerStars article couldn't be scraped (Wix JS-rendered page with only 2 paragraphs SSR'd, rest loads via JavaScript)
+- Key finding: SSR'd body text (~60 words) passes the 50-word threshold, so page-scraper marks it "success" with truncated content
+- Added `extractOgDescription()` and `isLikelyTruncated()` helpers to all 3 Step 3 scrapers (page-scraper, browser-scraper, api-scraper)
+- page-scraper: if body text <= og:description length (100+ chars), marks as `low_content` to cascade to browser-scraper
+- browser-scraper: adds `waitForSelector` for content containers, truncation check cascades to api-scraper if still truncated
+- api-scraper: handles `low_content` in partition logic, flags `possibly_truncated: true` on final output
+- Made `waitForSelector` non-fatal in `browserPool.js` (skeleton) — try/catch wrapper logs warning instead of throwing
+- Code review caught missing `decodeEntities()` in api-scraper's `extractOgDescription` — fixed before commit
+
+**Decisions:**
+- og:description meta tag used as truncation signal — conservative check: body text must be shorter than the summary itself, which should never happen for a complete article
+- Truncation is a cascade trigger (not hard failure) — pages flow to next scraper in the chain
+- `waitForSelector` made non-fatal because selector absence shouldn't crash the entire scrape attempt
+
+**Blockers/Questions:**
+- None — both repos committed (d64fc37, 9832f4e) and pushed, CI/CD will deploy
+
+**Updated by:** session-closer agent

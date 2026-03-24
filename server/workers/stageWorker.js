@@ -296,13 +296,29 @@ async function handleEntityJob(job) {
   // 5. Build tools
   const tools = buildTools(entity_submodule_run_id, submodule_id);
 
-  // 6. Timeout
+  // 6. Timeout + abort polling
   const cost = manifest.cost || 'medium';
   const costConfig = COST_CONFIG[cost] || COST_CONFIG.medium;
   const timeout = costConfig.timeout;
   let timeoutTimer;
   const timeoutPromise = new Promise((_, reject) => {
     timeoutTimer = setTimeout(() => reject(new Error(`Execution timed out after ${timeout / 1000}s`)), timeout);
+  });
+
+  // Abort polling: check Redis every 2s for entity-level abort signal.
+  // When user aborts a single entity, the API sets this key. The reject
+  // triggers the catch handler which saves _partialItems.
+  let abortInterval;
+  const abortPromise = new Promise((_, reject) => {
+    abortInterval = setInterval(async () => {
+      try {
+        const aborted = await redis.get(`abort:entity:${entity_submodule_run_id}`);
+        if (aborted) {
+          await redis.del(`abort:entity:${entity_submodule_run_id}`);
+          reject(new Error('Aborted by user'));
+        }
+      } catch { /* Redis errors should not crash the worker */ }
+    }, 2000);
   });
 
   // 7. Prepare input — single entity format
@@ -388,7 +404,7 @@ async function handleEntityJob(job) {
 
   let result;
   try {
-    const rawResult = await Promise.race([executeFn(legacyInput, options, tools), timeoutPromise]);
+    const rawResult = await Promise.race([executeFn(legacyInput, options, tools), timeoutPromise, abortPromise]);
 
     // Unwrap: legacy returns { results: [{ entity_name, items, ... }], summary }
     // Per-entity expects { items: [...], ... } for the single entity
@@ -464,6 +480,7 @@ async function handleEntityJob(job) {
     throw err;
   } finally {
     clearTimeout(timeoutTimer);
+    clearInterval(abortInterval);
   }
 
   // 9. Store downloadable fields (same logic, but for single entity result)

@@ -12,7 +12,7 @@ import { Router } from 'express';
 import { randomUUID } from 'crypto';
 import db from '../services/db.js';
 import { getSubmoduleById, getSubmodules } from '../services/moduleLoader.js';
-import { enqueueEntityBatch } from '../services/queue.js';
+import { enqueueEntityBatch, redis } from '../services/queue.js';
 
 // --- Execute router (mounted at /api/runs/:runId/steps/:stepIndex/submodules/:submoduleId) ---
 export const executeRouter = Router({ mergeParams: true });
@@ -627,6 +627,41 @@ submoduleRunRouter.post('/:id/abort', async (req, res) => {
     res.json({ aborted: true, entity_runs_cancelled: abortedCount, still_running: runningCount });
   } catch (err) {
     console.error('[submodule-runs] POST abort error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/entity-submodule-runs/:id/abort
+ * Abort a single running entity within a submodule run.
+ * Sets a Redis signal that the worker polls every 2s. When detected,
+ * the worker saves partial results (_partialItems) and marks the entity
+ * as completed so results can be approved.
+ */
+submoduleRunRouter.post('/entity/:id/abort', async (req, res) => {
+  try {
+    const { data: entityRun, error: getErr } = await db
+      .from('entity_submodule_runs')
+      .select('id, status, entity_name, submodule_id')
+      .eq('id', req.params.id)
+      .single();
+
+    if (getErr?.code === 'PGRST116' || !entityRun) {
+      return res.status(404).json({ error: 'Entity submodule run not found' });
+    }
+    if (getErr) throw getErr;
+
+    if (entityRun.status !== 'running') {
+      return res.status(400).json({ error: `Cannot abort entity run with status "${entityRun.status}"` });
+    }
+
+    // Set Redis abort signal — worker polls this every 2s
+    await redis.set(`abort:entity:${entityRun.id}`, '1', 'EX', 300);
+
+    console.log(`[submodule-runs] Entity abort signal set for ${entityRun.entity_name} (${entityRun.submodule_id})`);
+    res.json({ aborted: true, entity_name: entityRun.entity_name });
+  } catch (err) {
+    console.error('[submodule-runs] POST entity abort error:', err);
     res.status(500).json({ error: err.message });
   }
 });

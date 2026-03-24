@@ -122,6 +122,10 @@ export const api = {
     apiFetch<{ aborted: boolean; entity_runs_cancelled: number }>(`/api/submodule-runs/${submoduleRunId}/abort`, {
       method: 'POST',
     }),
+  abortEntityRun: (entityRunId: string) =>
+    apiFetch<{ aborted: boolean; entity_name: string }>(`/api/submodule-runs/entity/${entityRunId}/abort`, {
+      method: 'POST',
+    }),
   getEntityRunDetail: (batchRunId: string, entityRunId: string) =>
     apiFetch<EntityRunDetail>(`/api/submodule-runs/${batchRunId}/entities/${entityRunId}?full=true`),
   getBatchAllItems: (batchRunId: string, full = false) =>

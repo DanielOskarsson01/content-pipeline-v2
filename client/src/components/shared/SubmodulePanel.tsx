@@ -1240,6 +1240,16 @@ function EntityAccordionItem({
           {entity.status === 'running' && entity.progress && (
             <span>{entity.progress.current}/{entity.progress.total}</span>
           )}
+          {entity.status === 'running' && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                api.abortEntityRun(entity.id).catch(() => {});
+              }}
+              className="px-1.5 py-0.5 bg-red-100 text-red-600 rounded text-[10px] hover:bg-red-200 font-medium"
+              title="Stop this entity and save partial results"
+            >Stop</button>
+          )}
           {itemCount != null && isSelectable && checkedCount != null && (
             <span>{checkedCount}/{itemCount}{itemCount > checkedCount ? ` · ${itemCount - checkedCount} rejected` : ''}</span>
           )}
