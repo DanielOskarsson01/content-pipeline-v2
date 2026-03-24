@@ -596,12 +596,14 @@ submoduleRunRouter.post('/:id/abort', async (req, res) => {
       .update({ status: 'failed', error: 'Aborted by user', completed_at: now })
       .eq('id', subRun.id);
 
-    // Mark all pending/running entity runs as failed
+    // Mark pending entity runs as failed (they haven't started, nothing to save).
+    // Running entity runs are left alone — the worker will finish, save results,
+    // and then detect the abort flag on the batch and mark itself completed.
     let abortedCount = 0;
     if (subRun.batch_id) {
       const { data: aborted } = await db.from('entity_submodule_runs')
         .update({ status: 'failed', error: 'Aborted by user', completed_at: now })
-        .in('status', ['pending', 'running'])
+        .eq('status', 'pending')
         .eq('batch_id', subRun.batch_id)
         .select('id');
       abortedCount = aborted?.length || 0;

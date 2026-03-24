@@ -60,53 +60,51 @@ function buildTools(runId, submoduleId) {
     },
   };
 
+  // Helper: race a fetch operation against a timeout. Ensures the ENTIRE operation
+  // (connect + headers + body read) completes within the limit. Also aborts the
+  // underlying connection on timeout to prevent leaked sockets.
+  function withTimeout(fn, ms) {
+    const controller = new AbortController();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`HTTP request timed out after ${ms}ms`));
+      }, ms);
+      fn(controller.signal).then(
+        (val) => { clearTimeout(timer); resolve(val); },
+        (err) => { clearTimeout(timer); reject(err); },
+      );
+    });
+  }
+
   const http = {
     get: async (url, options = {}) => {
       const timeout = options.timeout || 30000;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeout);
-      try {
-        const res = await fetch(url, {
-          signal: controller.signal,
-          headers: options.headers || {},
-        });
+      return withTimeout(async (signal) => {
+        const res = await fetch(url, { signal, headers: options.headers || {} });
         const body = await res.text();
         return { status: res.status, headers: Object.fromEntries(res.headers), body };
-      } finally {
-        clearTimeout(timer);
-      }
+      }, timeout);
     },
     head: async (url, options = {}) => {
       const timeout = options.timeout || 30000;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeout);
-      try {
-        const res = await fetch(url, {
-          method: 'HEAD',
-          signal: controller.signal,
-          headers: options.headers || {},
-        });
+      return withTimeout(async (signal) => {
+        const res = await fetch(url, { method: 'HEAD', signal, headers: options.headers || {} });
         return { status: res.status, headers: Object.fromEntries(res.headers) };
-      } finally {
-        clearTimeout(timer);
-      }
+      }, timeout);
     },
     post: async (url, body, options = {}) => {
       const timeout = options.timeout || 30000;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeout);
-      try {
+      return withTimeout(async (signal) => {
         const res = await fetch(url, {
           method: 'POST',
-          signal: controller.signal,
+          signal,
           headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
           body: typeof body === 'string' ? body : JSON.stringify(body),
         });
         const responseBody = await res.text();
         return { status: res.status, headers: Object.fromEntries(res.headers), body: responseBody };
-      } finally {
-        clearTimeout(timer);
-      }
+      }, timeout);
     },
   };
 
@@ -529,15 +527,16 @@ async function handleEntityJob(job) {
     }
   }
 
-  // 10. Check if run was aborted while we were executing
+  // 10. Check if run was aborted while we were executing.
+  //     If so, still save results — the work is done, don't throw it away.
   const { data: currentRun } = await db
     .from('entity_submodule_runs')
     .select('status')
     .eq('id', entity_submodule_run_id)
     .single();
-  if (currentRun?.status === 'failed') {
-    console.log(`[worker:entity] ${submodule_id}/${entity_name} was aborted during execution — discarding results`);
-    return;
+  const wasAborted = currentRun?.status === 'failed';
+  if (wasAborted) {
+    console.log(`[worker:entity] ${submodule_id}/${entity_name} was aborted during execution — saving results anyway`);
   }
 
   // 11. Write result to entity_submodule_runs
