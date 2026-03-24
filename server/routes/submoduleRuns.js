@@ -591,15 +591,11 @@ submoduleRunRouter.post('/:id/abort', async (req, res) => {
 
     const now = new Date().toISOString();
 
-    // Mark the batch run as failed
-    await db.from('submodule_runs')
-      .update({ status: 'failed', error: 'Aborted by user', completed_at: now })
-      .eq('id', subRun.id);
-
     // Mark pending entity runs as failed (they haven't started, nothing to save).
     // Running entity runs are left alone — the worker will finish, save results,
-    // and then detect the abort flag on the batch and mark itself completed.
+    // and the batch worker will finalize the parent status.
     let abortedCount = 0;
+    let runningCount = 0;
     if (subRun.batch_id) {
       const { data: aborted } = await db.from('entity_submodule_runs')
         .update({ status: 'failed', error: 'Aborted by user', completed_at: now })
@@ -607,10 +603,28 @@ submoduleRunRouter.post('/:id/abort', async (req, res) => {
         .eq('batch_id', subRun.batch_id)
         .select('id');
       abortedCount = aborted?.length || 0;
+
+      // Check if any entities are still running
+      const { count } = await db.from('entity_submodule_runs')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'running')
+        .eq('batch_id', subRun.batch_id);
+      runningCount = count || 0;
     }
 
-    console.log(`[submodule-runs] Aborted run ${subRun.id}, ${abortedCount} entity runs cancelled`);
-    res.json({ aborted: true, entity_runs_cancelled: abortedCount });
+    if (runningCount > 0) {
+      // Don't mark parent as failed yet — running entities will finish and
+      // the batch worker will set the correct final status with approve enabled.
+      console.log(`[submodule-runs] Aborted run ${subRun.id}: ${abortedCount} pending cancelled, ${runningCount} still running — waiting for completion`);
+    } else {
+      // No running entities — mark parent as failed immediately
+      await db.from('submodule_runs')
+        .update({ status: 'failed', error: 'Aborted by user', completed_at: now })
+        .eq('id', subRun.id);
+      console.log(`[submodule-runs] Aborted run ${subRun.id}, ${abortedCount} entity runs cancelled`);
+    }
+
+    res.json({ aborted: true, entity_runs_cancelled: abortedCount, still_running: runningCount });
   } catch (err) {
     console.error('[submodule-runs] POST abort error:', err);
     res.status(500).json({ error: err.message });
