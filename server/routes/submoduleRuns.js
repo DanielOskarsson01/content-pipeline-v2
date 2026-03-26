@@ -180,6 +180,27 @@ executeRouter.post('/run', async (req, res) => {
       }
     }
 
+    // Priority 4: entity_stage_pool already exists for this step (re-run scenario)
+    // When a submodule re-runs at a step where pools were already initialized,
+    // the previous priorities may fail (e.g. Step N-1 output_data empty in per-entity mode).
+    // The pools themselves are the source of truth.
+    if (!inputData) {
+      const { data: existingPools } = await db
+        .from('entity_stage_pool')
+        .select('entity_name, pool_items')
+        .eq('run_id', runId)
+        .eq('step_index', stepIdx);
+
+      if (existingPools && existingPools.length > 0) {
+        const entities = existingPools.map(p => ({
+          name: p.entity_name,
+          items: p.pool_items || [],
+        }));
+        inputData = { entities, run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+        inputFromPool = true;
+      }
+    }
+
     if (!inputData) {
       return res.status(400).json({ error: 'No input data available. Upload data or ensure previous step has output.' });
     }
