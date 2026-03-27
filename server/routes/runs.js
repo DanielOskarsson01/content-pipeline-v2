@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import db from '../services/db.js';
+import { extractToBlob } from '../services/poolBlobs.js';
 
 const router = Router();
 
@@ -209,8 +210,11 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
       stageOutputRenderSchema = mergedSchema;
     }
 
-    // Prune entity pools after Step 5
+    // Extract large fields to blobs before forwarding (prevents OOM on pool copies).
+    // Previously these fields were deleted — now they're stored in pool_item_blobs
+    // and replaced with _blob_ref UUIDs so downstream consumers can hydrate them.
     if (stepIndex >= 5) {
+      const PRUNE_FIELDS = ['text_content', 'content_markdown', 'analysis_json', 'seo_plan_json'];
       const { data: allPools } = await db
         .from('entity_stage_pool')
         .select('id, pool_items')
@@ -218,18 +222,23 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
         .eq('step_index', stepIndex);
 
       for (const pool of (allPools || [])) {
-        if (Array.isArray(pool.pool_items)) {
-          const pruned = pool.pool_items.map(item => {
-            const p = { ...item };
-            delete p.text_content;
-            if (p.content_markdown && p.section_count === undefined) {
-              delete p.content_markdown;
-            }
-            return p;
+        if (!Array.isArray(pool.pool_items)) continue;
+        let modified = false;
+        for (const item of pool.pool_items) {
+          // Skip content_markdown for AI-written items (have section_count)
+          const fieldsToCheck = PRUNE_FIELDS.filter(f => {
+            if (f === 'content_markdown' && item.section_count !== undefined) return false;
+            return item[f] != null;
           });
+          if (fieldsToCheck.length > 0) {
+            const ref = await extractToBlob(item, fieldsToCheck);
+            if (ref) modified = true;
+          }
+        }
+        if (modified) {
           await db
             .from('entity_stage_pool')
-            .update({ pool_items: pruned })
+            .update({ pool_items: pool.pool_items })
             .eq('id', pool.id);
         }
       }

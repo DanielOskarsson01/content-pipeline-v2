@@ -362,3 +362,18 @@ CREATE TABLE IF NOT EXISTS pipeline_metrics (
 CREATE INDEX IF NOT EXISTS idx_pipeline_metrics_run_id ON pipeline_metrics(run_id);
 CREATE INDEX IF NOT EXISTS idx_pipeline_metrics_submodule_id ON pipeline_metrics(submodule_id);
 CREATE INDEX IF NOT EXISTS idx_pipeline_metrics_created_at ON pipeline_metrics(created_at);
+
+-- ============================================================
+-- Pre-Phase 12: Pool item blob storage
+-- Stores large fields (content_markdown, analysis_json, etc.) by reference.
+-- Pool items carry a _blob_ref UUID pointing to this table instead of inline content.
+-- Hydrated on read by server/services/poolBlobs.js.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS pool_item_blobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  content JSONB NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pool_item_blobs_created_at
+  ON pool_item_blobs(created_at);

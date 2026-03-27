@@ -17,6 +17,7 @@ import db from '../services/db.js';
 import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { COST_CONFIG } from '../config/timeouts.js';
+import { extractToBlob, hydrateItems } from '../services/poolBlobs.js';
 
 // Load submodule manifests (worker is a separate process from server.js)
 loadModules();
@@ -386,6 +387,14 @@ async function handleEntityJob(job) {
     }
   }
 
+  // 7c. Hydrate pool blob refs — restore large fields that were extracted to pool_item_blobs
+  if (entityItems.length > 0) {
+    const hydratedCount = await hydrateItems(entityItems);
+    if (hydratedCount > 0) {
+      console.log(`[worker:entity] Hydrated ${hydratedCount} blob refs for "${entity_name}"`);
+    }
+  }
+
   // 8. Execute with timeout
   //    Compatibility shim: wrap single entity into legacy array format until
   //    execute.js files are migrated to single-entity input.
@@ -531,12 +540,12 @@ async function handleEntityJob(job) {
 
       // Strip large downloadable fields from result ONLY if all inserts succeeded.
       // If inserts failed (e.g. FK constraint), keep data inline so it's not lost.
+      // Fields are stored in pool_item_blobs (for downstream pool consumers like
+      // bundlers and reports) and in submodule_run_item_data (for download button UI).
       const totalSize = itemDataRows.reduce((sum, row) => sum + row.content.length, 0);
       if (!insertFailed && totalSize > 1 * 1024 * 1024) {
         for (const item of result.items) {
-          for (const field of downloadFieldNames) {
-            delete item[field];
-          }
+          await extractToBlob(item, downloadFieldNames);
         }
       } else if (insertFailed) {
         console.warn(`[worker:entity] Keeping downloadable fields inline for ${submodule_id}/${entity_name} because item_data insert failed`);
