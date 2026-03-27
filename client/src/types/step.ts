@@ -105,6 +105,49 @@ export interface OptionPreset {
   updated_at: string;
 }
 
+// Phase 12a: Run report
+export interface RunReportStep {
+  step_index: number;
+  step_name: string;
+  status: string;
+  entities: number;
+  completed: number;
+  failed: number;
+  items: number;
+  words: number;
+  submodules: {
+    submodule_id: string;
+    entities: number;
+    completed: number;
+    failed: number;
+    total: number;
+    items: number;
+    words: number;
+    success_rate: number | null;
+    errors: { entity: string; error: string }[];
+  }[];
+}
+
+export interface RunReport {
+  run: {
+    id: string;
+    project_id: string;
+    status: string;
+    current_step: number;
+    created_at: string;
+    completed_at: string | null;
+  };
+  summary: {
+    entities: number;
+    total_words: number;
+    total_duration_ms: number;
+    total_cost: number;
+    steps_completed: number;
+    steps_total: number;
+  };
+  steps: RunReportStep[];
+}
+
 // CategoryGroups: Record<categoryName, SubmoduleManifest[]>
 export type CategoryGroups = Record<string, SubmoduleManifest[]>;
 

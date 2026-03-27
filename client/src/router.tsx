@@ -6,6 +6,7 @@ import { Toast } from './components/layout/Toast';
 import { NewProject } from './components/pages/NewProject';
 import { ProjectsList } from './components/pages/ProjectsList';
 import { RunView } from './components/pages/RunView';
+import { RunReport } from './components/pages/RunReport';
 
 function RootLayout() {
   return (
@@ -50,6 +51,7 @@ export const router = createBrowserRouter([
       { path: 'projects', element: <ProjectsList /> },
       { path: 'templates', element: <TemplatesPage /> },
       { path: 'projects/:projectId/runs/:runId', element: <RunView /> },
+      { path: 'projects/:projectId/runs/:runId/report', element: <RunReport /> },
       { path: '*', element: <NotFoundPage /> },
     ],
   },

@@ -53,7 +53,7 @@ import type {
   SubmoduleRun, SubmoduleRunPolled, SubmoduleLatestRunMap,
   ApproveSubmoduleRunResponse, ApproveSubmoduleRunPerEntityResponse,
   EntityRunDetail, ExecuteSubmoduleResponse,
-  DecisionLogEntry, OptionPreset,
+  DecisionLogEntry, OptionPreset, RunReport,
 } from '../types/step';
 
 export const api = {
@@ -134,6 +134,10 @@ export const api = {
     ),
   getLatestSubmoduleRuns: (runId: string, stepIndex: number) =>
     apiFetch<SubmoduleLatestRunMap>(`/api/runs/${runId}/steps/${stepIndex}/submodule-runs/latest`),
+
+  // Run report (Phase 12a)
+  getRunReport: (runId: string) =>
+    apiFetch<RunReport>(`/api/runs/${runId}/report`),
 
   // Decision log
   getDecisions: (runId: string) =>

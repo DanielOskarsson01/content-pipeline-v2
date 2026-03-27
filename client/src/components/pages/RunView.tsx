@@ -90,9 +90,17 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
             Run {runId.slice(0, 8)} · Step {run.current_step} of 10 · {run.status}
           </p>
         </div>
-        <Link to="/projects" className="text-sm text-gray-500 hover:text-gray-700">
-          ← Projects
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link
+            to={`/projects/${projectId}/runs/${runId}/report`}
+            className="text-sm text-brand-600 hover:text-brand-700"
+          >
+            Report
+          </Link>
+          <Link to="/projects" className="text-sm text-gray-500 hover:text-gray-700">
+            ← Projects
+          </Link>
+        </div>
       </div>
 
       <div className="space-y-2">

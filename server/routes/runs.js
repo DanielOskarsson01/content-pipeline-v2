@@ -658,4 +658,124 @@ router.get('/:runId/decisions', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/**
+ * GET /api/runs/:runId/report
+ * Aggregated run report — per-step summary with entity counts,
+ * submodule breakdown, success/failure rates, and timing.
+ */
+router.get('/:runId/report', async (req, res, next) => {
+  try {
+    const { runId } = req.params;
+
+    // Fetch run + stages
+    const [runResult, stagesResult] = await Promise.all([
+      db.from('pipeline_runs').select('*').eq('id', runId).single(),
+      db.from('pipeline_stages').select('*').eq('run_id', runId).order('step_index'),
+    ]);
+    if (runResult.error) throw runResult.error;
+    if (!runResult.data) return res.status(404).json({ error: 'Run not found' });
+
+    // Fetch entity runs (status/entity tracking) and metrics (items/words/duration)
+    const [entityRunsResult, metricsResult] = await Promise.all([
+      db.from('entity_submodule_runs')
+        .select('submodule_id, entity_name, status, step_index, error')
+        .eq('run_id', runId)
+        .order('step_index'),
+      db.from('pipeline_metrics')
+        .select('submodule_id, entity_name, status, duration_ms, step_index')
+        .eq('run_id', runId),
+    ]);
+    if (entityRunsResult.error) throw entityRunsResult.error;
+    const entityRuns = entityRunsResult.data || [];
+    const metrics = metricsResult.data || [];
+
+    // Build per-step report
+    const STEP_NAMES = [
+      'Project Start', 'Discovery', 'Validation', 'Scraping',
+      'Filtering & Assembly', 'Analysis & Generation', 'Quality Assurance',
+      'Routing', 'Bundling', 'Distribution', 'Review',
+    ];
+
+    const steps = [];
+    for (const stage of (stagesResult.data || [])) {
+      const stepRuns = entityRuns.filter(r => r.step_index === stage.step_index);
+      const stepMetrics = metrics.filter(m => m.step_index === stage.step_index);
+      const bySubmodule = {};
+      for (const r of stepRuns) {
+        if (!bySubmodule[r.submodule_id]) {
+          bySubmodule[r.submodule_id] = { total: 0, completed: 0, failed: 0, duration: 0, entities: new Set(), errors: [] };
+        }
+        const s = bySubmodule[r.submodule_id];
+        s.total++;
+        s.entities.add(r.entity_name);
+        if (r.status === 'completed' || r.status === 'approved') {
+          s.completed++;
+        } else if (r.status === 'failed' || r.status === 'error') {
+          s.failed++;
+          if (r.error) s.errors.push({ entity: r.entity_name, error: r.error });
+        }
+      }
+
+      // Enrich with duration from metrics
+      for (const m of stepMetrics) {
+        if (bySubmodule[m.submodule_id]) {
+          bySubmodule[m.submodule_id].duration += m.duration_ms || 0;
+        }
+      }
+
+      const submodules = Object.entries(bySubmodule).map(([id, s]) => ({
+        submodule_id: id,
+        entities: s.entities.size,
+        completed: s.completed,
+        failed: s.failed,
+        total: s.total,
+        items: s.completed, // one item per completed entity run
+        words: 0, // not tracked per-entity; kept for schema compat
+        success_rate: s.total > 0 ? Math.round((s.completed / s.total) * 1000) / 10 : null,
+        errors: s.errors.slice(0, 10),
+      }));
+
+      const totalEntities = new Set(stepRuns.map(r => r.entity_name)).size;
+      const totalCompleted = stepRuns.filter(r => r.status === 'completed' || r.status === 'approved').length;
+      const totalFailed = stepRuns.filter(r => r.status === 'failed' || r.status === 'error').length;
+
+      steps.push({
+        step_index: stage.step_index,
+        step_name: STEP_NAMES[stage.step_index] || `Step ${stage.step_index}`,
+        status: stage.status,
+        entities: totalEntities,
+        completed: totalCompleted,
+        failed: totalFailed,
+        items: totalCompleted,
+        words: 0,
+        submodules,
+      });
+    }
+
+    // Overall stats
+    const totalDuration = metrics.reduce((sum, m) => sum + (m.duration_ms || 0), 0);
+    const uniqueEntities = new Set(entityRuns.map(r => r.entity_name)).size;
+
+    res.json({
+      run: {
+        id: runResult.data.id,
+        project_id: runResult.data.project_id,
+        status: runResult.data.status,
+        current_step: runResult.data.current_step,
+        created_at: runResult.data.created_at,
+        completed_at: runResult.data.completed_at,
+      },
+      summary: {
+        entities: uniqueEntities,
+        total_words: 0,
+        total_duration_ms: totalDuration,
+        total_cost: 0,
+        steps_completed: steps.filter(s => s.status === 'completed' || s.status === 'skipped').length,
+        steps_total: steps.length,
+      },
+      steps,
+    });
+  } catch (err) { next(err); }
+});
+
 export default router;
