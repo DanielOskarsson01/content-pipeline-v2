@@ -377,3 +377,33 @@ CREATE TABLE IF NOT EXISTS pool_item_blobs (
 
 CREATE INDEX IF NOT EXISTS idx_pool_item_blobs_created_at
   ON pool_item_blobs(created_at);
+
+-- ============================================================
+-- Phase 12a: Option presets
+-- Per-submodule, per-option saved configurations.
+-- project_id = NULL means global preset (visible everywhere).
+-- ============================================================
+CREATE TABLE IF NOT EXISTS option_presets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  submodule_id TEXT NOT NULL,
+  option_name TEXT NOT NULL,
+  preset_name TEXT NOT NULL,
+  preset_value JSONB NOT NULL,
+  project_id UUID REFERENCES projects(id),
+  is_default BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Project-scoped presets: standard unique constraint
+CREATE UNIQUE INDEX IF NOT EXISTS option_presets_project_unique
+  ON option_presets (submodule_id, option_name, preset_name, project_id)
+  WHERE project_id IS NOT NULL;
+
+-- Global presets: separate partial index (PostgreSQL treats NULL != NULL in UNIQUE)
+CREATE UNIQUE INDEX IF NOT EXISTS option_presets_global_unique
+  ON option_presets (submodule_id, option_name, preset_name)
+  WHERE project_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_option_presets_submodule
+  ON option_presets(submodule_id, option_name);
