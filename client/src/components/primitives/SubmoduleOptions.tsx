@@ -1,11 +1,13 @@
 import type { SubmoduleOption } from '../../types/step';
 import { ReferenceDocSelector } from './ReferenceDocSelector';
+import { PresetField } from './PresetField';
 
 interface SubmoduleOptionsProps {
   options: SubmoduleOption[];
   values: Record<string, unknown>;
   onChange: (name: string, value: unknown) => void;
   projectId: string;
+  submoduleId: string;
 }
 
 /**
@@ -19,6 +21,7 @@ export function SubmoduleOptions({
   values,
   onChange,
   projectId,
+  submoduleId,
 }: SubmoduleOptionsProps) {
   if (options.length === 0) {
     return (
@@ -33,6 +36,16 @@ export function SubmoduleOptions({
       {options.map((option) => {
         const value = values[option.name] ?? option.default;
 
+        const presetDropdown = option.presets_enabled ? (
+          <PresetField
+            submoduleId={submoduleId}
+            optionName={option.name}
+            projectId={projectId}
+            currentValue={value}
+            onLoadPreset={(presetValue) => onChange(option.name, presetValue)}
+          />
+        ) : null;
+
         switch (option.type) {
           case 'select':
             return (
@@ -40,6 +53,7 @@ export function SubmoduleOptions({
                 <label className="block text-xs text-gray-600 mb-1">
                   {option.label}
                 </label>
+                {presetDropdown}
                 <select
                   value={String(value)}
                   onChange={(e) => onChange(option.name, e.target.value)}
@@ -112,6 +126,7 @@ export function SubmoduleOptions({
                 <label className="block text-xs text-gray-600 mb-1">
                   {option.label}
                 </label>
+                {presetDropdown}
                 <textarea
                   value={String(value ?? '')}
                   maxLength={option.maxLength}
@@ -154,6 +169,7 @@ export function SubmoduleOptions({
                 <label className="block text-xs text-gray-600 mb-1">
                   {option.label}
                 </label>
+                {presetDropdown}
                 <input
                   type="text"
                   value={String(value ?? '')}

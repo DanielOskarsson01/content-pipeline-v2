@@ -760,6 +760,7 @@ export function SubmodulePanel({
                 values={localOptions}
                 onChange={handleOptionChange}
                 projectId={projectId}
+                submoduleId={submodule.id}
               />
 
               {/* SAVE OPTIONS button */}

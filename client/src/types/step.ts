@@ -89,6 +89,20 @@ export interface SubmoduleOption {
   max?: number;
   values?: string[];
   maxLength?: number;
+  presets_enabled?: boolean;
+}
+
+// Phase 12a: Option presets
+export interface OptionPreset {
+  id: string;
+  submodule_id: string;
+  option_name: string;
+  preset_name: string;
+  preset_value: unknown;
+  project_id: string | null;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 // CategoryGroups: Record<categoryName, SubmoduleManifest[]>

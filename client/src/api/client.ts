@@ -53,7 +53,7 @@ import type {
   SubmoduleRun, SubmoduleRunPolled, SubmoduleLatestRunMap,
   ApproveSubmoduleRunResponse, ApproveSubmoduleRunPerEntityResponse,
   EntityRunDetail, ExecuteSubmoduleResponse,
-  DecisionLogEntry,
+  DecisionLogEntry, OptionPreset,
 } from '../types/step';
 
 export const api = {
@@ -138,4 +138,28 @@ export const api = {
   // Decision log
   getDecisions: (runId: string) =>
     apiFetch<DecisionLogEntry[]>(`/api/runs/${runId}/decisions`),
+
+  // Presets (Phase 12a)
+  getPresets: (submoduleId: string, optionName: string, projectId?: string) =>
+    apiFetch<{ presets: OptionPreset[] }>(
+      `/api/presets?submodule_id=${encodeURIComponent(submoduleId)}&option_name=${encodeURIComponent(optionName)}${projectId ? `&project_id=${projectId}` : ''}`
+    ),
+  createPreset: (data: { submodule_id: string; option_name: string; preset_name: string; preset_value: unknown; project_id?: string }) =>
+    apiFetch<{ preset: OptionPreset }>('/api/presets', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updatePreset: (id: string, data: { preset_name?: string; preset_value?: unknown }) =>
+    apiFetch<{ preset: OptionPreset }>(`/api/presets/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deletePreset: (id: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/presets/${id}`, {
+      method: 'DELETE',
+    }),
+  setDefaultPreset: (id: string) =>
+    apiFetch<{ preset: OptionPreset }>(`/api/presets/${id}/set-default`, {
+      method: 'POST',
+    }),
 };
