@@ -44,6 +44,7 @@ export interface RunWithStages extends PipelineRun {
 export interface CreateProjectInput {
   name: string;
   intent?: string;
+  template_id?: string;
 }
 
 export interface CreateProjectResponse {
@@ -146,6 +147,30 @@ export interface RunReport {
     steps_total: number;
   };
   steps: RunReportStep[];
+}
+
+// Phase 12b: Pipeline Templates
+export interface Template {
+  id: string;
+  name: string;
+  description: string | null;
+  preset_count: number;
+  doc_count: number;
+  created_at: string;
+}
+
+export interface TemplatePresetMapping {
+  id: string;
+  submodule_id: string;
+  option_name: string;
+  preset_id: string;
+  preset_name: string;
+  preset_value: unknown;
+}
+
+export interface TemplateDetail extends Template {
+  presets: TemplatePresetMapping[];
+  reference_docs: { id: string; filename: string; content_type: string; size_bytes: number }[];
 }
 
 // CategoryGroups: Record<categoryName, SubmoduleManifest[]>

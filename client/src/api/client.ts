@@ -49,11 +49,12 @@ export async function apiFetch<T>(
 import type {
   Project, CreateProjectInput, CreateProjectResponse,
   RunWithStages, PipelineStage, StepApproveResponse, StepSkipResponse,
-  CategoryGroups, SubmoduleConfig,
+  CategoryGroups, SubmoduleConfig, SubmoduleManifest,
   SubmoduleRun, SubmoduleRunPolled, SubmoduleLatestRunMap,
   ApproveSubmoduleRunResponse, ApproveSubmoduleRunPerEntityResponse,
   EntityRunDetail, ExecuteSubmoduleResponse,
   DecisionLogEntry, OptionPreset, RunReport,
+  Template, TemplateDetail,
 } from '../types/step';
 
 export const api = {
@@ -166,4 +167,47 @@ export const api = {
     apiFetch<{ preset: OptionPreset }>(`/api/presets/${id}/set-default`, {
       method: 'POST',
     }),
+
+  // Templates (Phase 12b)
+  getTemplates: () => apiFetch<Template[]>('/api/templates'),
+  getTemplate: (id: string) => apiFetch<TemplateDetail>(`/api/templates/${id}`),
+  createTemplate: (data: { name: string; description?: string }) =>
+    apiFetch<{ template: Template }>('/api/templates', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateTemplate: (id: string, data: { name?: string; description?: string }) =>
+    apiFetch<{ template: Template }>(`/api/templates/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deleteTemplate: (id: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/templates/${id}`, {
+      method: 'DELETE',
+    }),
+  addTemplatePreset: (templateId: string, data: { submodule_id: string; option_name: string; preset_id: string }) =>
+    apiFetch<{ mapping: unknown }>(`/api/templates/${templateId}/presets`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  removeTemplatePreset: (templateId: string, mappingId: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/templates/${templateId}/presets/${mappingId}`, {
+      method: 'DELETE',
+    }),
+  uploadTemplateDoc: (templateId: string, formData: FormData) =>
+    fetch(`${API_BASE}/api/templates/${templateId}/reference-docs`, {
+      method: 'POST',
+      body: formData,
+    }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      return r.json() as Promise<{ uploaded: { id: string; filename: string; content_type: string; size_bytes: number }[]; errors: string[] }>;
+    }),
+  removeTemplateDoc: (templateId: string, docId: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/templates/${templateId}/reference-docs/${docId}`, {
+      method: 'DELETE',
+    }),
+
+  // Submodules with full detail (for template editor) — returns flat array
+  getSubmodulesFull: () =>
+    apiFetch<SubmoduleManifest[]>('/api/submodules?detail=full'),
 };

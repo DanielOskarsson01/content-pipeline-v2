@@ -7,6 +7,8 @@ import { NewProject } from './components/pages/NewProject';
 import { ProjectsList } from './components/pages/ProjectsList';
 import { RunView } from './components/pages/RunView';
 import { RunReport } from './components/pages/RunReport';
+import { TemplatesPage } from './components/pages/TemplatesPage';
+import { TemplateEditor } from './components/pages/TemplateEditor';
 
 function RootLayout() {
   return (
@@ -19,14 +21,6 @@ function RootLayout() {
         <Toast />
       </div>
     </QueryClientProvider>
-  );
-}
-
-function TemplatesPage() {
-  return (
-    <div className="rounded-lg border border-dashed border-gray-300 p-12 text-center">
-      <p className="text-gray-400 text-sm">No templates yet</p>
-    </div>
   );
 }
 
@@ -50,6 +44,8 @@ export const router = createBrowserRouter([
       { path: 'new', element: <NewProject /> },
       { path: 'projects', element: <ProjectsList /> },
       { path: 'templates', element: <TemplatesPage /> },
+      { path: 'templates/new', element: <TemplateEditor /> },
+      { path: 'templates/:templateId', element: <TemplateEditor /> },
       { path: 'projects/:projectId/runs/:runId', element: <RunView /> },
       { path: 'projects/:projectId/runs/:runId/report', element: <RunReport /> },
       { path: '*', element: <NotFoundPage /> },
