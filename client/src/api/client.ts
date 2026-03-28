@@ -207,6 +207,13 @@ export const api = {
       method: 'DELETE',
     }),
 
+  // Save run as template
+  saveRunAsTemplate: (runId: string, data: { name: string; description?: string }) =>
+    apiFetch<{ template: TemplateDetail }>(`/api/templates/from-run/${runId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
   // Submodules with full detail (for template editor) — returns flat array
   getSubmodulesFull: () =>
     apiFetch<SubmoduleManifest[]>('/api/submodules?detail=full'),

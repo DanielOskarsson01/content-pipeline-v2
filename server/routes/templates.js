@@ -294,6 +294,176 @@ router.delete('/:id/reference-docs/:docId', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Save Run as Template ──────────────────────────────────────
+
+/**
+ * POST /api/templates/from-run/:runId
+ * Create a template from a run's current configuration.
+ * Captures all run_submodule_config option values as presets.
+ * Body: { name, description? }
+ */
+router.post('/from-run/:runId', async (req, res, next) => {
+  try {
+    const { name, description } = req.body;
+    if (!name?.trim()) {
+      return res.status(400).json({ error: 'name is required' });
+    }
+
+    const runId = req.params.runId;
+
+    // 1. Look up run → get project_id
+    const { data: run, error: runErr } = await db
+      .from('pipeline_runs')
+      .select('id, project_id')
+      .eq('id', runId)
+      .single();
+    if (runErr?.code === 'PGRST116' || !run) {
+      return res.status(404).json({ error: 'Run not found' });
+    }
+    if (runErr) throw runErr;
+
+    // 2. Create template
+    const { data: template, error: tplErr } = await db
+      .from('templates')
+      .insert({ name: name.trim(), description: description || null })
+      .select()
+      .single();
+    if (tplErr) {
+      if (tplErr.code === '23505') return res.status(409).json({ error: 'Template name already exists' });
+      throw tplErr;
+    }
+
+    // 3. Copy project_reference_docs → template_reference_docs (build ID map)
+    const docIdMap = {}; // projectDocId → templateDocId
+    const { data: projDocs } = await db
+      .from('project_reference_docs')
+      .select('id, filename, content, content_type, size_bytes')
+      .eq('project_id', run.project_id);
+
+    if (projDocs?.length) {
+      for (const doc of projDocs) {
+        const { data: tDoc, error: docErr } = await db
+          .from('template_reference_docs')
+          .insert({
+            template_id: template.id,
+            filename: doc.filename,
+            content: doc.content,
+            content_type: doc.content_type,
+            size_bytes: doc.size_bytes,
+          })
+          .select('id')
+          .single();
+        if (!docErr && tDoc) {
+          docIdMap[doc.id] = tDoc.id;
+        }
+      }
+    }
+
+    // 4. Read all run_submodule_config rows for this run
+    const { data: configs } = await db
+      .from('run_submodule_config')
+      .select('submodule_id, options')
+      .eq('run_id', runId);
+
+    // 5. For each config, create presets + mappings
+    const templateName = name.trim();
+    if (configs?.length) {
+      for (const cfg of configs) {
+        if (!cfg.options || typeof cfg.options !== 'object') continue;
+
+        const manifest = getSubmoduleById(cfg.submodule_id);
+        const manifestOptions = manifest?.options || [];
+
+        for (const [optName, optValue] of Object.entries(cfg.options)) {
+          if (optValue === null || optValue === undefined) continue;
+
+          // Find manifest option definition
+          const optDef = manifestOptions.find(o => o.name === optName);
+
+          // Skip if value matches default (use JSON.stringify for array/object defaults)
+          if (optDef && JSON.stringify(optValue) === JSON.stringify(optDef.default)) continue;
+
+          // Remap doc_selector IDs from project → template
+          let presetValue = optValue;
+          if (optDef?.type === 'doc_selector' && Array.isArray(optValue)) {
+            presetValue = optValue.map(id => docIdMap[id] || id);
+          }
+
+          // Create preset (try with template name, then with suffix on conflict)
+          let presetId = null;
+          let presetName = templateName;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const tryName = attempt === 0 ? presetName : `${presetName} (${attempt + 1})`;
+            const { data: preset, error: presetErr } = await db
+              .from('option_presets')
+              .insert({
+                submodule_id: cfg.submodule_id,
+                option_name: optName,
+                preset_name: tryName,
+                preset_value: presetValue,
+              })
+              .select('id')
+              .single();
+
+            if (!presetErr && preset) {
+              presetId = preset.id;
+              break;
+            }
+            if (presetErr?.code !== '23505') {
+              // Non-conflict error — skip this option
+              break;
+            }
+          }
+
+          if (!presetId) continue;
+
+          // Create template_preset_mapping
+          await db
+            .from('template_preset_mappings')
+            .insert({
+              template_id: template.id,
+              submodule_id: cfg.submodule_id,
+              option_name: optName,
+              preset_id: presetId,
+            });
+        }
+      }
+    }
+
+    // 6. Return template detail (same shape as GET /:id)
+    const { data: mappings } = await db
+      .from('template_preset_mappings')
+      .select('id, submodule_id, option_name, preset_id, option_presets(preset_name, preset_value)')
+      .eq('template_id', template.id)
+      .order('submodule_id');
+
+    const { data: tplDocs } = await db
+      .from('template_reference_docs')
+      .select('id, filename, content_type, size_bytes, created_at')
+      .eq('template_id', template.id)
+      .order('filename');
+
+    const presets = (mappings || []).map(m => ({
+      id: m.id,
+      submodule_id: m.submodule_id,
+      option_name: m.option_name,
+      preset_id: m.preset_id,
+      preset_name: m.option_presets?.preset_name || '',
+      preset_value: m.option_presets?.preset_value,
+    }));
+
+    res.status(201).json({
+      template: {
+        ...template,
+        preset_count: presets.length,
+        doc_count: (tplDocs || []).length,
+        presets,
+        reference_docs: tplDocs || [],
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 // ── Helper: Build run_submodule_config rows from template mappings ──
 
 /**

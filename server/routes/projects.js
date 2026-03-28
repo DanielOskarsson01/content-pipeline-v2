@@ -2,6 +2,7 @@ import { Router } from 'express';
 import db from '../services/db.js';
 import { STEP_CONFIG } from '../../shared/stepConfig.js';
 import { buildConfigRows } from './templates.js';
+import { getSubmoduleById } from '../services/moduleLoader.js';
 
 const router = Router();
 
@@ -109,15 +110,21 @@ router.post('/', async (req, res, next) => {
 
     // 4. Apply template if provided — copy docs + pre-populate configs
     if (template_id) {
-      // Copy template reference docs → project_reference_docs
+      // Copy template reference docs → project_reference_docs (with ID mapping)
+      const docIdMap = {}; // templateDocId → projectDocId
       const { data: tDocs } = await db
         .from('template_reference_docs')
-        .select('filename, content, content_type, size_bytes')
+        .select('id, filename, content, content_type, size_bytes')
         .eq('template_id', template_id);
       if (tDocs?.length) {
-        await db.from('project_reference_docs').insert(
-          tDocs.map(d => ({ project_id: project.id, ...d }))
-        );
+        for (const tDoc of tDocs) {
+          const { data: pDoc } = await db
+            .from('project_reference_docs')
+            .insert({ project_id: project.id, filename: tDoc.filename, content: tDoc.content, content_type: tDoc.content_type, size_bytes: tDoc.size_bytes })
+            .select('id')
+            .single();
+          if (pDoc) docIdMap[tDoc.id] = pDoc.id;
+        }
       }
 
       // Pre-populate run_submodule_config from template preset mappings
@@ -127,6 +134,15 @@ router.post('/', async (req, res, next) => {
         .eq('template_id', template_id);
       if (mappings?.length) {
         const configRows = buildConfigRows(run.id, mappings);
+        // Remap doc_selector IDs from template docs → project docs
+        for (const row of configRows) {
+          const manifest = getSubmoduleById(row.submodule_id);
+          for (const opt of (manifest?.options || [])) {
+            if (opt.type === 'doc_selector' && Array.isArray(row.options[opt.name])) {
+              row.options[opt.name] = row.options[opt.name].map(id => docIdMap[id] || id);
+            }
+          }
+        }
         if (configRows.length > 0) {
           await db.from('run_submodule_config').insert(configRows);
         }

@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { useParams, Link, Navigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useParams, Link, Navigate, useNavigate } from 'react-router-dom';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import { useRunData, useApproveStep, useSkipStep, useReopenStep } from '../../hooks/useRun';
 import { usePipelineStore } from '../../stores/pipelineStore';
 import { usePanelStore } from '../../stores/panelStore';
+import { useAppStore } from '../../stores/appStore';
 import { STEP_CONFIG } from '../../config/stepConfig';
 import { StepContainer } from '../steps/StepContainer';
 import { Step0View } from '../steps/Step0View';
@@ -91,6 +92,7 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <SaveAsTemplateButton runId={runId} />
           <Link
             to={`/projects/${projectId}/runs/${runId}/report`}
             className="text-sm text-brand-600 hover:text-brand-700"
@@ -145,6 +147,68 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
       </div>
 
       <DecisionLog runId={runId} />
+    </div>
+  );
+}
+
+function SaveAsTemplateButton({ runId }: { runId: string }) {
+  const navigate = useNavigate();
+  const { showToast } = useAppStore();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+
+  const saveMutation = useMutation({
+    mutationFn: (data: { name: string; description?: string }) =>
+      api.saveRunAsTemplate(runId, data),
+    onSuccess: (result) => {
+      showToast(`Template "${result.template.name}" created`, 'success');
+      setOpen(false);
+      setName('');
+      navigate(`/templates/${result.template.id}`);
+    },
+  });
+
+  const handleSave = () => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    saveMutation.mutate({ name: trimmed });
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="text-sm text-gray-500 hover:text-gray-700"
+      >
+        Save as Template
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="Template name"
+        className="bg-white border border-gray-300 rounded px-2 py-1 text-sm w-48 focus:outline-none focus:ring-1 focus:ring-sky-500"
+        onKeyDown={(e) => e.key === 'Enter' && handleSave()}
+        autoFocus
+      />
+      <button
+        onClick={handleSave}
+        disabled={!name.trim() || saveMutation.isPending}
+        className="px-2.5 py-1 text-xs bg-sky-600 text-white rounded hover:bg-sky-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+      >
+        {saveMutation.isPending ? 'Saving...' : 'Save'}
+      </button>
+      <button
+        onClick={() => { setOpen(false); setName(''); }}
+        className="text-xs text-gray-400 hover:text-gray-600"
+      >
+        Cancel
+      </button>
     </div>
   );
 }
