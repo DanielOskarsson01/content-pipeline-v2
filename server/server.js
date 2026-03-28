@@ -12,6 +12,7 @@ import stepContextRouter from './routes/stepContext.js';
 import { executeRouter, submoduleRunRouter, latestRunsRouter } from './routes/submoduleRuns.js';
 import referenceDocsRouter from './routes/referenceDocs.js';
 import presetsRouter from './routes/presets.js';
+import templatesRouter from './routes/templates.js';
 import { loadModules } from './services/moduleLoader.js';
 import db from './services/db.js';
 
@@ -53,6 +54,7 @@ app.use('/api/runs/:runId/steps/:stepIndex/submodule-runs', latestRunsRouter);
 app.use('/api/submodule-runs', submoduleRunRouter);
 app.use('/api/projects/:projectId/reference-docs', referenceDocsRouter);
 app.use('/api/presets', presetsRouter);
+app.use('/api/templates', templatesRouter);
 
 // Metrics endpoint — execution stats per submodule
 app.get('/api/metrics/summary', async (_req, res, next) => {

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import db from '../services/db.js';
 import { STEP_CONFIG } from '../../shared/stepConfig.js';
+import { buildConfigRows } from './templates.js';
 
 const router = Router();
 
@@ -56,7 +57,7 @@ router.get('/:id', async (req, res, next) => {
  */
 router.post('/', async (req, res, next) => {
   try {
-    const { name, intent } = req.body;
+    const { name, intent, template_id } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'name is required' });
@@ -68,12 +69,16 @@ router.post('/', async (req, res, next) => {
       .insert({
         name: name.trim(),
         description: intent || null,
+        template_id: template_id || null,
         status: 'active',
       })
       .select()
       .single();
 
-    if (projErr) throw projErr;
+    if (projErr) {
+      if (projErr.code === '23503') return res.status(400).json({ error: 'Template not found' });
+      throw projErr;
+    }
 
     // 2. Create pipeline_run
     const { data: run, error: runErr } = await db
@@ -101,6 +106,32 @@ router.post('/', async (req, res, next) => {
       .insert(stages);
 
     if (stagesErr) throw stagesErr;
+
+    // 4. Apply template if provided — copy docs + pre-populate configs
+    if (template_id) {
+      // Copy template reference docs → project_reference_docs
+      const { data: tDocs } = await db
+        .from('template_reference_docs')
+        .select('filename, content, content_type, size_bytes')
+        .eq('template_id', template_id);
+      if (tDocs?.length) {
+        await db.from('project_reference_docs').insert(
+          tDocs.map(d => ({ project_id: project.id, ...d }))
+        );
+      }
+
+      // Pre-populate run_submodule_config from template preset mappings
+      const { data: mappings } = await db
+        .from('template_preset_mappings')
+        .select('submodule_id, option_name, option_presets(preset_value)')
+        .eq('template_id', template_id);
+      if (mappings?.length) {
+        const configRows = buildConfigRows(run.id, mappings);
+        if (configRows.length > 0) {
+          await db.from('run_submodule_config').insert(configRows);
+        }
+      }
+    }
 
     res.status(201).json({ project, run });
   } catch (err) { next(err); }

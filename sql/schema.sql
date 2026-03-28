@@ -407,3 +407,43 @@ CREATE UNIQUE INDEX IF NOT EXISTS option_presets_global_unique
 
 CREATE INDEX IF NOT EXISTS idx_option_presets_submodule
   ON option_presets(submodule_id, option_name);
+
+-- ============================================================
+-- Phase 12b: Pipeline Templates
+-- A template is a named collection of preset selections + reference docs.
+-- Creating a project from a template copies docs and pre-populates run_submodule_config.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS templates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Bridge: which preset is selected for which option in which template
+CREATE TABLE IF NOT EXISTS template_preset_mappings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  template_id UUID NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+  submodule_id TEXT NOT NULL,
+  option_name TEXT NOT NULL,
+  preset_id UUID NOT NULL REFERENCES option_presets(id) ON DELETE RESTRICT,
+  UNIQUE(template_id, submodule_id, option_name)
+);
+
+-- Template-level reference docs (copied to project on use)
+CREATE TABLE IF NOT EXISTS template_reference_docs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  template_id UUID NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+  filename TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'text/plain',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(template_id, filename)
+);
+
+-- Wire projects.template_id FK (existing column, new constraint)
+ALTER TABLE projects
+  ADD CONSTRAINT fk_projects_template
+  FOREIGN KEY (template_id) REFERENCES templates(id) ON DELETE SET NULL;

@@ -114,7 +114,12 @@ router.delete('/:id', async (req, res, next) => {
       .delete()
       .eq('id', req.params.id);
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === '23503') {
+        return res.status(409).json({ error: 'Cannot delete preset: it is used by one or more templates. Remove it from templates first.' });
+      }
+      throw error;
+    }
     res.json({ deleted: true });
   } catch (err) { next(err); }
 });
