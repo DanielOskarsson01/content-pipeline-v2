@@ -14,6 +14,7 @@
  *   - ALTER TABLE projects ADD COLUMN mode TEXT DEFAULT 'single_run';
  */
 
+import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 
 const DRY_RUN = process.argv.includes('--dry-run');
