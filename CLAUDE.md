@@ -423,3 +423,4 @@ Entry types: decision | progress | blocker | idea
 - None — both repos committed (d64fc37, 9832f4e) and pushed, CI/CD will deploy
 
 **Updated by:** session-closer agent
+

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import db from '../services/db.js';
 import { STEP_CONFIG } from '../../shared/stepConfig.js';
-import { buildConfigRows } from './templates.js';
+import { buildConfigRowsFromPresetMap, resolvePresetMap } from './templates.js';
 import { getSubmoduleById } from '../services/moduleLoader.js';
 
 const router = Router();
@@ -108,8 +108,15 @@ router.post('/', async (req, res, next) => {
 
     if (stagesErr) throw stagesErr;
 
-    // 4. Apply template if provided — copy docs + pre-populate configs
+    // 4. Apply template if provided — copy docs + pre-populate configs from preset_map JSONB
     if (template_id) {
+      // Fetch template preset_map
+      const { data: tpl } = await db
+        .from('templates')
+        .select('preset_map')
+        .eq('id', template_id)
+        .single();
+
       // Copy template reference docs → project_reference_docs (with ID mapping)
       const docIdMap = {}; // templateDocId → projectDocId
       const { data: tDocs } = await db
@@ -127,22 +134,11 @@ router.post('/', async (req, res, next) => {
         }
       }
 
-      // Pre-populate run_submodule_config from template preset mappings
-      const { data: mappings } = await db
-        .from('template_preset_mappings')
-        .select('submodule_id, option_name, option_presets(preset_value)')
-        .eq('template_id', template_id);
-      if (mappings?.length) {
-        const configRows = buildConfigRows(run.id, mappings);
-        // Remap doc_selector IDs from template docs → project docs
-        for (const row of configRows) {
-          const manifest = getSubmoduleById(row.submodule_id);
-          for (const opt of (manifest?.options || [])) {
-            if (opt.type === 'doc_selector' && Array.isArray(row.options[opt.name])) {
-              row.options[opt.name] = row.options[opt.name].map(id => docIdMap[id] || id);
-            }
-          }
-        }
+      // Pre-populate run_submodule_config from preset_map JSONB
+      const presetMap = tpl?.preset_map || {};
+      if (Object.keys(presetMap).length > 0) {
+        const resolved = await resolvePresetMap(presetMap, project.id);
+        const configRows = buildConfigRowsFromPresetMap(run.id, resolved, docIdMap);
         if (configRows.length > 0) {
           await db.from('run_submodule_config').insert(configRows);
         }

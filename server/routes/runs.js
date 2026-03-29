@@ -311,6 +311,73 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
         },
       });
 
+    // Phase 12b: Progressive save — merge approved config back to template
+    // Fires for update_template, new_template, fork_template modes
+    try {
+      const { data: runRow } = await db
+        .from('pipeline_runs')
+        .select('project_id')
+        .eq('id', runId)
+        .single();
+
+      const { data: project } = runRow ? await db
+        .from('projects')
+        .select('mode, template_id')
+        .eq('id', runRow.project_id)
+        .single() : { data: null };
+
+      const saveableModes = ['update_template', 'new_template', 'fork_template'];
+      if (project?.template_id && saveableModes.includes(project.mode)) {
+        // Read run_submodule_config rows for the approved step
+        const { data: stepConfigs } = await db
+          .from('run_submodule_config')
+          .select('submodule_id, options')
+          .eq('run_id', runId)
+          .eq('step_index', stepIndex);
+
+        if (stepConfigs?.length) {
+          // Fetch current template preset_map + execution_plan
+          const { data: tpl } = await db
+            .from('templates')
+            .select('preset_map, execution_plan')
+            .eq('id', project.template_id)
+            .single();
+
+          const presetMap = { ...(tpl?.preset_map || {}) };
+          const execPlan = { ...(tpl?.execution_plan || {}) };
+          const submodulesPerStep = { ...(execPlan.submodules_per_step || {}) };
+          const stepSubs = [];
+
+          for (const cfg of stepConfigs) {
+            if (!cfg.options || typeof cfg.options !== 'object') continue;
+            stepSubs.push(cfg.submodule_id);
+
+            // Merge options into preset_map fallback_values
+            const existing = presetMap[cfg.submodule_id] || { preset_name: '', fallback_values: {} };
+            presetMap[cfg.submodule_id] = {
+              preset_name: existing.preset_name,
+              fallback_values: { ...existing.fallback_values, ...cfg.options },
+            };
+          }
+
+          // Update execution_plan with submodules used at this step
+          submodulesPerStep[String(stepIndex)] = stepSubs;
+          execPlan.submodules_per_step = submodulesPerStep;
+
+          // TODO: Add row locking if multi-user access is needed (single-operator system today)
+          await db
+            .from('templates')
+            .update({ preset_map: presetMap, execution_plan: execPlan, updated_at: new Date().toISOString() })
+            .eq('id', project.template_id);
+
+          console.log(`[progressive-save] Updated template ${project.template_id} from step ${stepIndex} (${stepSubs.length} submodules)`);
+        }
+      }
+    } catch (saveErr) {
+      // Progressive save failure should not block step approval
+      console.error('[progressive-save] Failed:', saveErr.message);
+    }
+
     res.json({
       step_completed: stepIndex,
       next_step: nextStep,

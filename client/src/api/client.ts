@@ -54,7 +54,7 @@ import type {
   ApproveSubmoduleRunResponse, ApproveSubmoduleRunPerEntityResponse,
   EntityRunDetail, ExecuteSubmoduleResponse,
   DecisionLogEntry, OptionPreset, RunReport,
-  Template, TemplateDetail,
+  Template, TemplateDetail, TemplatePresetMap, TemplateExecutionPlan, TemplateSeedConfig,
 } from '../types/step';
 
 export const api = {
@@ -171,12 +171,12 @@ export const api = {
   // Templates (Phase 12b)
   getTemplates: () => apiFetch<Template[]>('/api/templates'),
   getTemplate: (id: string) => apiFetch<TemplateDetail>(`/api/templates/${id}`),
-  createTemplate: (data: { name: string; description?: string }) =>
+  createTemplate: (data: { name: string; description?: string; preset_map?: TemplatePresetMap; execution_plan?: TemplateExecutionPlan; seed_config?: TemplateSeedConfig }) =>
     apiFetch<{ template: Template }>('/api/templates', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  updateTemplate: (id: string, data: { name?: string; description?: string }) =>
+  updateTemplate: (id: string, data: { name?: string; description?: string; preset_map?: TemplatePresetMap; execution_plan?: TemplateExecutionPlan; seed_config?: TemplateSeedConfig }) =>
     apiFetch<{ template: Template }>(`/api/templates/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -185,11 +185,13 @@ export const api = {
     apiFetch<{ deleted: boolean }>(`/api/templates/${id}`, {
       method: 'DELETE',
     }),
+  /** DEPRECATED: Use updateTemplate with preset_map instead */
   addTemplatePreset: (templateId: string, data: { submodule_id: string; option_name: string; preset_id: string }) =>
     apiFetch<{ mapping: unknown }>(`/api/templates/${templateId}/presets`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  /** DEPRECATED: Use updateTemplate with preset_map instead */
   removeTemplatePreset: (templateId: string, mappingId: string) =>
     apiFetch<{ deleted: boolean }>(`/api/templates/${templateId}/presets/${mappingId}`, {
       method: 'DELETE',
@@ -207,8 +209,33 @@ export const api = {
       method: 'DELETE',
     }),
 
+  // Template operations (Phase 12b)
+  applyTemplate: (templateId: string, runId: string) =>
+    apiFetch<{ applied: number }>(`/api/templates/${templateId}/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ run_id: runId }),
+    }),
+  /** Launch template — for CSV seeds, pass FormData with seed_file; for URL/prompt, pass JSON */
+  launchTemplate: (templateId: string, data: FormData | { project_name: string; project_description?: string; mode: string; urls?: string; prompt?: string }) => {
+    if (data instanceof FormData) {
+      // Multipart for CSV seed
+      return fetch(`${API_BASE}/api/templates/${templateId}/launch`, {
+        method: 'POST',
+        body: data,
+      }).then(async (r) => {
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+        return r.json() as Promise<{ project: Project; run: { id: string } }>;
+      });
+    }
+    // JSON for URL/prompt seeds
+    return apiFetch<{ project: Project; run: { id: string } }>(`/api/templates/${templateId}/launch`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
   // Save run as template
-  saveRunAsTemplate: (runId: string, data: { name: string; description?: string }) =>
+  saveRunAsTemplate: (runId: string, data: { name: string; description?: string; seed_config?: TemplateSeedConfig }) =>
     apiFetch<{ template: TemplateDetail }>(`/api/templates/from-run/${runId}`, {
       method: 'POST',
       body: JSON.stringify(data),

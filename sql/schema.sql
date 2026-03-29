@@ -8,7 +8,10 @@ CREATE TABLE IF NOT EXISTS projects (
   description TEXT,
   timing TEXT,
   template_id UUID,
+  mode TEXT NOT NULL DEFAULT 'single_run',
+  -- single_run | use_template | update_template | new_template | fork_template
   status TEXT NOT NULL DEFAULT 'active',
+  -- active | draft (launch endpoint creates as draft, flips to active on success) | archived
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -410,18 +413,29 @@ CREATE INDEX IF NOT EXISTS idx_option_presets_submodule
 
 -- ============================================================
 -- Phase 12b: Pipeline Templates
--- A template is a named collection of preset selections + reference docs.
--- Creating a project from a template copies docs and pre-populates run_submodule_config.
+-- NOTE: Evolves existing templates table (not new pipeline_templates table)
+-- to preserve projects.template_id FK and existing data.
+-- A template defines a complete pipeline configuration: which submodules
+-- to run, what presets to use, and what seed input to expect.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS templates (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL UNIQUE,
   description TEXT,
+  preset_map JSONB DEFAULT '{}'::jsonb,
+  -- { "submodule-id": { "preset_name": "my-preset", "fallback_values": { "system_prompt": "...", ... } } }
+  execution_plan JSONB DEFAULT '{}'::jsonb,
+  -- { "steps": [0,1,2,...], "skip_steps": [6,7], "submodules_per_step": { "1": ["sitemap-parser"] } }
+  -- Metadata-only in 12b. Auto-execute uses this in 12c.
+  seed_config JSONB DEFAULT '{"seed_type":"csv"}'::jsonb,
+  -- { "seed_type": "csv"|"url"|"prompt", "required_columns": ["name","website"], "column_aliases": {} }
+  -- Template column_aliases extend (not replace) the skeleton's built-in COLUMN_ALIASES.
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Bridge: which preset is selected for which option in which template
+-- DEPRECATED: Being migrated to templates.preset_map JSONB.
+-- Kept during transition period. Will be dropped after 12b is verified end-to-end.
 CREATE TABLE IF NOT EXISTS template_preset_mappings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   template_id UUID NOT NULL REFERENCES templates(id) ON DELETE CASCADE,

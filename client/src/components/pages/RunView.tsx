@@ -156,9 +156,10 @@ function SaveAsTemplateButton({ runId }: { runId: string }) {
   const { showToast } = useAppStore();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
+  const [seedType, setSeedType] = useState<'csv' | 'url' | 'prompt'>('csv');
 
   const saveMutation = useMutation({
-    mutationFn: (data: { name: string; description?: string }) =>
+    mutationFn: (data: Parameters<typeof api.saveRunAsTemplate>[1]) =>
       api.saveRunAsTemplate(runId, data),
     onSuccess: (result) => {
       showToast(`Template "${result.template.name}" created`, 'success');
@@ -171,7 +172,7 @@ function SaveAsTemplateButton({ runId }: { runId: string }) {
   const handleSave = () => {
     const trimmed = name.trim();
     if (!trimmed) return;
-    saveMutation.mutate({ name: trimmed });
+    saveMutation.mutate({ name: trimmed, seed_config: { seed_type: seedType } });
   };
 
   if (!open) {
@@ -196,6 +197,15 @@ function SaveAsTemplateButton({ runId }: { runId: string }) {
         onKeyDown={(e) => e.key === 'Enter' && handleSave()}
         autoFocus
       />
+      <select
+        value={seedType}
+        onChange={(e) => setSeedType(e.target.value as 'csv' | 'url' | 'prompt')}
+        className="bg-white border border-gray-300 rounded px-1.5 py-1 text-xs text-gray-600"
+      >
+        <option value="csv">CSV</option>
+        <option value="url">URL</option>
+        <option value="prompt">Prompt</option>
+      </select>
       <button
         onClick={handleSave}
         disabled={!name.trim() || saveMutation.isPending}

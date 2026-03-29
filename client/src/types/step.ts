@@ -1,10 +1,14 @@
+// Phase 12b: Project modes
+export type ProjectMode = 'single_run' | 'use_template' | 'update_template' | 'new_template' | 'fork_template';
+
 export interface Project {
   id: string;
   name: string;
   description: string | null;
   timing: string | null;
   template_id: string | null;
-  status: 'active' | 'archived';
+  mode: ProjectMode;
+  status: 'draft' | 'active' | 'archived';
   created_at: string;
 }
 
@@ -45,6 +49,7 @@ export interface CreateProjectInput {
   name: string;
   intent?: string;
   template_id?: string;
+  mode?: ProjectMode;
 }
 
 export interface CreateProjectResponse {
@@ -149,21 +154,41 @@ export interface RunReport {
   steps: RunReportStep[];
 }
 
+// Phase 12b: Template JSONB config types
+export interface TemplatePresetMapEntry {
+  preset_name: string;
+  fallback_values: Record<string, unknown>;
+}
+export type TemplatePresetMap = Record<string, TemplatePresetMapEntry>;
+
+export interface TemplateExecutionPlan {
+  submodules_per_step?: Record<string, string[]>;
+  skip_steps?: number[];
+}
+
+export interface TemplateSeedConfig {
+  seed_type: 'csv' | 'url' | 'prompt';
+  required_columns?: string[];
+  column_aliases?: Record<string, string>;
+}
+
 // Phase 12b: Pipeline Templates
 export interface Template {
   id: string;
   name: string;
   description: string | null;
+  preset_map: TemplatePresetMap;
+  execution_plan: TemplateExecutionPlan;
+  seed_config: TemplateSeedConfig;
   preset_count: number;
   doc_count: number;
   created_at: string;
 }
 
+/** DEPRECATED: Backward-compat flat preset from preset_map JSONB */
 export interface TemplatePresetMapping {
-  id: string;
   submodule_id: string;
   option_name: string;
-  preset_id: string;
   preset_name: string;
   preset_value: unknown;
 }
@@ -171,6 +196,15 @@ export interface TemplatePresetMapping {
 export interface TemplateDetail extends Template {
   presets: TemplatePresetMapping[];
   reference_docs: { id: string; filename: string; content_type: string; size_bytes: number }[];
+}
+
+export interface LaunchTemplateInput {
+  project_name: string;
+  project_description?: string;
+  mode: ProjectMode;
+  urls?: string;
+  prompt?: string;
+  // CSV: sent as FormData with seed_file field
 }
 
 // CategoryGroups: Record<categoryName, SubmoduleManifest[]>

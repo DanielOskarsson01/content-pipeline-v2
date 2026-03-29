@@ -65,7 +65,8 @@ export function TemplatesPage() {
                 {t.description && (
                   <p className="text-xs text-gray-500 truncate mt-0.5">{t.description}</p>
                 )}
-                <div className="flex gap-3 mt-1 text-[10px] text-gray-400">
+                <div className="flex gap-3 mt-1 text-[10px] text-gray-400 items-center">
+                  <SeedBadge seedType={t.seed_config?.seed_type || 'csv'} />
                   <span>{t.preset_count} preset{t.preset_count !== 1 ? 's' : ''}</span>
                   <span>{t.doc_count} doc{t.doc_count !== 1 ? 's' : ''}</span>
                 </div>
@@ -113,5 +114,18 @@ export function TemplatesPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function SeedBadge({ seedType }: { seedType: string }) {
+  const colors: Record<string, string> = {
+    csv: 'bg-emerald-100 text-emerald-700',
+    url: 'bg-blue-100 text-blue-700',
+    prompt: 'bg-purple-100 text-purple-700',
+  };
+  return (
+    <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium uppercase ${colors[seedType] || 'bg-gray-100 text-gray-600'}`}>
+      {seedType}
+    </span>
   );
 }
