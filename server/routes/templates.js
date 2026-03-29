@@ -1,32 +1,13 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { parse } from 'csv-parse';
 import db from '../services/db.js';
 import { getSubmoduleById } from '../services/moduleLoader.js';
 import { STEP_CONFIG } from '../../shared/stepConfig.js';
+import { parseSeedCsv } from '../utils/seedParser.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const ALLOWED_EXTENSIONS = new Set(['md', 'txt', 'csv', 'json']);
-
-// Column aliases for CSV seed parsing in launch endpoint
-// (mirrors core set from stepContext.js — template column_aliases extend these additively)
-const SEED_COLUMN_ALIASES = {
-  'company name': 'name', 'company_name': 'name', 'brand': 'name',
-  'brand name': 'name', 'operator': 'name', 'entity': 'name',
-  'url': 'website', 'domain': 'website', 'company url': 'website',
-  'website url': 'website', 'homepage': 'website',
-};
-
-/** Promisified csv-parse (non-blocking, same pattern as stepContext.js) */
-function parseCsvAsync(content, options) {
-  return new Promise((resolve, reject) => {
-    parse(content, options, (err, records) => {
-      if (err) reject(err);
-      else resolve(records);
-    });
-  });
-}
 
 // ── Template CRUD ──────────────────────────────────────────────
 
@@ -42,9 +23,10 @@ router.get('/', async (_req, res, next) => {
       .order('name');
     if (error) throw error;
 
-    // Doc counts from reference docs table
+    // Doc counts + usage counts
     const ids = (templates || []).map(t => t.id);
     let docCounts = {};
+    let usageCounts = {};
     if (ids.length > 0) {
       const { data: docs } = await db
         .from('template_reference_docs')
@@ -53,12 +35,21 @@ router.get('/', async (_req, res, next) => {
       for (const d of (docs || [])) {
         docCounts[d.template_id] = (docCounts[d.template_id] || 0) + 1;
       }
+
+      const { data: projects } = await db
+        .from('projects')
+        .select('template_id')
+        .in('template_id', ids);
+      for (const p of (projects || [])) {
+        usageCounts[p.template_id] = (usageCounts[p.template_id] || 0) + 1;
+      }
     }
 
     const result = (templates || []).map(t => ({
       ...t,
       preset_count: Object.keys(t.preset_map || {}).length,
       doc_count: docCounts[t.id] || 0,
+      usage_count: usageCounts[t.id] || 0,
     }));
 
     res.json(result);
@@ -543,12 +534,12 @@ router.post('/:id/apply', async (req, res, next) => {
  * For url: urls (newline-separated string)
  * For prompt: prompt (string)
  */
-router.post('/:id/launch', upload.single('seed_file'), async (req, res, next) => {
+router.post('/:id/launch', upload.single('file'), async (req, res, next) => {
   try {
     const templateId = req.params.id;
-    const { project_name, project_description, mode } = req.body;
+    const { project_name, project_description, mode, fork_name, project_id } = req.body;
 
-    if (!project_name?.trim()) {
+    if (!project_id && !project_name?.trim()) {
       return res.status(400).json({ error: 'project_name is required' });
     }
     const validModes = ['single_run', 'use_template', 'update_template', 'new_template', 'fork_template'];
@@ -570,51 +561,55 @@ router.post('/:id/launch', upload.single('seed_file'), async (req, res, next) =>
     const seedConfig = template.seed_config || { seed_type: 'csv' };
     const seedType = seedConfig.seed_type || 'csv';
 
-    // 2. Parse seed data before creating anything (fail fast)
+    // 2. Parse seed data — only required for use_template mode
     let entities = [];
     let seedFilename = null;
 
-    if (seedType === 'csv') {
-      if (!req.file) {
-        return res.status(400).json({ error: 'CSV seed file required (seed_file field)' });
+    if (mode === 'use_template') {
+      // Seed is required for use_template
+      if (seedType === 'csv') {
+        if (!req.file) {
+          return res.status(400).json({ error: 'CSV seed file required (file field)' });
+        }
+        const parsed = await parseSeedCsv(req.file.buffer, seedConfig.column_aliases);
+        entities = parsed.entities;
+        seedFilename = req.file.originalname;
+      } else if (seedType === 'url') {
+        const urls = req.body.urls;
+        if (!urls?.trim()) {
+          return res.status(400).json({ error: 'urls field required for url seed type' });
+        }
+        entities = urls.trim().split(/\r?\n/).filter(Boolean).map(line => {
+          const url = line.trim();
+          let entityName = url;
+          try {
+            const parsed = new URL(url.startsWith('http') ? url : `https://${url}`);
+            entityName = parsed.hostname.replace(/^www\./, '').split('.')[0];
+            entityName = entityName.charAt(0).toUpperCase() + entityName.slice(1);
+          } catch { /* use raw url as name */ }
+          return { name: entityName, website: url };
+        });
+      } else if (seedType === 'prompt') {
+        const prompt = req.body.prompt;
+        if (!prompt?.trim()) {
+          return res.status(400).json({ error: 'prompt field required for prompt seed type' });
+        }
+        entities = [{ name: 'prompt', text: prompt.trim() }];
       }
-      const parsed = await parseSeedCsv(req.file.buffer, seedConfig.column_aliases);
-      entities = parsed.entities;
-      seedFilename = req.file.originalname;
-    } else if (seedType === 'url') {
-      const urls = req.body.urls;
-      if (!urls?.trim()) {
-        return res.status(400).json({ error: 'urls field required for url seed type' });
-      }
-      entities = urls.trim().split(/\r?\n/).filter(Boolean).map(line => {
-        const url = line.trim();
-        let entityName = url;
-        try {
-          const parsed = new URL(url.startsWith('http') ? url : `https://${url}`);
-          entityName = parsed.hostname.replace(/^www\./, '').split('.')[0];
-          entityName = entityName.charAt(0).toUpperCase() + entityName.slice(1);
-        } catch { /* use raw url as name */ }
-        return { name: entityName, website: url };
-      });
-    } else if (seedType === 'prompt') {
-      const prompt = req.body.prompt;
-      if (!prompt?.trim()) {
-        return res.status(400).json({ error: 'prompt field required for prompt seed type' });
-      }
-      entities = [{ name: 'prompt', text: prompt.trim() }];
-    }
 
-    if (entities.length === 0) {
-      return res.status(400).json({ error: 'No entities parsed from seed data' });
+      if (entities.length === 0) {
+        return res.status(400).json({ error: 'No entities parsed from seed data' });
+      }
     }
+    // For update_template, fork_template, new_template: entities stays [] — seed uploaded in Step 1
 
     // 3. Mode-specific template setup
     let linkedTemplateId = templateId;
     let sourceTemplateId = templateId; // where to copy docs from
 
     if (mode === 'fork_template') {
-      // Deep-copy template
-      let forkName = `${template.name} (fork)`;
+      // Deep-copy template — use fork_name if provided, otherwise auto-generate
+      let forkName = fork_name?.trim() || `${template.name} (fork)`;
       let { data: fork, error: forkErr } = await db
         .from('templates')
         .insert({
@@ -665,19 +660,34 @@ router.post('/:id/launch', upload.single('seed_file'), async (req, res, next) =>
       // sourceTemplateId stays as original — copy docs & config from source
     }
 
-    // 4. Create project with draft status
-    const { data: project, error: projErr } = await db
-      .from('projects')
-      .insert({
-        name: project_name.trim(),
-        description: project_description || null,
-        template_id: linkedTemplateId,
-        mode,
-        status: 'draft',
-      })
-      .select()
-      .single();
-    if (projErr) throw projErr;
+    // 4. Create project (or reuse existing if project_id provided)
+    let project;
+    if (project_id) {
+      const { data: existing, error: existErr } = await db
+        .from('projects')
+        .select('*')
+        .eq('id', project_id)
+        .single();
+      if (existErr?.code === 'PGRST116' || !existing) {
+        return res.status(400).json({ error: 'Project not found' });
+      }
+      if (existErr) throw existErr;
+      project = existing;
+    } else {
+      const { data: created, error: projErr } = await db
+        .from('projects')
+        .insert({
+          name: project_name.trim(),
+          description: project_description || null,
+          template_id: linkedTemplateId,
+          mode,
+          status: 'draft',
+        })
+        .select()
+        .single();
+      if (projErr) throw projErr;
+      project = created;
+    }
 
     // 5. Create run (step 0 auto-approved → start at step 1)
     const { data: run, error: runErr } = await db
@@ -715,14 +725,26 @@ router.post('/:id/launch', upload.single('seed_file'), async (req, res, next) =>
       }
     }
 
-    // 9. Write seed data to step_context for step 0
-    await db.from('step_context').upsert({
-      run_id: run.id,
-      step_index: 0,
-      entities,
-      filename: seedFilename,
-      created_at: new Date().toISOString(),
-    }, { onConflict: 'run_id,step_index' });
+    // 9. Write seed data to step_context
+    if (entities.length > 0) {
+      // use_template: seed provided — write to step 0
+      await db.from('step_context').upsert({
+        run_id: run.id,
+        step_index: 0,
+        entities,
+        filename: seedFilename,
+        created_at: new Date().toISOString(),
+      }, { onConflict: 'run_id,step_index' });
+    } else {
+      // Seedless modes: write pending_seed to step 0 so Step 1 knows to prompt for upload
+      await db.from('step_context').upsert({
+        run_id: run.id,
+        step_index: 0,
+        entities: [],
+        status: 'pending_seed',
+        created_at: new Date().toISOString(),
+      }, { onConflict: 'run_id,step_index' });
+    }
 
     // 10. Flip project to active
     await db.from('projects').update({ status: 'active' }).eq('id', project.id);
@@ -899,62 +921,6 @@ export function buildConfigRowsFromPresetMap(runId, resolvedOptions, docIdMap = 
     });
   }
   return rows;
-}
-
-/**
- * Parse CSV buffer for seed data. Applies column aliases + entity name contract.
- */
-async function parseSeedCsv(buffer, templateAliases) {
-  const content = buffer.toString('utf-8');
-  const records = await parseCsvAsync(content, {
-    columns: true,
-    skip_empty_lines: true,
-    bom: true,
-    trim: true,
-    relax_column_count: true,
-  });
-
-  // Merge template aliases (additive) with base aliases
-  const aliases = { ...SEED_COLUMN_ALIASES };
-  if (templateAliases && typeof templateAliases === 'object') {
-    for (const [alias, canonical] of Object.entries(templateAliases)) {
-      aliases[alias.toLowerCase()] = canonical;
-    }
-  }
-
-  const entities = records.map((row, i) => {
-    // Lowercase keys + apply aliases
-    const normalized = {};
-    const lowered = {};
-    for (const [key, value] of Object.entries(row)) {
-      lowered[key.toLowerCase().trim()] = value;
-    }
-    for (const [key, value] of Object.entries(lowered)) {
-      const canonical = aliases[key];
-      if (canonical && !(canonical in normalized) && !(canonical in lowered)) {
-        normalized[canonical] = value;
-      }
-      if (!(key in normalized)) {
-        normalized[key] = value;
-      }
-    }
-
-    // Entity name contract: derive name from website if missing
-    if (!normalized.name && normalized.website) {
-      try {
-        const url = normalized.website.startsWith('http') ? normalized.website : `https://${normalized.website}`;
-        const hostname = new URL(url).hostname.replace(/^www\./, '');
-        normalized.name = hostname.split('.')[0].charAt(0).toUpperCase() + hostname.split('.')[0].slice(1);
-      } catch { /* ignore */ }
-    }
-    if (!normalized.name) {
-      const firstVal = Object.values(normalized).find(v => typeof v === 'string' && v.length > 0);
-      normalized.name = firstVal || `Entity ${i + 1}`;
-    }
-    return normalized;
-  });
-
-  return { entities };
 }
 
 /**

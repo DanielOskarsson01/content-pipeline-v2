@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS step_context (
   entities JSONB NOT NULL,
   filename TEXT,
   source_submodule TEXT,
+  status TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(run_id, step_index)
 );

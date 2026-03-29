@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { usePipelineStore } from '../../stores/pipelineStore';
 
-export type StepStatus = 'pending' | 'active' | 'completed' | 'skipped';
+export type StepStatus = 'pending' | 'active' | 'completed' | 'skipped' | 'approved';
 
 interface StepContainerProps {
   step: number;
@@ -16,6 +16,7 @@ function getStepNumberClass(status: StepStatus): string {
     case 'active':
       return 'bg-sky-600 text-white';
     case 'completed':
+    case 'approved':
       return 'bg-green-500 text-white';
     case 'skipped':
       return 'bg-gray-300 text-gray-500';
@@ -29,6 +30,7 @@ function getStatusBadgeClass(status: StepStatus): string {
     case 'active':
       return 'bg-sky-100 text-sky-700';
     case 'completed':
+    case 'approved':
       return 'bg-green-100 text-green-700';
     case 'skipped':
       return 'bg-gray-100 text-gray-500';
@@ -40,7 +42,7 @@ function getStatusBadgeClass(status: StepStatus): string {
 function getContainerClass(status: StepStatus): string {
   const base = 'rounded-lg border overflow-hidden transition-all';
   if (status === 'active') return `${base} bg-white border-sky-500 shadow-md ring-1 ring-sky-200`;
-  if (status === 'completed') return `${base} bg-white border-gray-200`;
+  if (status === 'completed' || status === 'approved') return `${base} bg-white border-gray-200`;
   if (status === 'skipped') return `${base} bg-gray-50 border-gray-200 opacity-40`;
   return `${base} bg-gray-50 border-gray-200 opacity-60`;
 }
@@ -48,7 +50,7 @@ function getContainerClass(status: StepStatus): string {
 export function StepContainer({ step, title, description, status, children }: StepContainerProps) {
   const { expandedStep, toggleStep } = usePipelineStore();
   const isExpanded = expandedStep === step;
-  const isClickable = status === 'active' || status === 'completed';
+  const isClickable = status === 'active' || status === 'completed' || status === 'approved';
 
   return (
     <div className={getContainerClass(status)}>
@@ -57,7 +59,7 @@ export function StepContainer({ step, title, description, status, children }: St
         onClick={() => isClickable && toggleStep(step)}
       >
         <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${getStepNumberClass(status)}`}>
-          {status === 'completed' ? <span className="text-sm">✓</span> : <span>{step}</span>}
+          {(status === 'completed' || status === 'approved') ? <span className="text-sm">✓</span> : <span>{step}</span>}
         </div>
 
         <div className="flex-1 min-w-0">

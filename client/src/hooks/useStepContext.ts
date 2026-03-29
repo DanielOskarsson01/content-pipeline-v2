@@ -8,6 +8,7 @@ export interface StepContextData {
   entities: Record<string, unknown>[];
   filename: string | null;
   source_submodule: string | null;
+  status?: string;
   created_at: string;
 }
 

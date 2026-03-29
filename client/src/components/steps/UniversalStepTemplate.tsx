@@ -4,6 +4,7 @@ import type { PipelineStage, SubmoduleManifest } from '../../types/step';
 import { useStepSubmodules } from '../../hooks/useSubmodules';
 import { useSubmoduleConfig, useSubmoduleConfigs, useSaveSubmoduleConfig } from '../../hooks/useSubmoduleConfig';
 import { useLatestSubmoduleRuns } from '../../hooks/useSubmoduleRuns';
+import { useStepContext } from '../../hooks/useStepContext';
 import { usePanelStore } from '../../stores/panelStore';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../api/client';
@@ -31,6 +32,8 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
   const { data: categories, isLoading: submodulesLoading } = useStepSubmodules(stage.step_index);
   const { activeSubmoduleId } = usePanelStore();
   const { data: latestRuns } = useLatestSubmoduleRuns(stage.run_id, stage.step_index);
+  const { data: stepContext } = useStepContext(stage.run_id, stage.step_index);
+  const isPendingSeed = stepContext?.status === 'pending_seed' && (!stepContext.entities || stepContext.entities.length === 0);
 
   // All submodule configs for this step — used by CategoryCardGrid for data op display
   const { data: configMap } = useSubmoduleConfigs(stage.run_id, stage.step_index);
@@ -108,6 +111,16 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
 
   return (
     <div>
+      {/* Pending seed banner — shown when run was created without seed data */}
+      {isPendingSeed && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 mb-4">
+          <p className="text-sm font-medium text-amber-800">Seed data required</p>
+          <p className="text-xs text-amber-600 mt-0.5">
+            Upload a CSV file or enter URLs in a submodule below to provide entity data for this run.
+          </p>
+        </div>
+      )}
+
       {/* CategoryCardGrid — real manifest data */}
       {submodulesLoading ? (
         <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center mb-4">

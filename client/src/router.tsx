@@ -40,7 +40,7 @@ export const router = createBrowserRouter([
     path: '/',
     element: <RootLayout />,
     children: [
-      { index: true, element: <Navigate to="/projects" replace /> },
+      { index: true, element: <Navigate to="/new" replace /> },
       { path: 'new', element: <NewProject /> },
       { path: 'projects', element: <ProjectsList /> },
       { path: 'templates', element: <TemplatesPage /> },

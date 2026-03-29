@@ -26,7 +26,7 @@ export interface PipelineStage {
   run_id: string;
   step_index: number;
   step_name: string;
-  status: 'pending' | 'active' | 'completed' | 'skipped';
+  status: 'pending' | 'active' | 'completed' | 'skipped' | 'approved';
   input_data: unknown;
   input_render_schema: unknown;
   output_data: unknown;
@@ -182,6 +182,7 @@ export interface Template {
   seed_config: TemplateSeedConfig;
   preset_count: number;
   doc_count: number;
+  usage_count?: number;
   created_at: string;
 }
 
@@ -198,13 +199,24 @@ export interface TemplateDetail extends Template {
   reference_docs: { id: string; filename: string; content_type: string; size_bytes: number }[];
 }
 
+export interface SeedPreviewResult {
+  entity_count: number;
+  entities: Array<{ name: string; [key: string]: unknown }>;
+  columns_found: string[];
+  columns_missing: string[];
+  all_columns: string[];
+  filename: string;
+  truncated: boolean;
+}
+
 export interface LaunchTemplateInput {
   project_name: string;
   project_description?: string;
   mode: ProjectMode;
   urls?: string;
   prompt?: string;
-  // CSV: sent as FormData with seed_file field
+  fork_name?: string;
+  project_id?: string;
 }
 
 // CategoryGroups: Record<categoryName, SubmoduleManifest[]>

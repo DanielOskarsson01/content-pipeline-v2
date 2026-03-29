@@ -116,7 +116,7 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
               step={stepCfg.index}
               title={stepCfg.name}
               description={stepCfg.description}
-              status={status as 'pending' | 'active' | 'completed' | 'skipped'}
+              status={status as 'pending' | 'active' | 'completed' | 'skipped' | 'approved'}
             >
               {stage && stepCfg.index === 0 && project ? (
                 <Step0View

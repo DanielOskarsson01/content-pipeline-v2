@@ -1,11 +1,30 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useProjects, useDeleteProject } from '../../hooks/useProjects';
 import { useAppStore } from '../../stores/appStore';
-import type { Project } from '../../types/step';
+import { CreateDropdown } from '../shared/CreateDropdown';
+import { api } from '../../api/client';
+import type { Project, ProjectMode } from '../../types/step';
+
+// Extended project type with enriched fields from GET /api/projects
+interface ProjectListItem extends Project {
+  template_name?: string | null;
+  run_count?: number;
+}
 
 export function ProjectsList() {
-  const { data: projects = [], isLoading, error } = useProjects();
+  const navigate = useNavigate();
+  const { data: projects = [], isLoading, error } = useProjects() as {
+    data: ProjectListItem[] | undefined;
+    isLoading: boolean;
+    error: Error | null;
+  };
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const handleModeSelect = (mode: ProjectMode) => {
+    navigate(`/new?mode=${mode}`);
+  };
 
   if (isLoading) {
     return <div className="text-center py-12 text-gray-500 text-sm">Loading projects...</div>;
@@ -23,7 +42,7 @@ export function ProjectsList() {
     return (
       <div className="text-center py-12">
         <p className="text-gray-500 text-sm">No projects yet</p>
-        <Link to="/new" className="text-brand-600 hover:underline text-sm mt-2 inline-block">
+        <Link to="/new" className="text-sky-600 hover:underline text-sm mt-2 inline-block">
           Create your first project
         </Link>
       </div>
@@ -34,66 +53,77 @@ export function ProjectsList() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-semibold text-gray-900">Projects</h2>
-        <Link
-          to="/new"
-          className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white text-sm rounded-lg font-medium transition-colors"
-        >
-          New Project
-        </Link>
+        <CreateDropdown variant="inline" onSelect={handleModeSelect} />
       </div>
 
       <div className="space-y-2">
         {projects.map((project) => (
-          <ProjectRow key={project.id} project={project} />
+          <div key={project.id}>
+            <ProjectRow
+              project={project}
+              isExpanded={expandedId === project.id}
+              onToggle={() => setExpandedId(expandedId === project.id ? null : project.id)}
+            />
+            {expandedId === project.id && <ProjectDetailPanel project={project} />}
+          </div>
         ))}
       </div>
     </div>
   );
 }
 
-function ProjectRow({ project }: { project: Project }) {
+// ── Project row ────────────────────────────────────────────
+
+function ProjectRow({ project, isExpanded, onToggle }: {
+  project: ProjectListItem;
+  isExpanded: boolean;
+  onToggle: () => void;
+}) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const deleteMutation = useDeleteProject();
   const showToast = useAppStore((s) => s.showToast);
 
   const handleDelete = (e: React.MouseEvent) => {
-    e.preventDefault();
     e.stopPropagation();
     if (!confirmDelete) {
       setConfirmDelete(true);
       return;
     }
     deleteMutation.mutate(project.id, {
-      onSuccess: () => {
-        showToast(`Deleted "${project.name}"`, 'success');
-      },
+      onSuccess: () => showToast(`Deleted "${project.name}"`, 'success'),
     });
   };
 
   const handleCancelDelete = (e: React.MouseEvent) => {
-    e.preventDefault();
     e.stopPropagation();
     setConfirmDelete(false);
   };
 
+  const timeAgo = getTimeAgo(project.created_at);
+
   return (
-    <Link
-      to={`/projects/${project.id}/runs/latest`}
-      className="block bg-white border border-gray-200 rounded-lg p-4 hover:border-gray-300 transition-colors"
+    <div
+      onClick={onToggle}
+      className={`bg-white border rounded-lg p-4 cursor-pointer transition-colors ${
+        isExpanded ? 'border-sky-300 ring-1 ring-sky-100' : 'border-gray-200 hover:border-gray-300'
+      }`}
     >
       <div className="flex items-center justify-between">
-        <div>
+        <div className="flex-1 min-w-0">
           <h3 className="text-sm font-medium text-gray-900">{project.name}</h3>
-          {project.description && (
-            <p className="text-xs text-gray-500 mt-0.5">{project.description}</p>
-          )}
+          <div className="flex items-center gap-2 mt-0.5 text-[10px] text-gray-400">
+            <span>{project.template_name || 'Single run'}</span>
+            <span>&middot;</span>
+            <span>{project.run_count ?? 0} run{(project.run_count ?? 0) !== 1 ? 's' : ''}</span>
+            <span>&middot;</span>
+            <span>{timeAgo}</span>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          <span className={`status-badge ${project.status === 'active' ? 'approved' : 'pending'}`}>
+        <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
+          <span className={`text-[10px] px-2 py-0.5 rounded-full ${
+            project.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
+          }`}>
             {project.status}
-          </span>
-          <span className="text-xs text-gray-400">
-            {new Date(project.created_at).toLocaleDateString()}
           </span>
           {confirmDelete ? (
             <div className="flex items-center gap-1.5">
@@ -102,12 +132,9 @@ function ProjectRow({ project }: { project: Project }) {
                 disabled={deleteMutation.isPending}
                 className="px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded disabled:opacity-50"
               >
-                {deleteMutation.isPending ? 'Deleting...' : 'Confirm'}
+                {deleteMutation.isPending ? '...' : 'Confirm'}
               </button>
-              <button
-                onClick={handleCancelDelete}
-                className="px-2 py-1 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded"
-              >
+              <button onClick={handleCancelDelete} className="px-2 py-1 text-xs text-gray-600 bg-gray-100 hover:bg-gray-200 rounded">
                 Cancel
               </button>
             </div>
@@ -122,8 +149,147 @@ function ProjectRow({ project }: { project: Project }) {
               </svg>
             </button>
           )}
+          <span className="text-gray-400 text-xs">{isExpanded ? '▲' : '▼'}</span>
         </div>
       </div>
-    </Link>
+    </div>
   );
+}
+
+// ── Project detail panel ───────────────────────────────────
+
+interface ProjectDetailData extends Project {
+  template_name?: string | null;
+  runs?: Array<{
+    id: string;
+    status: string;
+    current_step: number;
+    started_at: string;
+    completed_at: string | null;
+    entity_count?: number;
+    success_rate?: number;
+  }>;
+}
+
+function ProjectDetailPanel({ project }: { project: ProjectListItem }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { showToast } = useAppStore();
+
+  const { data: detail, isLoading } = useQuery({
+    queryKey: ['project', project.id],
+    queryFn: () => api.getProject(project.id) as Promise<ProjectDetailData>,
+  });
+
+  const createRunMutation = useMutation({
+    mutationFn: () => api.createRun(project.id),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      queryClient.invalidateQueries({ queryKey: ['project', project.id] });
+      showToast('New run created', 'success');
+      navigate(`/projects/${project.id}/runs/${data.run.id}`);
+    },
+    onError: (error) => {
+      showToast(error instanceof Error ? error.message : 'Failed to create run', 'error');
+    },
+  });
+
+  if (isLoading || !detail) {
+    return (
+      <div className="bg-gray-50 border border-t-0 border-gray-200 rounded-b-lg px-4 py-3 text-xs text-gray-400">
+        Loading...
+      </div>
+    );
+  }
+
+  const runs = (detail as ProjectDetailData).runs || [];
+  const latestRun = runs[0];
+
+  return (
+    <div className="bg-gray-50 border border-t-0 border-gray-200 rounded-b-lg px-4 py-3 space-y-3">
+      {/* Meta */}
+      <div className="flex gap-4 text-xs text-gray-500">
+        {(detail as ProjectDetailData).template_name && (
+          <span>Template: <span className="text-gray-700">{(detail as ProjectDetailData).template_name}</span></span>
+        )}
+        <span>Created: {new Date(detail.created_at).toLocaleDateString()}</span>
+      </div>
+
+      {/* Runs list */}
+      {runs.length > 0 ? (
+        <div>
+          <p className="text-[10px] text-gray-400 uppercase tracking-wide mb-1">Runs</p>
+          <div className="space-y-1">
+            {runs.map((run) => (
+              <Link
+                key={run.id}
+                to={`/projects/${project.id}/runs/${run.id}`}
+                className="flex items-center justify-between bg-white border border-gray-200 rounded px-3 py-1.5 hover:border-gray-300 transition-colors"
+              >
+                <div className="flex items-center gap-2 text-xs">
+                  <span className={`w-1.5 h-1.5 rounded-full ${
+                    run.status === 'completed' ? 'bg-green-500' :
+                    run.status === 'running' ? 'bg-sky-500' :
+                    run.status === 'failed' ? 'bg-red-500' : 'bg-gray-300'
+                  }`} />
+                  <span className="text-gray-700 font-medium">Step {run.current_step}</span>
+                  <span className="text-gray-400">{run.status}</span>
+                </div>
+                <div className="flex items-center gap-3 text-[10px] text-gray-400">
+                  {(run.entity_count ?? 0) > 0 && <span>{run.entity_count} entities</span>}
+                  {(run.success_rate ?? 0) > 0 && <span>{run.success_rate}%</span>}
+                  <span>{getTimeAgo(run.started_at)}</span>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p className="text-xs text-gray-400">No runs yet</p>
+      )}
+
+      {/* CTAs */}
+      <div className="flex items-center gap-2 pt-1 border-t border-gray-200">
+        {project.template_id ? (
+          <button
+            onClick={() => navigate(`/new?mode=use_template&projectId=${project.id}&templateId=${project.template_id}`)}
+            className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white text-xs rounded-lg transition-colors"
+            disabled={createRunMutation.isPending}
+          >
+            New run in this project
+          </button>
+        ) : (
+          <button
+            onClick={() => createRunMutation.mutate()}
+            className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white text-xs rounded-lg transition-colors"
+            disabled={createRunMutation.isPending}
+          >
+            {createRunMutation.isPending ? 'Creating...' : 'New run'}
+          </button>
+        )}
+        {latestRun && (
+          <Link
+            to={`/projects/${project.id}/runs/${latestRun.id}/report`}
+            className="px-3 py-1.5 bg-white border border-gray-300 hover:border-gray-400 text-gray-700 text-xs rounded-lg transition-colors"
+          >
+            View report
+          </Link>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Helpers ────────────────────────────────────────────────
+
+function getTimeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(dateStr).toLocaleDateString();
 }

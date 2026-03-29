@@ -11,6 +11,7 @@ export interface UploadResult {
 interface CsvUploadInputProps {
   onUploadComplete: (result: UploadResult) => void;
   onError?: (message: string) => void;
+  onFileSelected?: (file: File | null) => void;
   uploadUrl: string;
   submoduleId?: string;
   currentFileName: string | null;
@@ -21,6 +22,7 @@ interface CsvUploadInputProps {
 export function CsvUploadInput({
   onUploadComplete,
   onError,
+  onFileSelected,
   uploadUrl,
   submoduleId,
   currentFileName,
@@ -60,6 +62,7 @@ export function CsvUploadInput({
       return;
     }
 
+    onFileSelected?.(file);
     setIsUploading(true);
     try {
       const formData = new FormData();

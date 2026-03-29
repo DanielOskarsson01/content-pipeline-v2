@@ -55,6 +55,7 @@ import type {
   EntityRunDetail, ExecuteSubmoduleResponse,
   DecisionLogEntry, OptionPreset, RunReport,
   Template, TemplateDetail, TemplatePresetMap, TemplateExecutionPlan, TemplateSeedConfig,
+  SeedPreviewResult,
 } from '../types/step';
 
 export const api = {
@@ -69,6 +70,10 @@ export const api = {
   deleteProject: (id: string) =>
     apiFetch<{ deleted: boolean; runs_deleted: number }>(`/api/projects/${id}`, {
       method: 'DELETE',
+    }),
+  createRun: (projectId: string) =>
+    apiFetch<{ run: { id: string; status: string; current_step: number } }>(`/api/projects/${projectId}/runs`, {
+      method: 'POST',
     }),
 
   // Runs
@@ -215,8 +220,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ run_id: runId }),
     }),
-  /** Launch template — for CSV seeds, pass FormData with seed_file; for URL/prompt, pass JSON */
-  launchTemplate: (templateId: string, data: FormData | { project_name: string; project_description?: string; mode: string; urls?: string; prompt?: string }) => {
+  // Seed preview (Phase 12b)
+  previewSeed: (formData: FormData) =>
+    fetch(`${API_BASE}/api/seed/preview`, {
+      method: 'POST',
+      body: formData,
+    }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      return r.json() as Promise<SeedPreviewResult>;
+    }),
+
+  /** Launch template — for CSV seeds, pass FormData with file field; for URL/prompt, pass JSON */
+  launchTemplate: (templateId: string, data: FormData | { project_name: string; project_description?: string; mode: string; urls?: string; prompt?: string; fork_name?: string; project_id?: string }) => {
     if (data instanceof FormData) {
       // Multipart for CSV seed
       return fetch(`${API_BASE}/api/templates/${templateId}/launch`, {
