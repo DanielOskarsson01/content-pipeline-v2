@@ -1,4 +1,5 @@
 import { parse } from 'csv-parse';
+import XLSX from 'xlsx';
 
 /**
  * Canonical column aliases — superset from stepContext.js.
@@ -34,20 +35,55 @@ function parseCsvAsync(content, options) {
 }
 
 /**
- * Parse a CSV buffer into entities with column alias resolution and name contract enforcement.
- * @param {Buffer} buffer - CSV file buffer
+ * Parse a CSV or Excel buffer into entities with column alias resolution and name contract enforcement.
+ * @param {Buffer} buffer - File buffer (CSV or XLSX/XLS)
  * @param {Object} [templateAliases] - Additional aliases from template seed_config
+ * @param {string} [filename] - Original filename to detect format (defaults to CSV)
  * @returns {{ entities: Object[], columns_found: string[], all_columns: string[] }}
  */
-export async function parseSeedCsv(buffer, templateAliases) {
-  const content = buffer.toString('utf-8');
-  const records = await parseCsvAsync(content, {
-    columns: true,
-    skip_empty_lines: true,
-    bom: true,
-    trim: true,
-    relax_column_count: true,
-  });
+export async function parseSeedFile(buffer, templateAliases, filename) {
+  const ext = filename ? filename.split('.').pop()?.toLowerCase() : 'csv';
+
+  let records;
+  if (ext === 'xlsx' || ext === 'xls') {
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    if (!sheetName) throw new Error('Workbook has no sheets');
+    records = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' });
+    // Convert all values to strings (sheet_to_json returns numbers/dates as native types)
+    records = records.map(row => {
+      const stringRow = {};
+      for (const [key, value] of Object.entries(row)) {
+        stringRow[key] = value == null ? '' : String(value);
+      }
+      return stringRow;
+    });
+  } else {
+    // CSV parsing with double-encode detection (same as stepContext.js)
+    let content = buffer.toString('utf-8');
+
+    const firstLine = content.split(/\r?\n/)[0];
+    const testParse = await parseCsvAsync(firstLine + '\n', { columns: false, skip_empty_lines: true, bom: true, relax_column_count: true });
+    if (testParse.length > 0 && testParse[0].length === 1 && testParse[0][0].includes(',')) {
+      const lines = content.split(/\r?\n/);
+      const fixed = lines.map((line) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+          return trimmed.slice(1, -1).replace(/""/g, '"');
+        }
+        return trimmed;
+      });
+      content = fixed.join('\n');
+    }
+
+    records = await parseCsvAsync(content, {
+      columns: true,
+      skip_empty_lines: true,
+      bom: true,
+      trim: true,
+      relax_column_count: true,
+    });
+  }
 
   // Merge template aliases (additive) with base aliases
   const aliases = { ...SEED_COLUMN_ALIASES };
@@ -98,3 +134,6 @@ export async function parseSeedCsv(buffer, templateAliases) {
 
   return { entities, columns_found, all_columns };
 }
+
+// Backward-compatible alias
+export const parseSeedCsv = parseSeedFile;

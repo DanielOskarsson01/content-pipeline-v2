@@ -81,8 +81,11 @@ router.get('/:id', async (req, res, next) => {
     // Enrich runs with entity_count and success_rate
     const enrichedRuns = [];
     for (const run of (runs || [])) {
-      // Entity count from step_context step 0
-      const { data: ctx } = await db.from('step_context').select('entities').eq('run_id', run.id).eq('step_index', 0).single();
+      // Entity count from step_context (check step 1 first, fall back to step 0 for legacy runs)
+      let { data: ctx } = await db.from('step_context').select('entities').eq('run_id', run.id).eq('step_index', 1).maybeSingle();
+      if (!ctx || !Array.isArray(ctx.entities) || ctx.entities.length === 0) {
+        ({ data: ctx } = await db.from('step_context').select('entities').eq('run_id', run.id).eq('step_index', 0).maybeSingle());
+      }
       const entity_count = Array.isArray(ctx?.entities) ? ctx.entities.length : 0;
 
       // Success rate from stages
@@ -283,10 +286,10 @@ router.post('/:id/runs', async (req, res, next) => {
       }
     }
 
-    // 6. Write pending_seed step_context for step 1
+    // 6. Write pending_seed step_context for step 1 (the active step)
     await db.from('step_context').upsert({
       run_id: run.id,
-      step_index: 0,
+      step_index: 1,
       entities: [],
       status: 'pending_seed',
       created_at: new Date().toISOString(),

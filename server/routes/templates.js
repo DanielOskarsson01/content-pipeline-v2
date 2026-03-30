@@ -3,7 +3,7 @@ import multer from 'multer';
 import db from '../services/db.js';
 import { getSubmoduleById } from '../services/moduleLoader.js';
 import { STEP_CONFIG } from '../../shared/stepConfig.js';
-import { parseSeedCsv } from '../utils/seedParser.js';
+import { parseSeedFile } from '../utils/seedParser.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -571,7 +571,7 @@ router.post('/:id/launch', upload.single('file'), async (req, res, next) => {
         if (!req.file) {
           return res.status(400).json({ error: 'CSV seed file required (file field)' });
         }
-        const parsed = await parseSeedCsv(req.file.buffer, seedConfig.column_aliases);
+        const parsed = await parseSeedFile(req.file.buffer, seedConfig.column_aliases, req.file.originalname);
         entities = parsed.entities;
         seedFilename = req.file.originalname;
       } else if (seedType === 'url') {
@@ -725,21 +725,21 @@ router.post('/:id/launch', upload.single('file'), async (req, res, next) => {
       }
     }
 
-    // 9. Write seed data to step_context
+    // 9. Write seed data to step_context at step 1 (the active step).
+    //    Step 0 is auto-approved; submoduleRuns.js reads step_context for the current step.
     if (entities.length > 0) {
-      // use_template: seed provided — write to step 0
       await db.from('step_context').upsert({
         run_id: run.id,
-        step_index: 0,
+        step_index: 1,
         entities,
         filename: seedFilename,
         created_at: new Date().toISOString(),
       }, { onConflict: 'run_id,step_index' });
     } else {
-      // Seedless modes: write pending_seed to step 0 so Step 1 knows to prompt for upload
+      // Seedless modes: write pending_seed so Step 1 UI shows upload prompt
       await db.from('step_context').upsert({
         run_id: run.id,
-        step_index: 0,
+        step_index: 1,
         entities: [],
         status: 'pending_seed',
         created_at: new Date().toISOString(),
