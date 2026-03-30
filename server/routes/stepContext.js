@@ -108,15 +108,58 @@ function getStepRequiredColumns(stepIndex) {
 
 /**
  * POST /api/runs/:runId/steps/:stepIndex/context
- * Upload a CSV file, parse server-side, validate columns, store in step_context.
+ * Upload a CSV/Excel file OR send JSON entities, validate columns, store in step_context.
+ * Accepts multipart file upload (file field) or JSON body with { entities: [...] }.
  */
 router.post('/', upload.single('file'), async (req, res) => {
   const { runId, stepIndex } = req.params;
   const step = parseInt(stepIndex, 10);
   const submoduleId = req.body?.submodule_id || null;
 
+  // JSON entities path (URL/data paste from step-level seed input)
+  if (!req.file && req.body?.entities) {
+    let entities;
+    try {
+      entities = typeof req.body.entities === 'string' ? JSON.parse(req.body.entities) : req.body.entities;
+    } catch (err) {
+      return res.status(400).json({ error: 'Invalid entities JSON' });
+    }
+    if (!Array.isArray(entities) || entities.length === 0) {
+      return res.status(400).json({ error: 'entities must be a non-empty array' });
+    }
+    // Enforce name contract
+    entities = entities.map((e, i) => {
+      if (!e.name) {
+        const firstVal = Object.values(e).find(v => typeof v === 'string' && v.length > 0);
+        e.name = firstVal || `Entity ${i + 1}`;
+      }
+      return e;
+    });
+
+    const { error } = await supabase
+      .from('step_context')
+      .upsert({
+        run_id: runId,
+        step_index: step,
+        entities,
+        filename: null,
+        source_submodule: submoduleId,
+        created_at: new Date().toISOString(),
+      }, { onConflict: 'run_id,step_index' });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({
+      entity_count: entities.length,
+      columns_found: [],
+      columns_missing: [],
+      all_columns: Object.keys(entities[0] || {}),
+      filename: null,
+    });
+  }
+
   if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
+    return res.status(400).json({ error: 'No file uploaded and no entities provided' });
   }
 
   const ext = req.file.originalname.split('.').pop()?.toLowerCase();
