@@ -46,6 +46,7 @@ export function NewProject() {
   const [templateDescription, setTemplateDescription] = useState('');
 
   // Seed state (use_template only)
+  const [seedTab, setSeedTab] = useState<'file' | 'url'>('file');
   const [seedFile, setSeedFile] = useState<File | null>(null);
   const [seedPreview, setSeedPreview] = useState<SeedPreviewResult | null>(null);
   const [urlsText, setUrlsText] = useState('');
@@ -83,6 +84,12 @@ export function NewProject() {
 
   const seedConfig: TemplateSeedConfig = templateDetail?.seed_config || { seed_type: 'csv' };
   const seedType = seedConfig.seed_type || 'csv';
+
+  // Default seed tab to template's seed_type when template loads
+  useEffect(() => {
+    setSeedTab(seedType === 'url' || seedType === 'prompt' ? 'url' : 'file');
+  }, [seedType]);
+
   const needsTemplate = mode ? NEEDS_TEMPLATE.includes(mode) : false;
   const isSeedless = mode ? SEEDLESS_MODES.includes(mode) : false;
 
@@ -104,9 +111,9 @@ export function NewProject() {
 
       const name = projectName.trim();
 
-      // use_template with CSV seed
-      if (mode === 'use_template' && seedType === 'csv') {
-        if (!seedFile) throw new Error('Please upload a CSV file');
+      // use_template with file seed
+      if (mode === 'use_template' && seedTab === 'file') {
+        if (!seedFile) throw new Error('Please upload a CSV or Excel file');
         const formData = new FormData();
         formData.append('project_name', name);
         if (description.trim()) formData.append('project_description', description.trim());
@@ -116,13 +123,23 @@ export function NewProject() {
         return api.launchTemplate(templateId, formData);
       }
 
+      // use_template with URL seed
+      if (mode === 'use_template' && seedTab === 'url') {
+        if (!urlsText.trim()) throw new Error('Please enter at least one URL');
+        return api.launchTemplate(templateId, {
+          project_name: name,
+          project_description: description.trim() || undefined,
+          mode,
+          urls: urlsText.trim(),
+          project_id: paramProjectId || undefined,
+        });
+      }
+
       // All other template modes
       return api.launchTemplate(templateId, {
         project_name: name,
         project_description: description.trim() || undefined,
         mode,
-        urls: mode === 'use_template' && seedType === 'url' ? urlsText.trim() : undefined,
-        prompt: mode === 'use_template' && seedType === 'prompt' ? promptText.trim() : undefined,
         fork_name: mode === 'fork_template' ? forkName.trim() || undefined : undefined,
         project_id: paramProjectId || undefined,
       });
@@ -182,9 +199,8 @@ export function NewProject() {
 
     if (mode === 'use_template') {
       const hasSeed =
-        (seedType === 'csv' && !!seedFile) ||
-        (seedType === 'url' && !!urlsText.trim()) ||
-        (seedType === 'prompt' && !!promptText.trim());
+        (seedTab === 'file' && !!seedFile) ||
+        (seedTab === 'url' && !!urlsText.trim());
       if (!hasSeed) { showToast('Please provide seed data', 'error'); return; }
     }
 
@@ -319,10 +335,31 @@ export function NewProject() {
           <div>
             <label className="block text-xs text-gray-600 mb-1 font-medium">
               Seed data <span className="text-red-500">*</span>
-              <span className="ml-1 text-gray-400 font-normal">({seedType})</span>
             </label>
 
-            {seedType === 'csv' && (
+            {/* Tab toggle */}
+            <div className="flex gap-1 mb-2">
+              <button
+                type="button"
+                onClick={() => setSeedTab('file')}
+                className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${
+                  seedTab === 'file' ? 'bg-gray-200 text-gray-900' : 'text-gray-500 hover:bg-gray-100'
+                }`}
+              >
+                Upload file
+              </button>
+              <button
+                type="button"
+                onClick={() => setSeedTab('url')}
+                className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${
+                  seedTab === 'url' ? 'bg-gray-200 text-gray-900' : 'text-gray-500 hover:bg-gray-100'
+                }`}
+              >
+                Paste URLs or data
+              </button>
+            </div>
+
+            {seedTab === 'file' && (
               <>
                 <CsvUploadInput
                   uploadUrl="/api/seed/preview"
@@ -343,7 +380,7 @@ export function NewProject() {
               </>
             )}
 
-            {seedType === 'url' && (
+            {seedTab === 'url' && (
               <>
                 <UrlTextarea value={urlsText} onChange={setUrlsText} />
                 {urlsText.trim() && (
@@ -354,16 +391,6 @@ export function NewProject() {
                   />
                 )}
               </>
-            )}
-
-            {seedType === 'prompt' && (
-              <textarea
-                value={promptText}
-                onChange={(e) => setPromptText(e.target.value)}
-                rows={3}
-                placeholder="Describe what you want to research..."
-                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
-              />
             )}
           </div>
         )}

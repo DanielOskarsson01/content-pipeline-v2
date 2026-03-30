@@ -561,25 +561,21 @@ router.post('/:id/launch', upload.single('file'), async (req, res, next) => {
     const seedConfig = template.seed_config || { seed_type: 'csv' };
     const seedType = seedConfig.seed_type || 'csv';
 
-    // 2. Parse seed data — only required for use_template mode
+    // 2. Parse seed data — only required for use_template mode.
+    //    Detect input type from what's actually provided (file vs urls vs prompt),
+    //    not from template seed_type, so users can choose either method.
     let entities = [];
     let seedFilename = null;
 
     if (mode === 'use_template') {
-      // Seed is required for use_template
-      if (seedType === 'csv') {
-        if (!req.file) {
-          return res.status(400).json({ error: 'CSV seed file required (file field)' });
-        }
+      if (req.file) {
+        // File upload (CSV or Excel)
         const parsed = await parseSeedFile(req.file.buffer, seedConfig.column_aliases, req.file.originalname);
         entities = parsed.entities;
         seedFilename = req.file.originalname;
-      } else if (seedType === 'url') {
-        const urls = req.body.urls;
-        if (!urls?.trim()) {
-          return res.status(400).json({ error: 'urls field required for url seed type' });
-        }
-        entities = urls.trim().split(/\r?\n/).filter(Boolean).map(line => {
+      } else if (req.body.urls?.trim()) {
+        // URL paste
+        entities = req.body.urls.trim().split(/\r?\n/).filter(Boolean).map(line => {
           const url = line.trim();
           let entityName = url;
           try {
@@ -589,16 +585,13 @@ router.post('/:id/launch', upload.single('file'), async (req, res, next) => {
           } catch { /* use raw url as name */ }
           return { name: entityName, website: url };
         });
-      } else if (seedType === 'prompt') {
-        const prompt = req.body.prompt;
-        if (!prompt?.trim()) {
-          return res.status(400).json({ error: 'prompt field required for prompt seed type' });
-        }
-        entities = [{ name: 'prompt', text: prompt.trim() }];
+      } else if (req.body.prompt?.trim()) {
+        // Prompt text
+        entities = [{ name: 'prompt', text: req.body.prompt.trim() }];
       }
 
       if (entities.length === 0) {
-        return res.status(400).json({ error: 'No entities parsed from seed data' });
+        return res.status(400).json({ error: 'Seed data required: upload a file, paste URLs, or provide a prompt' });
       }
     }
     // For update_template, fork_template, new_template: entities stays [] — seed uploaded in Step 1
