@@ -76,12 +76,19 @@ export async function parseSeedFile(buffer, templateAliases, filename) {
       content = fixed.join('\n');
     }
 
+    // Auto-detect delimiter: semicolon-delimited CSVs common in European Excel exports
+    const headerLine = content.split(/\r?\n/).find(l => l.trim()) || '';
+    const commaCount = (headerLine.match(/,/g) || []).length;
+    const semicolonCount = (headerLine.match(/;/g) || []).length;
+    const delimiter = semicolonCount > commaCount ? ';' : ',';
+
     records = await parseCsvAsync(content, {
       columns: true,
       skip_empty_lines: true,
       bom: true,
       trim: true,
       relax_column_count: true,
+      delimiter,
     });
   }
 

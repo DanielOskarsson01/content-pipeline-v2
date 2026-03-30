@@ -207,12 +207,22 @@ router.post('/', upload.single('file'), async (req, res) => {
         content = fixed.join('\n');
       }
 
+      // Auto-detect delimiter: semicolon-delimited CSVs are common in European Excel exports
+      const headerLine = content.split(/\r?\n/).find(l => l.trim()) || '';
+      const commaCount = (headerLine.match(/,/g) || []).length;
+      const semicolonCount = (headerLine.match(/;/g) || []).length;
+      const delimiter = semicolonCount > commaCount ? ';' : ',';
+      if (delimiter === ';') {
+        console.log('[stepContext] Detected semicolon-delimited CSV');
+      }
+
       records = await parseCsvAsync(content, {
         columns: true,
         skip_empty_lines: true,
         trim: true,
         bom: true,
         relax_column_count: true,
+        delimiter,
       });
     }
   } catch (err) {
