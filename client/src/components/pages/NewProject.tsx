@@ -8,6 +8,7 @@ import { CreateDropdown } from '../shared/CreateDropdown';
 import { SeedBadge } from '../shared/SeedBadge';
 import { CsvUploadInput } from '../primitives/CsvUploadInput';
 import { UrlTextarea, parseTextareaToEntities } from '../primitives/UrlTextarea';
+import { ContentRenderer } from '../primitives/ContentRenderer';
 import type { Template, TemplateDetail, ProjectMode, TemplateSeedConfig, SeedPreviewResult } from '../../types/step';
 
 // ── Mode metadata ──────────────────────────────────────────
@@ -372,12 +373,14 @@ export function NewProject() {
                   currentEntityCount={seedPreview?.entity_count || 0}
                   requiredColumns={seedConfig.required_columns || []}
                 />
-                {seedPreview && (
-                  <EntityPreview
-                    entities={seedPreview.entities}
-                    total={seedPreview.entity_count}
-                    truncated={seedPreview.truncated}
-                  />
+                {seedPreview && seedPreview.entities.length > 0 && (
+                  <div className="mt-2">
+                    <ContentRenderer
+                      entities={seedPreview.entities}
+                      maxHeight={200}
+                      label={`${seedPreview.entity_count} entities${seedPreview.truncated ? ' (truncated)' : ''}`}
+                    />
+                  </div>
                 )}
               </>
             )}
@@ -385,13 +388,18 @@ export function NewProject() {
             {seedTab === 'url' && (
               <>
                 <UrlTextarea value={urlsText} onChange={setUrlsText} />
-                {urlsText.trim() && (
-                  <EntityPreview
-                    entities={parseTextareaToEntities(urlsText, 'website').map(e => ({ name: (e.name as string) || '', ...e }))}
-                    total={parseTextareaToEntities(urlsText, 'website').length}
-                    truncated={false}
-                  />
-                )}
+                {urlsText.trim() && (() => {
+                  const parsed = parseTextareaToEntities(urlsText, 'website');
+                  return parsed.length > 0 ? (
+                    <div className="mt-2">
+                      <ContentRenderer
+                        entities={parsed}
+                        maxHeight={200}
+                        label={`${parsed.length} entities`}
+                      />
+                    </div>
+                  ) : null;
+                })()}
               </>
             )}
           </div>
@@ -497,28 +505,3 @@ function ReviewBox({ templateName, projectName, entityCount, truncated, seedType
   );
 }
 
-function EntityPreview({ entities, total, truncated }: {
-  entities: Array<{ name: string; [key: string]: unknown }>;
-  total: number;
-  truncated: boolean;
-}) {
-  const show = entities.slice(0, 5);
-  const remaining = total - show.length;
-
-  if (show.length === 0) return null;
-
-  return (
-    <div className="mt-2 text-[11px] text-gray-600">
-      <div className="flex flex-wrap gap-1">
-        {show.map((e, i) => (
-          <span key={i} className="bg-gray-100 px-1.5 py-0.5 rounded">{e.name}</span>
-        ))}
-      </div>
-      {remaining > 0 && (
-        <p className="text-gray-400 mt-1">
-          {truncated ? `... and ~${remaining} more` : `... and ${remaining} more`}
-        </p>
-      )}
-    </div>
-  );
-}
