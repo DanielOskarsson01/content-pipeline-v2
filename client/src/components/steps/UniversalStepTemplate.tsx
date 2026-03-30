@@ -1,10 +1,9 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useMemo, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { PipelineStage, SubmoduleManifest } from '../../types/step';
 import { useStepSubmodules } from '../../hooks/useSubmodules';
 import { useSubmoduleConfig, useSubmoduleConfigs, useSaveSubmoduleConfig } from '../../hooks/useSubmoduleConfig';
 import { useLatestSubmoduleRuns } from '../../hooks/useSubmoduleRuns';
-import { useStepContext } from '../../hooks/useStepContext';
 import { usePanelStore } from '../../stores/panelStore';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../api/client';
@@ -13,8 +12,6 @@ import { SubmodulePanel } from '../shared/SubmodulePanel';
 import { StepSummary } from '../shared/StepSummary';
 import { StepApprovalFooter } from '../shared/StepApprovalFooter';
 import { ContentRenderer, type RenderSchema } from '../primitives/ContentRenderer';
-import { CsvUploadInput } from '../primitives/CsvUploadInput';
-import { UrlTextarea, parseTextareaToEntities } from '../primitives/UrlTextarea';
 
 interface UniversalStepTemplateProps {
   stage: PipelineStage;
@@ -34,8 +31,6 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
   const { data: categories, isLoading: submodulesLoading } = useStepSubmodules(stage.step_index);
   const { activeSubmoduleId } = usePanelStore();
   const { data: latestRuns } = useLatestSubmoduleRuns(stage.run_id, stage.step_index);
-  const { data: stepContext } = useStepContext(stage.run_id, stage.step_index);
-  const isPendingSeed = stepContext?.status === 'pending_seed' && (!stepContext.entities || stepContext.entities.length === 0);
 
   // All submodule configs for this step — used by CategoryCardGrid for data op display
   const { data: configMap } = useSubmoduleConfigs(stage.run_id, stage.step_index);
@@ -113,17 +108,6 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
 
   return (
     <div>
-      {/* Pending seed input — shown when run was created without seed data */}
-      {isPendingSeed && (
-        <SeedInput
-          runId={stage.run_id}
-          stepIndex={stage.step_index}
-          onComplete={() => {
-            queryClient.invalidateQueries({ queryKey: ['stepContext', stage.run_id, stage.step_index] });
-          }}
-        />
-      )}
-
       {/* CategoryCardGrid — real manifest data */}
       {submodulesLoading ? (
         <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center mb-4">
@@ -194,107 +178,6 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
         }
         previousStepRenderSchema={stage.input_render_schema as Record<string, unknown> | null}
       />
-    </div>
-  );
-}
-
-// ── Inline: Step-level seed input for pending_seed runs ──────
-
-function SeedInput({ runId, stepIndex, onComplete }: { runId: string; stepIndex: number; onComplete: () => void }) {
-  const [tab, setTab] = useState<'file' | 'url'>('file');
-  const [urlText, setUrlText] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [entityCount, setEntityCount] = useState(0);
-  const showToast = useAppStore((s) => s.showToast);
-
-  const uploadUrl = `/api/runs/${runId}/steps/${stepIndex}/context`;
-
-  const handleUrlSave = async () => {
-    const entities = parseTextareaToEntities(urlText, 'website');
-    if (entities.length === 0) {
-      showToast('Please enter at least one URL or entity', 'error');
-      return;
-    }
-    setIsSaving(true);
-    try {
-      const resp = await fetch(uploadUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entities }),
-      });
-      if (!resp.ok) {
-        const data = await resp.json().catch(() => ({}));
-        throw new Error(data.error || `HTTP ${resp.status}`);
-      }
-      showToast(`${entities.length} entities saved`, 'success');
-      onComplete();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Save failed', 'error');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  return (
-    <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-4">
-      <p className="text-sm font-medium text-amber-800 mb-3">Seed data required</p>
-
-      {/* Tab toggle */}
-      <div className="flex gap-1 mb-3">
-        <button
-          onClick={() => setTab('file')}
-          className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${
-            tab === 'file' ? 'bg-amber-200 text-amber-900' : 'text-amber-700 hover:bg-amber-100'
-          }`}
-        >
-          Upload file
-        </button>
-        <button
-          onClick={() => setTab('url')}
-          className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${
-            tab === 'url' ? 'bg-amber-200 text-amber-900' : 'text-amber-700 hover:bg-amber-100'
-          }`}
-        >
-          Paste URLs or data
-        </button>
-      </div>
-
-      {tab === 'file' ? (
-        <CsvUploadInput
-          uploadUrl={uploadUrl}
-          currentFileName={fileName}
-          currentEntityCount={entityCount}
-          requiredColumns={[]}
-          onUploadComplete={(result) => {
-            setFileName(result.filename);
-            setEntityCount(result.entity_count);
-            showToast(`${result.entity_count} entities loaded`, 'success');
-            onComplete();
-          }}
-          onError={(msg) => showToast(msg, 'error')}
-        />
-      ) : (
-        <div>
-          <UrlTextarea value={urlText} onChange={setUrlText} />
-          {urlText.trim() && (
-            <p className="text-[10px] text-amber-600 mt-1">
-              {parseTextareaToEntities(urlText, 'website').length} entities detected
-            </p>
-          )}
-          <button
-            onClick={handleUrlSave}
-            disabled={isSaving || !urlText.trim()}
-            className={`mt-2 px-4 py-1.5 text-xs rounded-md font-medium transition-colors ${
-              !isSaving && urlText.trim()
-                ? 'bg-amber-600 hover:bg-amber-700 text-white'
-                : 'bg-amber-200 text-amber-400 cursor-not-allowed'
-            }`}
-          >
-            {isSaving ? 'Saving...' : 'Save entities'}
-          </button>
-        </div>
-      )}
     </div>
   );
 }
