@@ -123,14 +123,16 @@ export function NewProject() {
         return api.launchTemplate(templateId, formData);
       }
 
-      // use_template with URL seed
+      // use_template with URL seed — parse client-side (supports "Name; URL" format)
       if (mode === 'use_template' && seedTab === 'url') {
         if (!urlsText.trim()) throw new Error('Please enter at least one URL');
+        const parsedEntities = parseTextareaToEntities(urlsText, 'website');
+        if (parsedEntities.length === 0) throw new Error('No valid entities detected');
         return api.launchTemplate(templateId, {
           project_name: name,
           project_description: description.trim() || undefined,
           mode,
-          urls: urlsText.trim(),
+          entities: parsedEntities,
           project_id: paramProjectId || undefined,
         });
       }

@@ -231,7 +231,7 @@ export const api = {
     }),
 
   /** Launch template — for CSV seeds, pass FormData with file field; for URL/prompt, pass JSON */
-  launchTemplate: (templateId: string, data: FormData | { project_name: string; project_description?: string; mode: string; urls?: string; prompt?: string; fork_name?: string; project_id?: string }) => {
+  launchTemplate: (templateId: string, data: FormData | { project_name: string; project_description?: string; mode: string; urls?: string; entities?: Record<string, unknown>[]; prompt?: string; fork_name?: string; project_id?: string }) => {
     if (data instanceof FormData) {
       // Multipart for CSV seed
       return fetch(`${API_BASE}/api/templates/${templateId}/launch`, {

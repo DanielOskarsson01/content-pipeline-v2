@@ -573,8 +573,17 @@ router.post('/:id/launch', upload.single('file'), async (req, res, next) => {
         const parsed = await parseSeedFile(req.file.buffer, seedConfig.column_aliases, req.file.originalname);
         entities = parsed.entities;
         seedFilename = req.file.originalname;
+      } else if (Array.isArray(req.body.entities) && req.body.entities.length > 0) {
+        // Pre-parsed entities from client (supports "Name; URL" format)
+        entities = req.body.entities.map((e, i) => {
+          if (!e.name) {
+            const firstVal = Object.values(e).find(v => typeof v === 'string' && v.length > 0);
+            e.name = firstVal || `Entity ${i + 1}`;
+          }
+          return e;
+        });
       } else if (req.body.urls?.trim()) {
-        // URL paste
+        // Raw URL text fallback (backward compat)
         entities = req.body.urls.trim().split(/\r?\n/).filter(Boolean).map(line => {
           const url = line.trim();
           let entityName = url;
