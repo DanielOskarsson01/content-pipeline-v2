@@ -50,6 +50,7 @@ export function NewProject() {
   const [seedPreview, setSeedPreview] = useState<SeedPreviewResult | null>(null);
   const [urlsText, setUrlsText] = useState('');
   const [promptText, setPromptText] = useState('');
+  const [isNewTemplateSubmitting, setIsNewTemplateSubmitting] = useState(false);
 
   // Queries
   const { data: templates } = useQuery({
@@ -156,7 +157,7 @@ export function NewProject() {
     if (mode === 'new_template') {
       const tplName = templateName.trim();
       if (!tplName) { showToast('Please enter a template name', 'error'); return; }
-      // Create template first, then launch
+      setIsNewTemplateSubmitting(true);
       api.createTemplate({ name: tplName, description: templateDescription.trim() || undefined })
         .then(({ template }) => {
           setTemplateId(template.id);
@@ -170,7 +171,8 @@ export function NewProject() {
           showToast('Template and project created', 'success');
           navigate(`/projects/${data.project.id}/runs/${data.run.id}`);
         })
-        .catch((err) => showToast(err instanceof Error ? err.message : 'Failed', 'error'));
+        .catch((err) => showToast(err instanceof Error ? err.message : 'Failed', 'error'))
+        .finally(() => setIsNewTemplateSubmitting(false));
       return;
     }
 
@@ -194,7 +196,7 @@ export function NewProject() {
     launchMutation.mutate();
   };
 
-  const isPending = createProject.isPending || launchMutation.isPending;
+  const isPending = createProject.isPending || launchMutation.isPending || isNewTemplateSubmitting;
 
   // ── Render ─────────────────────────────────────────────────
 
