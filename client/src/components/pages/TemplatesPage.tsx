@@ -5,6 +5,7 @@ import { api } from '../../api/client';
 import { useAppStore } from '../../stores/appStore';
 import { CreateDropdown } from '../shared/CreateDropdown';
 import { SeedBadge } from '../shared/SeedBadge';
+import { STEP_CONFIG } from '../../config/stepConfig';
 import type { Template, ProjectMode } from '../../types/step';
 
 export function TemplatesPage() {
@@ -64,17 +65,19 @@ export function TemplatesPage() {
               >
                 <div className="flex-1 min-w-0">
                   <span className="text-sm font-medium text-gray-900">{t.name}</span>
-                  {t.description && (
-                    <p className="text-xs text-gray-500 truncate mt-0.5">{t.description}</p>
-                  )}
-                  <div className="flex gap-3 mt-1 text-[10px] text-gray-400 items-center">
-                    <SeedBadge seedType={t.seed_config?.seed_type || 'csv'} />
-                    <span>{t.preset_count} preset{t.preset_count !== 1 ? 's' : ''}</span>
-                    <span>{t.doc_count} doc{t.doc_count !== 1 ? 's' : ''}</span>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {t.description ? `${t.description}. ` : ''}
+                    {(() => {
+                      const skip = t.execution_plan?.skip_steps || [];
+                      const active = STEP_CONFIG.filter(s => s.index >= 1 && s.index <= 8 && !skip.includes(s.index));
+                      if (active.length === 8) return 'Steps 1-8.';
+                      return `Steps ${active.map(s => s.index).join(', ')}.`;
+                    })()}
+                    <span className="ml-2 inline-flex items-center"><SeedBadge seedType={t.seed_config?.seed_type || 'csv'} /></span>
                     {(t.usage_count ?? 0) > 0 && (
-                      <span>Used {t.usage_count} time{t.usage_count !== 1 ? 's' : ''}</span>
+                      <span className="ml-2 text-gray-400">Used {t.usage_count} time{t.usage_count !== 1 ? 's' : ''}</span>
                     )}
-                  </div>
+                  </p>
                 </div>
 
                 <div className="flex items-center gap-2 ml-4" onClick={(e) => e.stopPropagation()}>
@@ -139,29 +142,64 @@ function TemplateDetailPanel({ templateId }: { templateId: string }) {
     navigate(`/new?mode=${mode}&templateId=${templateId}`);
   };
 
+  const skipSteps = detail.execution_plan?.skip_steps || [];
+  // Steps 1-8 for the flow display (skip step 0 = Project Start)
+  const flowSteps = STEP_CONFIG.filter(s => s.index >= 1 && s.index <= 8);
+
   return (
-    <div className="bg-gray-50 border border-t-0 border-gray-200 rounded-b-lg px-4 py-3 space-y-3">
+    <div className="bg-gray-50 border border-t-0 border-gray-200 rounded-b-lg px-4 py-4 space-y-4">
+      {/* Header: name + description */}
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900">{detail.name}</h3>
+        {detail.description && (
+          <p className="text-xs text-gray-500 mt-0.5">{detail.description}</p>
+        )}
+      </div>
+
       {/* Seed config */}
       <div>
-        <p className="text-[10px] text-gray-400 uppercase tracking-wide mb-1">Seed</p>
+        <p className="text-[10px] text-gray-500 uppercase tracking-wide font-medium mb-1">Seed Config</p>
         <div className="flex items-center gap-2 text-xs text-gray-600">
           <SeedBadge seedType={detail.seed_config?.seed_type || 'csv'} />
           {detail.seed_config?.required_columns?.length ? (
-            <span>Columns: {detail.seed_config.required_columns.join(', ')}</span>
+            <span>Required: {detail.seed_config.required_columns.join(', ')}</span>
           ) : null}
+        </div>
+      </div>
+
+      {/* Step flow */}
+      <div>
+        <p className="text-[10px] text-gray-500 uppercase tracking-wide font-medium mb-1">Step Flow</p>
+        <div className="flex flex-wrap items-center gap-1">
+          {flowSteps.map((step, i) => {
+            const isSkipped = skipSteps.includes(step.index);
+            return (
+              <span key={step.index} className="flex items-center gap-1">
+                <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+                  isSkipped
+                    ? 'bg-gray-100 text-gray-400 line-through'
+                    : 'bg-green-50 text-green-700 border border-green-200'
+                }`}>
+                  {step.index} {step.name}
+                </span>
+                {i < flowSteps.length - 1 && (
+                  <span className="text-gray-300 text-[10px]">&gt;</span>
+                )}
+              </span>
+            );
+          })}
         </div>
       </div>
 
       {/* Preset map */}
       {presetEntries.length > 0 && (
         <div>
-          <p className="text-[10px] text-gray-400 uppercase tracking-wide mb-1">Presets</p>
-          <div className="space-y-0.5">
+          <p className="text-[10px] text-gray-500 uppercase tracking-wide font-medium mb-1">Preset Map</p>
+          <div className="space-y-1">
             {presetEntries.map(([subId, entry]) => (
-              <div key={subId} className="text-xs text-gray-600 flex gap-2">
-                <span className="text-gray-500 font-mono">{subId}</span>
-                <span className="text-gray-400">&rarr;</span>
-                <span>{entry.preset_name}</span>
+              <div key={subId} className="flex items-center justify-between bg-white border border-gray-200 rounded px-3 py-1.5">
+                <span className="text-xs font-medium text-gray-700">{subId}</span>
+                <span className="text-xs text-sky-600 font-medium">{entry.preset_name}</span>
               </div>
             ))}
           </div>
@@ -171,7 +209,7 @@ function TemplateDetailPanel({ templateId }: { templateId: string }) {
       {/* Reference docs */}
       {detail.reference_docs?.length > 0 && (
         <div>
-          <p className="text-[10px] text-gray-400 uppercase tracking-wide mb-1">Reference docs</p>
+          <p className="text-[10px] text-gray-500 uppercase tracking-wide font-medium mb-1">Reference Docs</p>
           <div className="flex flex-wrap gap-1">
             {detail.reference_docs.map((doc) => (
               <span key={doc.id} className="text-[11px] bg-white border border-gray-200 px-1.5 py-0.5 rounded">
@@ -183,14 +221,14 @@ function TemplateDetailPanel({ templateId }: { templateId: string }) {
       )}
 
       {/* CTAs */}
-      <div className="flex items-center gap-2 pt-1 border-t border-gray-200">
-        <button onClick={() => handleCta('use_template')} className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white text-xs rounded-lg transition-colors">
+      <div className="flex items-center gap-2 pt-2 border-t border-gray-200">
+        <button onClick={() => handleCta('use_template')} className="px-4 py-1.5 bg-sky-600 hover:bg-sky-700 text-white text-xs font-medium rounded-lg transition-colors">
           Use
         </button>
-        <button onClick={() => handleCta('update_template')} className="px-3 py-1.5 bg-white border border-gray-300 hover:border-gray-400 text-gray-700 text-xs rounded-lg transition-colors">
+        <button onClick={() => handleCta('update_template')} className="px-4 py-1.5 bg-white border border-gray-300 hover:border-gray-400 text-gray-700 text-xs font-medium rounded-lg transition-colors">
           Change
         </button>
-        <button onClick={() => handleCta('fork_template')} className="px-3 py-1.5 bg-white border border-gray-300 hover:border-gray-400 text-gray-700 text-xs rounded-lg transition-colors">
+        <button onClick={() => handleCta('fork_template')} className="px-4 py-1.5 bg-white border border-gray-300 hover:border-gray-400 text-gray-700 text-xs font-medium rounded-lg transition-colors">
           Fork
         </button>
         <div className="flex-1" />
