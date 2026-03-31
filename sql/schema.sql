@@ -16,12 +16,13 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 
 -- Pipeline Runs — one execution of a project through the 11-step sequence
--- Status: running → completed | abandoned
+-- Status: running → auto_executing → completed | halted | abandoned
 CREATE TABLE IF NOT EXISTS pipeline_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   project_id UUID NOT NULL REFERENCES projects(id),
   status TEXT NOT NULL DEFAULT 'running',
   current_step INTEGER NOT NULL DEFAULT 0,
+  auto_execute_state JSONB,  -- Phase 12c: orchestrator state (current_step, per_step_results, failure_thresholds, etc.)
   started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at TIMESTAMPTZ
 );

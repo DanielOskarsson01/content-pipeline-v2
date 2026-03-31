@@ -10,7 +10,8 @@ import { STEP_CONFIG } from '../../config/stepConfig';
 import { StepContainer } from '../steps/StepContainer';
 import { Step0View } from '../steps/Step0View';
 import { UniversalStepTemplate } from '../steps/UniversalStepTemplate';
-import type { PipelineStage, ProjectWithRuns, DecisionLogEntry } from '../../types/step';
+import { queryClient } from '../../api/client';
+import type { PipelineStage, ProjectWithRuns, DecisionLogEntry, AutoExecuteState } from '../../types/step';
 
 export function RunView() {
   const { projectId, runId } = useParams<{ projectId: string; runId: string }>();
@@ -88,7 +89,11 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
             {project?.name || 'Loading...'}
           </h2>
           <p className="text-xs text-gray-500">
-            Run {runId.slice(0, 8)} · Step {run.current_step} of 10 · {run.status}
+            Run {runId.slice(0, 8)} · Step {run.current_step} of 10 · {
+              run.status === 'auto_executing' ? 'Auto-Executing' :
+              run.status === 'halted' ? 'Halted' :
+              run.status
+            }
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -104,6 +109,13 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
           </Link>
         </div>
       </div>
+
+      {run.status === 'auto_executing' && (
+        <AutoExecuteBanner runId={runId} state={run.auto_execute_state} />
+      )}
+      {run.status === 'halted' && (
+        <HaltedBanner runId={runId} state={run.auto_execute_state} />
+      )}
 
       <div className="space-y-2">
         {STEP_CONFIG.map((stepCfg) => {
@@ -139,6 +151,7 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
                   isApproving={approveStep.isPending}
                   isSkipping={skipStep.isPending}
                   isReopening={reopenStep.isPending}
+                  runStatus={run.status}
                 />
               ) : null}
             </StepContainer>
@@ -219,6 +232,89 @@ function SaveAsTemplateButton({ runId }: { runId: string }) {
       >
         Cancel
       </button>
+    </div>
+  );
+}
+
+function AutoExecuteBanner({ runId, state }: { runId: string; state?: AutoExecuteState | null }) {
+  const { showToast } = useAppStore();
+  const abortMutation = useMutation({
+    mutationFn: () => api.abortAutoExecute(runId),
+    onSuccess: () => {
+      showToast('Auto-execute aborted', 'info');
+      queryClient.invalidateQueries({ queryKey: ['run', runId] });
+    },
+  });
+
+  return (
+    <div className="mb-3 flex items-center justify-between bg-indigo-50 border border-indigo-200 rounded-lg px-4 py-3">
+      <div className="flex items-center gap-2">
+        <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+        <span className="text-sm font-medium text-indigo-800">
+          Auto-executing — Step {state?.current_step ?? '?'} in progress
+        </span>
+      </div>
+      <button
+        onClick={() => abortMutation.mutate()}
+        disabled={abortMutation.isPending}
+        className="px-3 py-1 text-xs font-medium text-red-600 bg-white border border-red-200 rounded hover:bg-red-50 disabled:opacity-50"
+      >
+        {abortMutation.isPending ? 'Aborting...' : 'Abort'}
+      </button>
+    </div>
+  );
+}
+
+function HaltedBanner({ runId, state }: { runId: string; state?: AutoExecuteState | null }) {
+  const { showToast } = useAppStore();
+  const resumeMutation = useMutation({
+    mutationFn: (config?: { override_threshold?: Record<string, number>; skip_step?: number }) =>
+      api.resumeAutoExecute(runId, config),
+    onSuccess: () => {
+      showToast('Auto-execute resumed', 'success');
+      queryClient.invalidateQueries({ queryKey: ['run', runId] });
+    },
+  });
+
+  return (
+    <div className="mb-3 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-amber-500" />
+            <span className="text-sm font-medium text-amber-800">Halted at Step {state?.halted_step ?? '?'}</span>
+          </div>
+          {state?.halt_reason && (
+            <p className="text-xs text-amber-600 mt-1 ml-4">{state.halt_reason}</p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => resumeMutation.mutate()}
+            disabled={resumeMutation.isPending}
+            className="px-3 py-1 text-xs font-medium text-white bg-amber-600 rounded hover:bg-amber-700 disabled:opacity-50"
+          >
+            {resumeMutation.isPending ? 'Resuming...' : 'Resume'}
+          </button>
+          <button
+            onClick={() => resumeMutation.mutate({ skip_step: state?.halted_step })}
+            disabled={resumeMutation.isPending || !state?.halted_step}
+            className="px-3 py-1 text-xs font-medium text-amber-700 bg-white border border-amber-300 rounded hover:bg-amber-50 disabled:opacity-50"
+          >
+            Skip Step
+          </button>
+          <button
+            onClick={() => {
+              const step = state?.halted_step;
+              if (step != null) resumeMutation.mutate({ override_threshold: { [step]: 1.0 } });
+            }}
+            disabled={resumeMutation.isPending || !state?.halted_step}
+            className="px-3 py-1 text-xs font-medium text-amber-700 bg-white border border-amber-300 rounded hover:bg-amber-50 disabled:opacity-50"
+          >
+            Override Threshold
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

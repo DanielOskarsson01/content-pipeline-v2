@@ -7,6 +7,11 @@ export function useRunData(runId: string | undefined) {
     queryKey: ['run', runId],
     queryFn: () => api.getRun(runId!),
     enabled: !!runId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (status === 'auto_executing') return 10_000;
+      return false;
+    },
   });
 }
 

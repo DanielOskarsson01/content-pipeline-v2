@@ -38,6 +38,7 @@ interface SubmodulePanelProps {
   onSaveConfig: (config: Partial<SubmoduleConfig>) => Promise<unknown>;
   previousStepData: Record<string, unknown>[] | null;
   previousStepRenderSchema: Record<string, unknown> | null;
+  runStatus?: string;
 }
 
 function PanelAccordionItem({
@@ -98,6 +99,7 @@ export function SubmodulePanel({
   onSaveConfig,
   previousStepData,
   previousStepRenderSchema,
+  runStatus,
 }: SubmodulePanelProps) {
   const queryClient = useQueryClient();
   const showToast = useAppStore((s) => s.showToast);
@@ -132,6 +134,9 @@ export function SubmodulePanel({
 
   // Poll active submodule run — only poll while panel is open
   const { data: submoduleRun } = useSubmoduleRun(activeSubmoduleRunId, submodulePanelOpen);
+
+  // Disable manual actions during auto-execute
+  const isAutoExecuting = runStatus === 'auto_executing';
 
   // Execution mutation
   const executeMutation = useExecuteSubmodule();
@@ -841,15 +846,15 @@ export function SubmodulePanel({
           <div className="flex items-center justify-center gap-3">
             {/* RUN TASK */}
             <button
-              disabled={!hasInput || isRunning}
+              disabled={!hasInput || isRunning || isAutoExecuting}
               onClick={handleRunTask}
               className={`px-8 py-3 rounded text-sm font-medium transition-colors ${
-                hasInput && !isRunning
+                hasInput && !isRunning && !isAutoExecuting
                   ? 'bg-[#E11D73] text-white hover:bg-[#E11D73]/90'
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               }`}
             >
-              {isRunning ? 'RUNNING...' : 'RUN TASK'}
+              {isAutoExecuting ? 'AUTO-EXECUTING' : isRunning ? 'RUNNING...' : 'RUN TASK'}
             </button>
 
             {/* SEE RESULTS */}
@@ -867,10 +872,10 @@ export function SubmodulePanel({
 
             {/* APPROVE */}
             <button
-              disabled={!isCompleted || approveMutation.isPending || approvePerEntityMutation.isPending}
+              disabled={!isCompleted || approveMutation.isPending || approvePerEntityMutation.isPending || isAutoExecuting}
               onClick={handleApprove}
               className={`px-8 py-3 rounded text-sm font-medium transition-colors ${
-                isCompleted && !approveMutation.isPending && !approvePerEntityMutation.isPending
+                isCompleted && !approveMutation.isPending && !approvePerEntityMutation.isPending && !isAutoExecuting
                   ? 'bg-green-600 text-white hover:bg-green-700'
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               }`}

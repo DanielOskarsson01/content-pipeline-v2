@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import db from '../services/db.js';
 import { extractToBlob } from '../services/poolBlobs.js';
+import { executeRun, isAutoExecuting, abortAutoExecute } from '../services/autoExecutor.js';
 
 const router = Router();
 
@@ -689,6 +690,9 @@ router.post('/:id/abandon', async (req, res, next) => {
     if (run.status === 'completed') {
       return res.status(400).json({ error: 'Cannot abandon a completed run' });
     }
+    if (run.status === 'auto_executing') {
+      return res.status(400).json({ error: 'Abort auto-execute first before abandoning' });
+    }
 
     await db
       .from('pipeline_runs')
@@ -842,6 +846,161 @@ router.get('/:runId/report', async (req, res, next) => {
       },
       steps,
     });
+  } catch (err) { next(err); }
+});
+
+// ============================================================
+// Phase 12c: Auto-Execute endpoints
+// ============================================================
+
+/**
+ * POST /api/runs/:runId/auto-execute
+ * Start hands-free pipeline execution.
+ * Body (optional overrides): { failure_thresholds, step_timeouts }
+ */
+router.post('/:runId/auto-execute', async (req, res, next) => {
+  try {
+    const { runId } = req.params;
+
+    const { data: run, error: runErr } = await db
+      .from('pipeline_runs')
+      .select('id, status, project_id')
+      .eq('id', runId)
+      .single();
+
+    if (runErr) throw runErr;
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    if (run.status !== 'running') {
+      return res.status(400).json({ error: `Cannot auto-execute run with status "${run.status}"` });
+    }
+    if (isAutoExecuting(runId)) {
+      return res.status(409).json({ error: 'Auto-execute already in progress for this run' });
+    }
+
+    // Resolve template execution_plan
+    const { data: project } = await db
+      .from('projects')
+      .select('template_id')
+      .eq('id', run.project_id)
+      .single();
+
+    let executionPlan = {};
+    if (project?.template_id) {
+      const { data: template } = await db
+        .from('templates')
+        .select('execution_plan')
+        .eq('id', project.template_id)
+        .single();
+      executionPlan = template?.execution_plan || {};
+    }
+
+    const submodulesPerStep = executionPlan.submodules_per_step || {};
+    if (Object.keys(submodulesPerStep).length === 0) {
+      return res.status(400).json({ error: 'No submodules_per_step configured in template execution_plan' });
+    }
+
+    // Build config: steps 0-10, with overrides from body
+    const config = {
+      steps: Array.from({ length: 11 }, (_, i) => i),
+      skipSteps: (executionPlan.skip_steps || []).map(Number),
+      submodulesPerStep,
+      failure_thresholds: { ...(executionPlan.failure_thresholds || {}), ...(req.body?.failure_thresholds || {}) },
+      step_timeouts: { ...(executionPlan.step_timeouts || {}), ...(req.body?.step_timeouts || {}) },
+    };
+
+    // Fire-and-forget
+    executeRun(runId, config);
+
+    res.json({ status: 'auto_executing', started_at: new Date().toISOString(), config });
+  } catch (err) { next(err); }
+});
+
+/**
+ * POST /api/runs/:runId/auto-execute/resume
+ * Resume from halted state.
+ * Body: { override_threshold?: { "3": 0.8 }, skip_step?: number }
+ */
+router.post('/:runId/auto-execute/resume', async (req, res, next) => {
+  try {
+    const { runId } = req.params;
+
+    const { data: run, error: runErr } = await db
+      .from('pipeline_runs')
+      .select('id, status, auto_execute_state, project_id')
+      .eq('id', runId)
+      .single();
+
+    if (runErr) throw runErr;
+    if (!run) return res.status(404).json({ error: 'Run not found' });
+    if (run.status !== 'halted') {
+      return res.status(400).json({ error: `Cannot resume run with status "${run.status}"` });
+    }
+    if (isAutoExecuting(runId)) {
+      return res.status(409).json({ error: 'Auto-execute already in progress for this run' });
+    }
+
+    const state = run.auto_execute_state || {};
+    const haltedStep = state.halted_step ?? state.current_step ?? 0;
+
+    // Resolve template execution_plan
+    const { data: project } = await db
+      .from('projects')
+      .select('template_id')
+      .eq('id', run.project_id)
+      .single();
+
+    let executionPlan = {};
+    if (project?.template_id) {
+      const { data: template } = await db
+        .from('templates')
+        .select('execution_plan')
+        .eq('id', project.template_id)
+        .single();
+      executionPlan = template?.execution_plan || {};
+    }
+
+    // Merge thresholds: original → template → body overrides
+    const mergedThresholds = {
+      ...(state.failure_thresholds || {}),
+      ...(executionPlan.failure_thresholds || {}),
+      ...(req.body?.override_threshold || {}),
+    };
+
+    // Build skip list from original + body
+    const skipSteps = [...(executionPlan.skip_steps || []).map(Number)];
+    if (req.body?.skip_step != null) {
+      skipSteps.push(Number(req.body.skip_step));
+    }
+
+    const config = {
+      steps: Array.from({ length: 11 }, (_, i) => i).filter(i => i >= haltedStep),
+      skipSteps,
+      submodulesPerStep: executionPlan.submodules_per_step || {},
+      failure_thresholds: mergedThresholds,
+      step_timeouts: { ...(state.step_timeouts || {}), ...(executionPlan.step_timeouts || {}), ...(req.body?.step_timeouts || {}) },
+    };
+
+    executeRun(runId, config, state);
+
+    res.json({ status: 'auto_executing', resumed_from_step: haltedStep });
+  } catch (err) { next(err); }
+});
+
+/**
+ * POST /api/runs/:runId/auto-execute/abort
+ * Abort in-progress auto-execution. Run reverts to 'running' for manual control.
+ */
+router.post('/:runId/auto-execute/abort', async (req, res, next) => {
+  try {
+    const { runId } = req.params;
+
+    const aborted = abortAutoExecute(runId);
+    if (!aborted) {
+      return res.status(400).json({ error: 'No auto-execute in progress for this run' });
+    }
+
+    // The orchestrator will handle status revert on next signal check
+    res.json({ aborted: true });
   } catch (err) { next(err); }
 });
 

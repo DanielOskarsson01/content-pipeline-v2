@@ -45,7 +45,11 @@ export function RunReport() {
             {project?.name || 'Run'} — Report
           </h2>
           <p className="text-xs text-gray-500">
-            Run {run.id.slice(0, 8)} · {run.status}
+            Run {run.id.slice(0, 8)} · {
+              run.status === 'auto_executing' ? 'Auto-Executing' :
+              run.status === 'halted' ? 'Halted' :
+              run.status
+            }
             {run.completed_at && ` · completed ${new Date(run.completed_at).toLocaleDateString()}`}
           </p>
         </div>

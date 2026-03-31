@@ -100,6 +100,44 @@ app.get('/api/metrics/summary', async (_req, res, next) => {
 // Load submodule manifests from MODULES_PATH
 loadModules();
 
+// Phase 12c: Startup recovery — halt orphaned auto-executing runs
+(async () => {
+  try {
+    const { data: orphaned } = await db
+      .from('pipeline_runs')
+      .select('id, auto_execute_state')
+      .eq('status', 'auto_executing')
+      .not('auto_execute_state', 'is', null);
+
+    if (orphaned?.length) {
+      for (const run of orphaned) {
+        await db
+          .from('pipeline_runs')
+          .update({
+            status: 'halted',
+            auto_execute_state: {
+              ...(run.auto_execute_state || {}),
+              halt_reason: 'Server restarted during execution',
+              halted_at: new Date().toISOString(),
+            },
+          })
+          .eq('id', run.id);
+      }
+      console.log(`[startup] Halted ${orphaned.length} orphaned auto-executing run(s)`);
+    }
+
+    // Clean up stale Redis locks
+    const { redis } = await import('./services/queue.js');
+    const keys = await redis.keys('auto_execute:*');
+    if (keys.length) {
+      await redis.del(...keys);
+      console.log(`[startup] Cleaned ${keys.length} stale auto-execute lock(s)`);
+    }
+  } catch (err) {
+    console.error('[startup] Auto-execute recovery failed:', err.message);
+  }
+})();
+
 // SPA fallback — serve React app for non-API routes
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();

@@ -15,10 +15,35 @@ export interface Project {
 export interface PipelineRun {
   id: string;
   project_id: string;
-  status: 'running' | 'completed' | 'failed' | 'paused';
+  status: 'running' | 'completed' | 'failed' | 'paused' | 'auto_executing' | 'halted';
   current_step: number;
+  auto_execute_state?: AutoExecuteState | null;
   started_at: string;
   completed_at: string | null;
+}
+
+// Phase 12c: Auto-execute state stored in pipeline_runs.auto_execute_state JSONB
+export interface AutoExecuteState {
+  started_at: string;
+  current_step: number | null;
+  steps_completed: number[];
+  steps_skipped: number[];
+  failure_thresholds: Record<string, number>;
+  step_timeouts: Record<string, number>;
+  per_step_results: Record<string, AutoExecuteStepResult>;
+  halt_reason?: string;
+  halted_at?: string;
+  halted_step?: number;
+}
+
+export interface AutoExecuteStepResult {
+  status: string;
+  completed: number;
+  failed: number;
+  total: number;
+  failureRate: number;
+  duration_ms: number;
+  errorSummary: Record<string, number>;
 }
 
 export interface PipelineStage {
@@ -164,6 +189,8 @@ export type TemplatePresetMap = Record<string, TemplatePresetMapEntry>;
 export interface TemplateExecutionPlan {
   submodules_per_step?: Record<string, string[]>;
   skip_steps?: number[];
+  failure_thresholds?: Record<string, number>;
+  step_timeouts?: Record<string, number>;
 }
 
 export interface TemplateSeedConfig {

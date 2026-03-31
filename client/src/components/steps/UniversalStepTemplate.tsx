@@ -22,9 +22,10 @@ interface UniversalStepTemplateProps {
   isApproving: boolean;
   isSkipping: boolean;
   isReopening?: boolean;
+  runStatus?: string;
 }
 
-export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onReopen, isApproving, isSkipping, isReopening }: UniversalStepTemplateProps) {
+export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onReopen, isApproving, isSkipping, isReopening, runStatus }: UniversalStepTemplateProps) {
   const queryClient = useQueryClient();
   const showToast = useAppStore((s) => s.showToast);
   const isCompleted = stage.status === 'completed';
@@ -177,6 +178,7 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
             : stage.input_data as Record<string, unknown>[] | null
         }
         previousStepRenderSchema={stage.input_render_schema as Record<string, unknown> | null}
+        runStatus={runStatus}
       />
     </div>
   );
