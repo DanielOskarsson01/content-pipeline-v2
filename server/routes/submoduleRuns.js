@@ -818,9 +818,24 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
             }
           }
         } else if (dataOperation === 'remove') {
+          // Filter to keep only approved items, AND merge any enriched fields
+          // from the submodule output (e.g. url-relevance adds "relevance" field).
+          const approvedItemMap = new Map(
+            approvedItems.map(item => [String(item[itemKey] ?? ''), item])
+          );
           entityPool = entityPool.filter(item => {
             const keyVal = String(item[itemKey] ?? '');
-            return approvedKeySet.has(keyVal);
+            if (!approvedKeySet.has(keyVal)) return false;
+            // Merge enriched fields from the approved output into the pool item
+            const enriched = approvedItemMap.get(keyVal);
+            if (enriched) {
+              for (const [k, v] of Object.entries(enriched)) {
+                if (k !== itemKey && k !== 'source_submodule' && !(k in item)) {
+                  item[k] = v;
+                }
+              }
+            }
+            return true;
           });
         } else if (dataOperation === 'transform') {
           // Transform replaces items with matching keys — remove ALL existing

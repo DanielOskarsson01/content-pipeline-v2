@@ -109,10 +109,12 @@ function buildTools(runId, submoduleId) {
     },
   };
 
+  let _lastTotal = 1; // Track last reported total for completion write
   const progress = {
     update: (current, total, message) => {
       // Fire-and-forget — progress writes should never crash the execute function
       const progressData = { current, total, message };
+      if (total > 0) _lastTotal = total;
       db.from(progressTable)
         .update({ progress: progressData })
         .eq('id', runId)
@@ -121,6 +123,7 @@ function buildTools(runId, submoduleId) {
         })
         .catch(() => { /* silent */ });
     },
+    get lastTotal() { return _lastTotal; },
   };
 
   const ai = {
@@ -141,7 +144,7 @@ function buildTools(runId, submoduleId) {
           },
           body: JSON.stringify({
             model: modelId,
-            max_tokens: 8192,
+            max_tokens: 16384,
             messages: [{ role: 'user', content: prompt }],
           }),
         });
@@ -153,15 +156,20 @@ function buildTools(runId, submoduleId) {
 
         const data = JSON.parse(body);
         const duration_ms = Date.now() - startTime;
+        const stopReason = data.stop_reason || 'unknown';
         const result = {
           text: data.content?.[0]?.text || '',
           tokens_in: data.usage?.input_tokens || 0,
           tokens_out: data.usage?.output_tokens || 0,
           model: modelId,
           provider: 'anthropic',
+          stop_reason: stopReason,
           duration_ms,
         };
-        logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms`);
+        if (stopReason === 'max_tokens') {
+          logger.warn(`[ai] ${provider}/${model} — response TRUNCATED (hit max_tokens). Output may be incomplete.`);
+        }
+        logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms, stop: ${stopReason}`);
         return result;
 
       } else if (provider === 'openai') {
@@ -576,7 +584,7 @@ async function handleEntityJob(job) {
       output_data: sanitizedResult,
       output_render_schema: manifest.output_schema || null,
       logs: tools._logs,
-      progress: { current: 1, total: 1, message: 'Done' },
+      progress: { current: tools.progress.lastTotal, total: tools.progress.lastTotal, message: 'Done' },
       completed_at: new Date().toISOString(),
     })
     .eq('id', entity_submodule_run_id);
