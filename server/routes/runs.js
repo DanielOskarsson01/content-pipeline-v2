@@ -868,7 +868,7 @@ router.post('/:runId/auto-execute', async (req, res, next) => {
       .eq('id', runId)
       .single();
 
-    if (runErr) throw runErr;
+    if (runErr && runErr.code !== 'PGRST116') throw runErr;
     if (!run) return res.status(404).json({ error: 'Run not found' });
     if (run.status !== 'running') {
       return res.status(400).json({ error: `Cannot auto-execute run with status "${run.status}"` });
@@ -930,7 +930,7 @@ router.post('/:runId/auto-execute/resume', async (req, res, next) => {
       .eq('id', runId)
       .single();
 
-    if (runErr) throw runErr;
+    if (runErr && runErr.code !== 'PGRST116') throw runErr;
     if (!run) return res.status(404).json({ error: 'Run not found' });
     if (run.status !== 'halted') {
       return res.status(400).json({ error: `Cannot resume run with status "${run.status}"` });
