@@ -97,6 +97,9 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {run.status === 'running' && (
+            <AutoExecuteButton runId={runId} />
+          )}
           <SaveAsTemplateButton runId={runId} />
           <Link
             to={`/projects/${projectId}/runs/${runId}/report`}
@@ -233,6 +236,30 @@ function SaveAsTemplateButton({ runId }: { runId: string }) {
         Cancel
       </button>
     </div>
+  );
+}
+
+function AutoExecuteButton({ runId }: { runId: string }) {
+  const { showToast } = useAppStore();
+  const startMutation = useMutation({
+    mutationFn: () => api.autoExecuteRun(runId),
+    onSuccess: () => {
+      showToast('Auto-execute started', 'success');
+      queryClient.invalidateQueries({ queryKey: ['run', runId] });
+    },
+    onError: (error: Error) => {
+      showToast(error.message || 'Failed to start auto-execute', 'error');
+    },
+  });
+
+  return (
+    <button
+      onClick={() => startMutation.mutate()}
+      disabled={startMutation.isPending}
+      className="px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded hover:bg-indigo-700 disabled:opacity-50"
+    >
+      {startMutation.isPending ? 'Starting...' : 'Auto-Execute'}
+    </button>
   );
 }
 
