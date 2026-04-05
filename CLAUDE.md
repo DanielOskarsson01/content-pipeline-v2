@@ -243,7 +243,7 @@ Drop zone hint in `client/src/components/primitives/CsvUploadInput.tsx` mentions
 
 ---
 
-## 🏷 CURRENT PHASE: 11 — Step 8 Bundling (code complete, flow test pending)
+## 🏷 CURRENT PHASE: 12c — Auto-Execute Orchestration (UI + backend complete; E2E test pending)
 
 Phases 0–10 are complete. Phase 11 Step 8 bundling submodules are code complete.
 
@@ -421,6 +421,29 @@ Entry types: decision | progress | blocker | idea
 
 **Blockers/Questions:**
 - None — both repos committed (d64fc37, 9832f4e) and pushed, CI/CD will deploy
+
+**Updated by:** session-closer agent
+
+### Session: 2026-04-03 — Phase 12c Auto-Execute UI + Bug Fixes + Fallback Logic
+**Accomplished:**
+- Completed Batch 5 (UI MVP) of Phase 12c: 7 files modified — ProjectsList.tsx (status dots), RunView.tsx (AutoExecuteBanner, HaltedBanner, AutoExecuteButton, friendly labels), RunReport.tsx (friendly labels), useRun.ts (10s polling for auto_executing), SubmodulePanel.tsx (disabled buttons during auto-exec), UniversalStepTemplate.tsx (prop passthrough), types/step.ts (auto_executing/halted union + AutoExecuteState interface)
+- Fixed 5 review issues (parallel code review + CTO review): catch block state clobbering, startup recovery state preservation, resume state preservation via previousState param, negative sleep guard (Math.max(0,...)), abandon guard (400 when auto_executing)
+- Committed and pushed Phase 12c as bf43a14 (13 files, 1090 insertions)
+- Fixed PGRST116 handling: auto-execute and resume endpoints returned 500 for non-existent runs — fixed, pushed as 7813b5c
+- Added Auto-Execute button to RunView header (indigo, visible when status=running) — pushed as 7eaa339
+- Wrote 13-section 60+ test case protocol saved to Content-Pipeline/specs/PHASE_12C_TEST_PROTOCOL.md
+- Ran API guard tests: 4/4 pass (non-existent run 404, resume non-halted 400, abort nothing 400, no submodules 400)
+- Added submodules_per_step fallback in server/routes/runs.js: derives from module registry when template has no explicit config — written but NOT yet committed (needs code review first)
+
+**Decisions:**
+- Fallback submodules_per_step from registry: when template has no explicit config, auto-populate from registered modules at each step — avoids requiring a manual pipeline run before auto-execute works
+- No docs in code repos: documentation/planning files go in Content-Pipeline/specs/, not in skeleton or modules repos — test protocol moved accordingly
+- Port 3002 for local testing: command center occupies 3001, pipeline server started on 3002 for testing
+
+**Blockers/Questions:**
+- submodules_per_step fallback (runs.js) not yet committed — needs /code-review then commit/push before it's live
+- Full E2E auto-execute test not done — need happy path + halt/resume + abort flows with real entities in browser
+- Production server needs restart after CI/CD deploy of Phase 12c code
 
 **Updated by:** session-closer agent
 

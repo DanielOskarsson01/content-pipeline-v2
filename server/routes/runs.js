@@ -2,6 +2,7 @@ import { Router } from 'express';
 import db from '../services/db.js';
 import { extractToBlob } from '../services/poolBlobs.js';
 import { executeRun, isAutoExecuting, abortAutoExecute } from '../services/autoExecutor.js';
+import { getSubmodules } from '../services/moduleLoader.js';
 
 const router = Router();
 
@@ -894,9 +895,21 @@ router.post('/:runId/auto-execute', async (req, res, next) => {
       executionPlan = template?.execution_plan || {};
     }
 
-    const submodulesPerStep = executionPlan.submodules_per_step || {};
+    let submodulesPerStep = executionPlan.submodules_per_step || {};
+
+    // Fallback: derive from registered modules if template has no explicit config
     if (Object.keys(submodulesPerStep).length === 0) {
-      return res.status(400).json({ error: 'No submodules_per_step configured in template execution_plan' });
+      for (let step = 0; step <= 10; step++) {
+        const mods = getSubmodules(step)
+          .filter(m => m.active !== false && m.id !== 'test-dummy');
+        if (mods.length > 0) {
+          submodulesPerStep[String(step)] = mods.map(m => m.id);
+        }
+      }
+      if (Object.keys(submodulesPerStep).length === 0) {
+        return res.status(400).json({ error: 'No submodules registered — cannot auto-execute' });
+      }
+      console.log(`[auto-execute] No submodules_per_step in template — derived from registry: ${JSON.stringify(submodulesPerStep)}`);
     }
 
     // Build config: steps 0-10, with overrides from body
