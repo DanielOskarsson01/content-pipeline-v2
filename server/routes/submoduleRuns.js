@@ -806,17 +806,13 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         let entityPool = poolMap.get(entityName) || [];
 
         if (dataOperation === 'add') {
-          // Use composite key (itemKey + source_submodule) so different submodules
-          // can each contribute items with the same item_key (e.g. entity_name)
+          // Upsert by composite key (itemKey + source_submodule): replace existing
+          // items from the same submodule, add new ones. This makes re-runs work —
+          // re-approving a submodule replaces its previous output in the pool.
           const compositeKey = (item) => `${String(item[itemKey] ?? '')}::${item.source_submodule || ''}`;
-          const existingKeys = new Set(entityPool.map(compositeKey));
-          for (const item of approvedItems) {
-            const key = compositeKey(item);
-            if (!existingKeys.has(key)) {
-              entityPool.push(item);
-              existingKeys.add(key);
-            }
-          }
+          const approvedKeys = new Set(approvedItems.map(compositeKey));
+          entityPool = entityPool.filter(item => !approvedKeys.has(compositeKey(item)));
+          entityPool.push(...approvedItems);
         } else if (dataOperation === 'remove') {
           // Filter to keep only approved items, AND merge any enriched fields
           // from the submodule output (e.g. url-relevance adds "relevance" field).
