@@ -428,6 +428,12 @@ export function SubmodulePanel({
   const handleRunTask = async () => {
     if (!runId || !submodule) return;
 
+    // Save dirty options before executing (doc_selector, prompt, etc.)
+    if (optionsDirty) {
+      await onSaveConfig({ options: localOptions as Record<string, unknown> });
+      setOptionsDirty(false);
+    }
+
     // Resolve entities to send directly in the request body (no DB roundtrip needed)
     let entitiesToSend: Record<string, unknown>[] | undefined;
     if (inputSource === 'textarea' && textareaEntities.length > 0) {
