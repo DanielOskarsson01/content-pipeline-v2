@@ -850,18 +850,27 @@ export function SubmodulePanel({
         {/* CTA Footer */}
         <div className="border-t border-gray-200 px-4 py-3 bg-white flex-shrink-0">
           <div className="flex items-center justify-center gap-3">
-            {/* RUN TASK */}
-            <button
-              disabled={!hasInput || isRunning || isAutoExecuting}
-              onClick={handleRunTask}
-              className={`px-8 py-3 rounded text-sm font-medium transition-colors ${
-                hasInput && !isRunning && !isAutoExecuting
-                  ? 'bg-[#E11D73] text-white hover:bg-[#E11D73]/90'
-                  : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-              }`}
-            >
-              {isAutoExecuting ? 'AUTO-EXECUTING' : isRunning ? 'RUNNING...' : 'RUN TASK'}
-            </button>
+            {/* RUN TASK / ABORT */}
+            {isRunning ? (
+              <button
+                onClick={handleAbort}
+                className="px-8 py-3 rounded text-sm font-medium transition-colors bg-red-600 text-white hover:bg-red-700"
+              >
+                ABORT
+              </button>
+            ) : (
+              <button
+                disabled={!hasInput || isAutoExecuting}
+                onClick={handleRunTask}
+                className={`px-8 py-3 rounded text-sm font-medium transition-colors ${
+                  hasInput && !isAutoExecuting
+                    ? 'bg-[#E11D73] text-white hover:bg-[#E11D73]/90'
+                    : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                }`}
+              >
+                {isAutoExecuting ? 'AUTO-EXECUTING' : 'RUN TASK'}
+              </button>
+            )}
 
             {/* SEE RESULTS */}
             <button
