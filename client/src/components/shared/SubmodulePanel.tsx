@@ -118,23 +118,13 @@ export function SubmodulePanel({
   // Latest submodule runs — to auto-load previous run on panel open
   const { data: latestRuns } = useLatestSubmoduleRuns(runId, stepIndex);
 
-  // Auto-set activeSubmoduleRunId when opening a panel or switching submodules.
-  // Merged into a single effect to avoid React 18 batching race where the clear
-  // effect would overwrite the set effect in the same render cycle.
-  const prevSubmoduleIdRef = useRef<string | null>(null);
+  // Auto-set activeSubmoduleRunId from latestRuns when panel opens.
+  // openSubmodulePanel always resets activeSubmoduleRunId to null,
+  // so this effect fires to populate it from the latest run data.
   useEffect(() => {
-    if (!submodule) return;
-    const switched = prevSubmoduleIdRef.current !== submodule.id;
-    prevSubmoduleIdRef.current = submodule.id;
-
-    if (switched) {
-      // Switching submodules: clear first, then set from latest
-      setActiveSubmoduleRunId(null);
-    }
-
-    if (!submodulePanelOpen || !latestRuns) return;
+    if (!submodulePanelOpen || !submodule || !latestRuns || activeSubmoduleRunId) return;
     const latest = latestRuns[submodule.id];
-    if (latest && (switched || !activeSubmoduleRunId)) {
+    if (latest) {
       setActiveSubmoduleRunId(latest.id);
       // Auto-open Results accordion when a completed/approved run exists
       if (latest.status === 'completed' || latest.status === 'approved') {

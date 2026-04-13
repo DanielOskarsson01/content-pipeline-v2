@@ -41,13 +41,13 @@ export const usePanelStore = create<PanelStore>((set) => ({
       submodulePanelOpen: true,
       activeSubmoduleId: submoduleId,
       activeCategoryKey: categoryKey,
+      activeSubmoduleRunId: null, // Reset so effect can set from latestRuns
       panelAccordion: 'input',
     }),
 
   closeSubmodulePanel: () =>
     set({
       submodulePanelOpen: false,
-      // Keep activeSubmoduleRunId so polling can resume on reopen
     }),
 
   setPanelAccordion: (accordion) =>
