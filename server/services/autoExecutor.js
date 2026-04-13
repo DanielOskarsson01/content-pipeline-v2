@@ -229,6 +229,10 @@ export async function executeRun(runId, config, previousState = null) {
           runId, stepIndex, submoduleId, batchId,
           ...await getEntityCounts(batchId),
         });
+
+        // Mid-step approve: approve this submodule immediately so downstream
+        // submodules in the same step can see its output in the pool.
+        await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
       }
 
       if (signal.aborted) break;
@@ -274,12 +278,7 @@ export async function executeRun(runId, config, previousState = null) {
 
       if (signal.aborted) break;
 
-      // Auto-approve submodules [#3]
-      await autoApproveSubmodules(runId, stepIndex);
-
-      if (signal.aborted) break;
-
-      // Auto-approve step
+      // Auto-approve step (submodules already approved individually above)
       console.log(`[auto-execute] Step ${stepIndex}: approving step`);
       await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/approve`);
 
@@ -571,8 +570,7 @@ async function evaluateStepResult(runId, stepIndex) {
   return { completed: completedCount, failed: failedCount, total: totalCount, failureRate, errorSummary };
 }
 
-async function autoApproveSubmodules(runId, stepIndex) {
-  // Find all submodule_runs at this step that are completed (not yet approved)
+async function autoApproveSingleSubmodule(runId, stepIndex, submoduleId) {
   const { data: stage } = await db
     .from('pipeline_stages')
     .select('id')
@@ -586,33 +584,33 @@ async function autoApproveSubmodules(runId, stepIndex) {
     .from('submodule_runs')
     .select('id, batch_id, status')
     .eq('stage_id', stage.id)
+    .eq('submodule_id', submoduleId)
     .in('status', ['completed']);
 
-  for (const subRun of (subRuns || [])) {
-    // Query entity names from entity_submodule_runs [#3]
-    const { data: entityNames } = await db
-      .from('entity_submodule_runs')
-      .select('entity_name')
-      .eq('batch_id', subRun.batch_id)
-      .eq('status', 'completed');
+  const subRun = subRuns?.[0];
+  if (!subRun) return;
 
-    if (!entityNames?.length) continue;
+  const { data: entityNames } = await db
+    .from('entity_submodule_runs')
+    .select('entity_name')
+    .eq('batch_id', subRun.batch_id)
+    .eq('status', 'completed');
 
-    // Build entity_approvals map with actual entity names
-    const entityApprovals = {};
-    const seen = new Set();
-    for (const row of entityNames) {
-      if (!seen.has(row.entity_name)) {
-        entityApprovals[row.entity_name] = '__all__';
-        seen.add(row.entity_name);
-      }
+  if (!entityNames?.length) return;
+
+  const entityApprovals = {};
+  const seen = new Set();
+  for (const row of entityNames) {
+    if (!seen.has(row.entity_name)) {
+      entityApprovals[row.entity_name] = '__all__';
+      seen.add(row.entity_name);
     }
-
-    console.log(`[auto-execute] Step ${stepIndex}: approving submodule ${subRun.id} (${Object.keys(entityApprovals).length} entities)`);
-    await callEndpoint('POST', `/api/submodule-runs/${subRun.id}/approve`, {
-      entity_approvals: entityApprovals,
-    });
   }
+
+  console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: approving (${Object.keys(entityApprovals).length} entities)`);
+  await callEndpoint('POST', `/api/submodule-runs/${subRun.id}/approve`, {
+    entity_approvals: entityApprovals,
+  });
 }
 
 async function cancelTimeoutEntities(batchId) {

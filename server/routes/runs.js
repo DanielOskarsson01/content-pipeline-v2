@@ -2,7 +2,7 @@ import { Router } from 'express';
 import db from '../services/db.js';
 import { extractToBlob } from '../services/poolBlobs.js';
 import { executeRun, isAutoExecuting, abortAutoExecute } from '../services/autoExecutor.js';
-import { getSubmodules } from '../services/moduleLoader.js';
+import { getSubmodules, getSubmodulesGroupedByCategory } from '../services/moduleLoader.js';
 
 const router = Router();
 
@@ -898,18 +898,27 @@ router.post('/:runId/auto-execute', async (req, res, next) => {
     let submodulesPerStep = executionPlan.submodules_per_step || {};
 
     // Fallback: derive from registered modules if template has no explicit config
+    // Uses category + sort_order to match UI display order (not alphabetical)
     if (Object.keys(submodulesPerStep).length === 0) {
+      const CATEGORY_ORDER = {
+        crawling: 1, news: 2, filtering: 3, scraping: 4, analysis: 5,
+        planning: 6, generation: 7, seo: 8, review: 9, qa: 10,
+        formatting: 11, bundling: 12, media: 13, data: 14, website: 15, testing: 16,
+      };
       for (let step = 0; step <= 10; step++) {
-        const mods = getSubmodules(step)
-          .filter(m => m.active !== false && m.id !== 'test-dummy');
-        if (mods.length > 0) {
-          submodulesPerStep[String(step)] = mods.map(m => m.id);
+        const grouped = getSubmodulesGroupedByCategory(step);
+        // Sort categories by CATEGORY_ORDER, then flatten submodules within each
+        const orderedIds = Object.entries(grouped)
+          .sort(([a], [b]) => (CATEGORY_ORDER[a] ?? 99) - (CATEGORY_ORDER[b] ?? 99))
+          .flatMap(([, subs]) => subs.filter(s => s.active !== false && s.id !== 'test-dummy').map(s => s.id));
+        if (orderedIds.length > 0) {
+          submodulesPerStep[String(step)] = orderedIds;
         }
       }
       if (Object.keys(submodulesPerStep).length === 0) {
         return res.status(400).json({ error: 'No submodules registered — cannot auto-execute' });
       }
-      console.log(`[auto-execute] No submodules_per_step in template — derived from registry: ${JSON.stringify(submodulesPerStep)}`);
+      console.log(`[auto-execute] No submodules_per_step in template — derived from registry (category+sort_order): ${JSON.stringify(submodulesPerStep)}`);
     }
 
     // Build config: steps 0-10, with overrides from body

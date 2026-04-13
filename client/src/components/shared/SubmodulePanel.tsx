@@ -118,19 +118,30 @@ export function SubmodulePanel({
   // Latest submodule runs — to auto-load previous run on panel open
   const { data: latestRuns } = useLatestSubmoduleRuns(runId, stepIndex);
 
-  // Auto-set activeSubmoduleRunId when opening a panel for a submodule with a previous run
+  // Auto-set activeSubmoduleRunId when opening a panel or switching submodules.
+  // Merged into a single effect to avoid React 18 batching race where the clear
+  // effect would overwrite the set effect in the same render cycle.
+  const prevSubmoduleIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!submodulePanelOpen || !submodule || !latestRuns) return;
-    const latest = latestRuns[submodule.id];
-    if (latest && !activeSubmoduleRunId) {
-      setActiveSubmoduleRunId(latest.id);
-    }
-  }, [submodulePanelOpen, submodule?.id, latestRuns, activeSubmoduleRunId, setActiveSubmoduleRunId]);
+    if (!submodule) return;
+    const switched = prevSubmoduleIdRef.current !== submodule.id;
+    prevSubmoduleIdRef.current = submodule.id;
 
-  // Clear activeSubmoduleRunId when switching submodules
-  useEffect(() => {
-    setActiveSubmoduleRunId(null);
-  }, [submodule?.id, setActiveSubmoduleRunId]);
+    if (switched) {
+      // Switching submodules: clear first, then set from latest
+      setActiveSubmoduleRunId(null);
+    }
+
+    if (!submodulePanelOpen || !latestRuns) return;
+    const latest = latestRuns[submodule.id];
+    if (latest && (switched || !activeSubmoduleRunId)) {
+      setActiveSubmoduleRunId(latest.id);
+      // Auto-open Results accordion when a completed/approved run exists
+      if (latest.status === 'completed' || latest.status === 'approved') {
+        setPanelAccordion('results');
+      }
+    }
+  }, [submodulePanelOpen, submodule?.id, latestRuns, activeSubmoduleRunId, setActiveSubmoduleRunId, setPanelAccordion]);
 
   // Poll active submodule run — only poll while panel is open
   const { data: submoduleRun } = useSubmoduleRun(activeSubmoduleRunId, submodulePanelOpen);
