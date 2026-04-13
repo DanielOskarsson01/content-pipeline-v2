@@ -59,6 +59,7 @@ export async function executeRun(runId, config, previousState = null) {
   const signal = controller.signal;
   const processId = `${process.pid}-${Date.now()}`;
   let lockInterval = null;
+  let state = null;
 
   // Cleanup helper — called from every exit path
   const cleanup = async () => {
@@ -99,7 +100,7 @@ export async function executeRun(runId, config, previousState = null) {
 
     const skipSteps = new Set(config.skipSteps || []);
     const submodulesPerStep = config.submodulesPerStep || {};
-    const state = { ...initialState };
+    state = { ...initialState };
 
     // 3. Orchestration loop
     for (const stepIndex of config.steps) {
@@ -111,7 +112,7 @@ export async function executeRun(runId, config, previousState = null) {
       // Check if step should be skipped (from template config)
       if (skipSteps.has(stepIndex)) {
         console.log(`[auto-execute] Step ${stepIndex}: skipping (template config)`);
-        await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/skip`);
+        await safeSkipStep(runId, stepIndex);
         state.steps_skipped.push(stepIndex);
         await saveState(runId, state);
         continue;
@@ -121,7 +122,7 @@ export async function executeRun(runId, config, previousState = null) {
       const stepSubmodules = submodulesPerStep[String(stepIndex)] || [];
       if (stepSubmodules.length === 0) {
         console.log(`[auto-execute] Step ${stepIndex}: skipping (no submodules configured)`);
-        await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/skip`);
+        await safeSkipStep(runId, stepIndex);
         state.steps_skipped.push(stepIndex);
         await saveState(runId, state);
         continue;
@@ -323,19 +324,14 @@ export async function executeRun(runId, config, previousState = null) {
     await cleanup();
   } catch (err) {
     console.error(`[auto-execute] Run ${runId} error:`, err);
-    autoExecuteEvents.emit('execution_error', { runId, stepIndex: null, error: err.message });
+    autoExecuteEvents.emit('execution_error', { runId, stepIndex: state?.current_step ?? null, error: err.message });
     try {
+      const haltState = state
+        ? { ...state, halt_reason: `Unhandled error: ${err.message}`, halted_at: new Date().toISOString(), halted_step: state.current_step }
+        : { halt_reason: `Unhandled error: ${err.message}`, halted_at: new Date().toISOString() };
       await db
         .from('pipeline_runs')
-        .update({
-          status: 'halted',
-          auto_execute_state: {
-            ...state,
-            halt_reason: `Unhandled error: ${err.message}`,
-            halted_at: new Date().toISOString(),
-            halted_step: state.current_step,
-          },
-        })
+        .update({ status: 'halted', auto_execute_state: haltState })
         .eq('id', runId);
     } catch (dbErr) {
       console.error(`[auto-execute] Failed to halt run ${runId}:`, dbErr);
@@ -658,6 +654,19 @@ async function haltRun(runId, state, reason, cleanup) {
     .eq('id', runId);
 
   await cleanup();
+}
+
+/**
+ * Skip a step safely — only calls the /skip API if the stage is "active".
+ * Steps that are already completed/approved/skipped or don't exist are just logged.
+ */
+async function safeSkipStep(runId, stepIndex) {
+  const status = await getStageStatus(runId, stepIndex);
+  if (status === 'active') {
+    await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/skip`);
+  } else {
+    console.log(`[auto-execute] Step ${stepIndex}: stage is "${status || 'missing'}", no skip API call needed`);
+  }
 }
 
 function computeStepTimeout(stepIndex, entityCount, overrides) {
