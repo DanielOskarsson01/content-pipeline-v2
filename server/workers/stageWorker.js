@@ -129,9 +129,10 @@ function buildTools(runId, submoduleId) {
   // Retry-eligible HTTP status codes (transient errors)
   const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 529]);
 
-  // Per-request timeout for LLM API calls (2 minutes).
-  // Prevents hanging on stalled TCP connections (previously relied on OS ~300s timeout).
-  const AI_REQUEST_TIMEOUT_MS = 120_000;
+  // Per-request timeout for LLM API calls (5 minutes).
+  // Generous for large prompts (content-writer: 100KB+). Cheap modules are bounded
+  // by their entity-level COST_CONFIG timeout (2-5 min) which fires first.
+  const AI_REQUEST_TIMEOUT_MS = 300_000;
 
   // Retry config for transient failures
   const AI_MAX_RETRIES = 3;
