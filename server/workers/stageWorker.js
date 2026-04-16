@@ -126,89 +126,134 @@ function buildTools(runId, submoduleId) {
     get lastTotal() { return _lastTotal; },
   };
 
+  // Retry-eligible HTTP status codes (transient errors)
+  const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 529]);
+
+  // Per-request timeout for LLM API calls (2 minutes).
+  // Prevents hanging on stalled TCP connections (previously relied on OS ~300s timeout).
+  const AI_REQUEST_TIMEOUT_MS = 120_000;
+
+  // Retry config for transient failures
+  const AI_MAX_RETRIES = 3;
+  const AI_BASE_DELAY_MS = 2000; // 2s → 4s → 8s exponential backoff
+
   const ai = {
     complete: async ({ prompt, model = 'haiku', provider = 'anthropic' }) => {
       const startTime = Date.now();
       const modelId = MODEL_MAP[model] || model;
 
-      if (provider === 'anthropic') {
-        const apiKey = process.env.ANTHROPIC_API_KEY;
-        if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
+      // Inner function that makes a single API call with timeout
+      async function callProvider(attempt) {
+        if (provider === 'anthropic') {
+          const apiKey = process.env.ANTHROPIC_API_KEY;
+          if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
 
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
+          const { status, body } = await withTimeout(async (signal) => {
+            const res = await fetch('https://api.anthropic.com/v1/messages', {
+              method: 'POST',
+              signal,
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01',
+              },
+              body: JSON.stringify({
+                model: modelId,
+                max_tokens: 16384,
+                messages: [{ role: 'user', content: prompt }],
+              }),
+            });
+            return { status: res.status, body: await res.text() };
+          }, AI_REQUEST_TIMEOUT_MS);
+
+          if (status !== 200) {
+            const err = new Error(`Anthropic API error ${status}: ${body.slice(0, 500)}`);
+            err.statusCode = status;
+            throw err;
+          }
+
+          const data = JSON.parse(body);
+          const duration_ms = Date.now() - startTime;
+          const stopReason = data.stop_reason || 'unknown';
+          const result = {
+            text: data.content?.[0]?.text || '',
+            tokens_in: data.usage?.input_tokens || 0,
+            tokens_out: data.usage?.output_tokens || 0,
             model: modelId,
-            max_tokens: 16384,
-            messages: [{ role: 'user', content: prompt }],
-          }),
-        });
+            provider: 'anthropic',
+            stop_reason: stopReason,
+            duration_ms,
+          };
+          if (stopReason === 'max_tokens') {
+            logger.warn(`[ai] ${provider}/${model} — response TRUNCATED (hit max_tokens). Output may be incomplete.`);
+          }
+          logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms, stop: ${stopReason}`);
+          return result;
 
-        const body = await res.text();
-        if (res.status !== 200) {
-          throw new Error(`Anthropic API error ${res.status}: ${body}`);
-        }
+        } else if (provider === 'openai') {
+          const apiKey = process.env.OPENAI_API_KEY;
+          if (!apiKey) throw new Error('OPENAI_API_KEY not set in environment');
 
-        const data = JSON.parse(body);
-        const duration_ms = Date.now() - startTime;
-        const stopReason = data.stop_reason || 'unknown';
-        const result = {
-          text: data.content?.[0]?.text || '',
-          tokens_in: data.usage?.input_tokens || 0,
-          tokens_out: data.usage?.output_tokens || 0,
-          model: modelId,
-          provider: 'anthropic',
-          stop_reason: stopReason,
-          duration_ms,
-        };
-        if (stopReason === 'max_tokens') {
-          logger.warn(`[ai] ${provider}/${model} — response TRUNCATED (hit max_tokens). Output may be incomplete.`);
-        }
-        logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms, stop: ${stopReason}`);
-        return result;
+          const { status, body } = await withTimeout(async (signal) => {
+            const res = await fetch('https://api.openai.com/v1/chat/completions', {
+              method: 'POST',
+              signal,
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+              },
+              body: JSON.stringify({
+                model: modelId,
+                messages: [{ role: 'user', content: prompt }],
+              }),
+            });
+            return { status: res.status, body: await res.text() };
+          }, AI_REQUEST_TIMEOUT_MS);
 
-      } else if (provider === 'openai') {
-        const apiKey = process.env.OPENAI_API_KEY;
-        if (!apiKey) throw new Error('OPENAI_API_KEY not set in environment');
+          if (status !== 200) {
+            const err = new Error(`OpenAI API error ${status}: ${body.slice(0, 500)}`);
+            err.statusCode = status;
+            throw err;
+          }
 
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
+          const data = JSON.parse(body);
+          const duration_ms = Date.now() - startTime;
+          const result = {
+            text: data.choices?.[0]?.message?.content || '',
+            tokens_in: data.usage?.prompt_tokens || 0,
+            tokens_out: data.usage?.completion_tokens || 0,
             model: modelId,
-            messages: [{ role: 'user', content: prompt }],
-          }),
-        });
+            provider: 'openai',
+            duration_ms,
+          };
+          logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms`);
+          return result;
 
-        const body = await res.text();
-        if (res.status !== 200) {
-          throw new Error(`OpenAI API error ${res.status}: ${body}`);
+        } else {
+          throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai`);
         }
-
-        const data = JSON.parse(body);
-        const duration_ms = Date.now() - startTime;
-        const result = {
-          text: data.choices?.[0]?.message?.content || '',
-          tokens_in: data.usage?.prompt_tokens || 0,
-          tokens_out: data.usage?.completion_tokens || 0,
-          model: modelId,
-          provider: 'openai',
-          duration_ms,
-        };
-        logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms`);
-        return result;
-
-      } else {
-        throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai`);
       }
+
+      // Retry loop with exponential backoff for transient errors
+      let lastError;
+      for (let attempt = 1; attempt <= AI_MAX_RETRIES; attempt++) {
+        try {
+          return await callProvider(attempt);
+        } catch (err) {
+          lastError = err;
+          const isTransient = !err.statusCode                          // Network/timeout errors (no HTTP status)
+            || RETRYABLE_STATUSES.has(err.statusCode);                 // Retryable HTTP statuses
+
+          if (!isTransient || attempt === AI_MAX_RETRIES) {
+            throw err; // Permanent error or final attempt — give up
+          }
+
+          const delay = AI_BASE_DELAY_MS * Math.pow(2, attempt - 1);  // 2s, 4s, 8s
+          logger.warn(`[ai] ${provider}/${model} — attempt ${attempt}/${AI_MAX_RETRIES} failed (${err.message}), retrying in ${delay}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
+      throw lastError; // Should not reach here, but safety net
     },
   };
 

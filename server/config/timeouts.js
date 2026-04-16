@@ -12,7 +12,7 @@
 export const COST_CONFIG = {
   cheap:     { timeout: 2 * 60 * 1000,  attempts: 3, priority: 1  },
   medium:    { timeout: 5 * 60 * 1000,  attempts: 2, priority: 5  },
-  expensive: { timeout: 30 * 60 * 1000, attempts: 1, priority: 10 },
+  expensive: { timeout: 30 * 60 * 1000, attempts: 2, priority: 10 },
 };
 
 /**
