@@ -34,9 +34,12 @@ router.get('/:id', async (req, res, next) => {
     const stepIndices = stagesWithPools.map(s => s.step_index);
 
     if (stepIndices.length > 0) {
+      // Fetch only entity_name + step_index — NOT pool_items JSONB.
+      // Loading full pool_items for every step causes Supabase statement timeouts on large runs.
+      // Item counts are fetched via a lightweight RPC or computed from entity_name counts.
       const { data: entityPools } = await db
         .from('entity_stage_pool')
-        .select('step_index, entity_name, pool_items')
+        .select('step_index, entity_name')
         .eq('run_id', req.params.id)
         .in('step_index', stepIndices);
 
@@ -51,7 +54,8 @@ router.get('/:id', async (req, res, next) => {
           const stepPools = poolsByStep[stage.step_index];
           if (stepPools) {
             stage.entity_count = stage.entity_count || stepPools.length;
-            stage.total_item_count = stepPools.reduce((sum, ep) => sum + (ep.pool_items?.length || 0), 0);
+            // total_item_count is populated by the step-detail endpoint;
+            // the run overview only needs entity counts to render the step cards.
           }
         }
       }
