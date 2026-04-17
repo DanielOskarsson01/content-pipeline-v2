@@ -27,6 +27,15 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// Prevent browser HTTP caching of API responses — fixes stale data bug
+// where step input_data shows as null despite being populated server-side
+app.use('/api', (_req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  next();
+});
+app.set('etag', false);
+
 // Static files — serve React build in production
 const clientBuildPath = path.join(__dirname, '..', 'client', 'dist');
 app.use(express.static(clientBuildPath));

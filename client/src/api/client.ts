@@ -10,7 +10,7 @@ export const queryClient = new QueryClient({
     queries: {
       retry: 3,
       retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
-      staleTime: 30_000, // 30 seconds
+      staleTime: 10_000, // 10 seconds
     },
     mutations: {
       retry: 0, // No auto-retry for mutations
