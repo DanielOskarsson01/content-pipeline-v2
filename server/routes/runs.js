@@ -3,6 +3,7 @@ import db from '../services/db.js';
 import { extractToBlob } from '../services/poolBlobs.js';
 import { executeRun, isAutoExecuting, abortAutoExecute } from '../services/autoExecutor.js';
 import { getSubmodules, getSubmodulesGroupedByCategory } from '../services/moduleLoader.js';
+import { CATEGORY_ORDER, sortSubmoduleIds } from '../services/moduleOrder.js';
 
 const router = Router();
 
@@ -366,8 +367,8 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
             };
           }
 
-          // Update execution_plan with submodules used at this step
-          submodulesPerStep[String(stepIndex)] = stepSubs;
+          // Update execution_plan with submodules used at this step (sorted by category + sort_order)
+          submodulesPerStep[String(stepIndex)] = sortSubmoduleIds(stepSubs);
           execPlan.submodules_per_step = submodulesPerStep;
 
           // TODO: Add row locking if multi-user access is needed (single-operator system today)
@@ -904,11 +905,6 @@ router.post('/:runId/auto-execute', async (req, res, next) => {
     // Fallback: derive from registered modules if template has no explicit config
     // Uses category + sort_order to match UI display order (not alphabetical)
     if (Object.keys(submodulesPerStep).length === 0) {
-      const CATEGORY_ORDER = {
-        crawling: 1, news: 2, filtering: 3, scraping: 4, analysis: 5,
-        planning: 6, generation: 7, seo: 8, review: 9, qa: 10,
-        formatting: 11, bundling: 12, media: 13, data: 14, website: 15, testing: 16,
-      };
       for (let step = 0; step <= 10; step++) {
         const grouped = getSubmodulesGroupedByCategory(step);
         // Sort categories by CATEGORY_ORDER, then flatten submodules within each

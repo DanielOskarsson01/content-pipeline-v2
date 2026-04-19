@@ -216,6 +216,23 @@ executeRouter.post('/run', async (req, res) => {
 
     const options = optConfig?.options || manifest.options_defaults || {};
 
+    // 5a. Persist resolved options so progressive save / from-run template creation
+    // can pick them up. Must happen BEFORE doc_selector expansion (which replaces
+    // doc ID arrays with {filename: content} maps that shouldn't be stored).
+    // Note: PostgREST upsert only updates specified columns on conflict —
+    // existing input_config and data_operation are preserved.
+    try {
+      await db.from('run_submodule_config').upsert({
+        run_id: runId,
+        step_index: stepIdx,
+        submodule_id: submoduleId,
+        options,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'run_id,step_index,submodule_id' });
+    } catch (persistErr) {
+      console.warn(`[submoduleRuns] Failed to persist resolved options for ${submoduleId}:`, persistErr.message);
+    }
+
     // 5b. Resolve doc_selector options: replace doc ID arrays with {filename: content} maps
     for (const optDef of (manifest.options || [])) {
       if (optDef.type === 'doc_selector' && Array.isArray(options[optDef.name])) {

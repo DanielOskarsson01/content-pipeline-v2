@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import db from '../services/db.js';
 import { getSubmoduleById } from '../services/moduleLoader.js';
+import { sortSubmoduleIds } from '../services/moduleOrder.js';
 import { STEP_CONFIG } from '../../shared/stepConfig.js';
 import { parseSeedFile } from '../utils/seedParser.js';
 
@@ -412,6 +413,10 @@ router.post('/from-run/:runId', async (req, res, next) => {
       }
     }
 
+    // Sort submodules within each step by category + sort_order
+    for (const stepIdx of Object.keys(submodulesPerStep)) {
+      submodulesPerStep[stepIdx] = sortSubmoduleIds(submodulesPerStep[stepIdx]);
+    }
     const executionPlan = { submodules_per_step: submodulesPerStep };
     const finalSeedConfig = seed_config || { seed_type: 'csv' };
 
