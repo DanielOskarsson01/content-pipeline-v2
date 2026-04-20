@@ -1194,8 +1194,9 @@ function EntityAccordionItem({
   onCheckedKeysChange: (keys: Set<string>) => void;
   batchStatus: string;
 }) {
-  // Lazy-load entity detail only when expanded
-  const { data: detail, isLoading } = useEntityRunDetail(batchRunId, entity.id, isExpanded);
+  // Lazy-load entity detail only when expanded.
+  // entity.status in the key ensures cache busts on running→completed transition.
+  const { data: detail, isLoading } = useEntityRunDetail(batchRunId, entity.id, isExpanded, entity.status);
 
   // Initialize checked keys when detail loads (only once per detail+renderSchema)
   const initializedRef = useRef(false);

@@ -108,10 +108,19 @@ export function useLatestSubmoduleRuns(runId: string | undefined, stepIndex: num
 /**
  * Lazy-load full detail for a single entity run.
  * Called when user expands an entity accordion in per-entity mode.
+ *
+ * `entityStatus` is included in the query key so that when an entity transitions
+ * from "running" → "completed", the stale cached response (with null output_data)
+ * is discarded and a fresh fetch fires automatically.
  */
-export function useEntityRunDetail(batchRunId: string | null, entityRunId: string | null, enabled = false) {
+export function useEntityRunDetail(
+  batchRunId: string | null,
+  entityRunId: string | null,
+  enabled = false,
+  entityStatus?: string,
+) {
   return useQuery<EntityRunDetail | null>({
-    queryKey: ['entityRunDetail', batchRunId, entityRunId],
+    queryKey: ['entityRunDetail', batchRunId, entityRunId, entityStatus],
     queryFn: () => {
       if (!batchRunId || !entityRunId) return null;
       return api.getEntityRunDetail(batchRunId, entityRunId);
