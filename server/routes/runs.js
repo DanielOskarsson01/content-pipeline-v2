@@ -4,8 +4,71 @@ import { extractToBlob } from '../services/poolBlobs.js';
 import { executeRun, isAutoExecuting, abortAutoExecute } from '../services/autoExecutor.js';
 import { getSubmodules, getSubmodulesGroupedByCategory } from '../services/moduleLoader.js';
 import { CATEGORY_ORDER, sortSubmoduleIds } from '../services/moduleOrder.js';
+import { applyRouting } from '../services/routingHandler.js';
 
 const router = Router();
+
+/**
+ * Progressive save — merge approved config back to template.
+ * Fires for update_template, new_template, fork_template modes.
+ * Failure is non-fatal (logged but does not block step approval).
+ */
+async function progressiveSave(db, runId, stepIndex) {
+  const { data: runRow } = await db
+    .from('pipeline_runs')
+    .select('project_id')
+    .eq('id', runId)
+    .single();
+
+  const { data: project } = runRow ? await db
+    .from('projects')
+    .select('mode, template_id')
+    .eq('id', runRow.project_id)
+    .single() : { data: null };
+
+  const saveableModes = ['update_template', 'new_template', 'fork_template'];
+  if (project?.template_id && saveableModes.includes(project.mode)) {
+    const { data: stepConfigs } = await db
+      .from('run_submodule_config')
+      .select('submodule_id, options')
+      .eq('run_id', runId)
+      .eq('step_index', stepIndex);
+
+    if (stepConfigs?.length) {
+      const { data: tpl } = await db
+        .from('templates')
+        .select('preset_map, execution_plan')
+        .eq('id', project.template_id)
+        .single();
+
+      const presetMap = { ...(tpl?.preset_map || {}) };
+      const execPlan = { ...(tpl?.execution_plan || {}) };
+      const submodulesPerStep = { ...(execPlan.submodules_per_step || {}) };
+      const stepSubs = [];
+
+      for (const cfg of stepConfigs) {
+        if (!cfg.options || typeof cfg.options !== 'object') continue;
+        stepSubs.push(cfg.submodule_id);
+
+        const existing = presetMap[cfg.submodule_id] || { preset_name: '', fallback_values: {} };
+        presetMap[cfg.submodule_id] = {
+          preset_name: existing.preset_name,
+          fallback_values: { ...existing.fallback_values, ...cfg.options },
+        };
+      }
+
+      submodulesPerStep[String(stepIndex)] = sortSubmoduleIds(stepSubs);
+      execPlan.submodules_per_step = submodulesPerStep;
+
+      await db
+        .from('templates')
+        .update({ preset_map: presetMap, execution_plan: execPlan, updated_at: new Date().toISOString() })
+        .eq('id', project.template_id);
+
+      console.log(`[progressive-save] Updated template ${project.template_id} from step ${stepIndex} (${stepSubs.length} submodules)`);
+    }
+  }
+}
 
 /**
  * GET /api/runs/:id
@@ -291,6 +354,39 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
 
     const nextStep = rpcResult.next_step;
 
+    // ── Routing branch: Step 10 with loop-router ──
+    if (rpcResult.routing_pending) {
+      // Progressive save runs even for routing steps
+      try {
+        await progressiveSave(db, runId, stepIndex);
+      } catch (saveErr) {
+        console.error('[progressive-save] Failed during routing:', saveErr.message);
+      }
+
+      await db.from('decision_log').insert({
+        run_id: runId,
+        step_index: stepIndex,
+        decision: 'routing_applied',
+        context: {
+          entity_count: entityCount,
+          approved_entity_count: approvedCount,
+          has_routing: true,
+        },
+      });
+
+      // Apply routing — throws on failure (never silently completes)
+      const routingSummary = await applyRouting(db, runId);
+
+      return res.json({
+        step_completed: stepIndex,
+        next_step: routingSummary.earliest_step || null,
+        entity_count: entityCount,
+        approved_entity_count: approvedCount,
+        routing_pending: true,
+        routing: routingSummary,
+      });
+    }
+
     // Initialize entity_run_meta rows at Step 0 (one per entity per run)
     // Guarded: table may not exist if migration hasn't been applied yet
     if (stepIndex === 0) {
@@ -349,67 +445,8 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
       });
 
     // Phase 12b: Progressive save — merge approved config back to template
-    // Fires for update_template, new_template, fork_template modes
     try {
-      const { data: runRow } = await db
-        .from('pipeline_runs')
-        .select('project_id')
-        .eq('id', runId)
-        .single();
-
-      const { data: project } = runRow ? await db
-        .from('projects')
-        .select('mode, template_id')
-        .eq('id', runRow.project_id)
-        .single() : { data: null };
-
-      const saveableModes = ['update_template', 'new_template', 'fork_template'];
-      if (project?.template_id && saveableModes.includes(project.mode)) {
-        // Read run_submodule_config rows for the approved step
-        const { data: stepConfigs } = await db
-          .from('run_submodule_config')
-          .select('submodule_id, options')
-          .eq('run_id', runId)
-          .eq('step_index', stepIndex);
-
-        if (stepConfigs?.length) {
-          // Fetch current template preset_map + execution_plan
-          const { data: tpl } = await db
-            .from('templates')
-            .select('preset_map, execution_plan')
-            .eq('id', project.template_id)
-            .single();
-
-          const presetMap = { ...(tpl?.preset_map || {}) };
-          const execPlan = { ...(tpl?.execution_plan || {}) };
-          const submodulesPerStep = { ...(execPlan.submodules_per_step || {}) };
-          const stepSubs = [];
-
-          for (const cfg of stepConfigs) {
-            if (!cfg.options || typeof cfg.options !== 'object') continue;
-            stepSubs.push(cfg.submodule_id);
-
-            // Merge options into preset_map fallback_values
-            const existing = presetMap[cfg.submodule_id] || { preset_name: '', fallback_values: {} };
-            presetMap[cfg.submodule_id] = {
-              preset_name: existing.preset_name,
-              fallback_values: { ...existing.fallback_values, ...cfg.options },
-            };
-          }
-
-          // Update execution_plan with submodules used at this step (sorted by category + sort_order)
-          submodulesPerStep[String(stepIndex)] = sortSubmoduleIds(stepSubs);
-          execPlan.submodules_per_step = submodulesPerStep;
-
-          // TODO: Add row locking if multi-user access is needed (single-operator system today)
-          await db
-            .from('templates')
-            .update({ preset_map: presetMap, execution_plan: execPlan, updated_at: new Date().toISOString() })
-            .eq('id', project.template_id);
-
-          console.log(`[progressive-save] Updated template ${project.template_id} from step ${stepIndex} (${stepSubs.length} submodules)`);
-        }
-      }
+      await progressiveSave(db, runId, stepIndex);
     } catch (saveErr) {
       // Progressive save failure should not block step approval
       console.error('[progressive-save] Failed:', saveErr.message);

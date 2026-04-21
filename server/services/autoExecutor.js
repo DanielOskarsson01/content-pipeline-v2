@@ -290,7 +290,17 @@ export async function executeRun(runId, config, previousState = null) {
 
       // Auto-approve step (submodules already approved individually above)
       console.log(`[auto-execute] Step ${stepIndex}: approving step`);
-      await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/approve`);
+      const approveResult = await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/approve`);
+
+      // Routing halt guard: if Step 10 triggered routing, halt for Phase 3 loop continuation
+      if (approveResult?.routing_pending) {
+        const summary = approveResult.routing || {};
+        const msg = `Step 10 routing: ${summary.routed_count || 0} routed, ` +
+          `${summary.approved_count || 0} approved, ${summary.failed_count || 0} failed`;
+        console.log(`[auto-execute] ${msg} — halting for routing`);
+        await haltRun(runId, state, msg, cleanup);
+        return;
+      }
 
       state.per_step_results[String(stepIndex)] = {
         status: 'completed',

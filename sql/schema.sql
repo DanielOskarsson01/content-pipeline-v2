@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   completed_count INTEGER DEFAULT 0, -- Per-entity: entities completed
   failed_count INTEGER DEFAULT 0,    -- Per-entity: entities permanently failed
   approved_count INTEGER DEFAULT 0,  -- Per-entity: entities approved to advance
+  is_loop_pass BOOLEAN NOT NULL DEFAULT FALSE, -- Set by apply_entity_routing RPC on reactivated stages
   started_at TIMESTAMPTZ,
   completed_at TIMESTAMPTZ
 );

@@ -253,14 +253,38 @@ executeRouter.post('/run', async (req, res) => {
       }
     }
 
-    // 6. Bulk-read entity pools for this step (MANDATORY: 1 query, not N)
-    const { data: entityPools, error: poolErr } = await db
+    // 6. Check is_loop_pass flag (set by apply_entity_routing RPC)
+    const { data: stageRow } = await db
+      .from('pipeline_stages')
+      .select('is_loop_pass')
+      .eq('run_id', runId)
+      .eq('step_index', stepIdx)
+      .single();
+    const isLoopPass = stageRow?.is_loop_pass === true;
+
+    // Bulk-read entity pools for this step (MANDATORY: 1 query, not N)
+    // On loop passes: only process pending entities (routed entities)
+    let poolQuery = db
       .from('entity_stage_pool')
-      .select('entity_name, pool_items')
+      .select('entity_name, pool_items, status')
       .eq('run_id', runId)
       .eq('step_index', stepIdx);
+    if (isLoopPass) {
+      poolQuery = poolQuery.eq('status', 'pending');
+    }
+    const { data: entityPools, error: poolErr } = await poolQuery;
 
     if (poolErr) throw poolErr;
+
+    // Load entity_run_meta for loop metadata injection
+    let metaMap = new Map();
+    if (isLoopPass) {
+      const { data: entityMeta } = await db
+        .from('entity_run_meta')
+        .select('entity_name, loop_count, loop_config')
+        .eq('run_id', runId);
+      metaMap = new Map((entityMeta || []).map(m => [m.entity_name, m]));
+    }
 
     // If no entity pools exist yet (Step 0/1), create them from inputData entities
     let entities;
@@ -350,11 +374,22 @@ executeRouter.post('/run', async (req, res) => {
     const entityRunRows = entities.map(ep => {
       // Merge full entity properties (website, linkedin, etc.) with pool items
       const orig = originalEntityMap.get(ep.entity_name) || {};
+      const loopMeta = metaMap.get(ep.entity_name);
       const entity = {
         ...orig,
         name: ep.entity_name,
         items: ep.pool_items || [],
       };
+
+      // Inject loop_count into entity data for submodules that need it (e.g. loop-router)
+      if (isLoopPass && loopMeta) {
+        entity.loop_count = loopMeta.loop_count || 0;
+      }
+
+      // Merge loop_config overrides into options per-entity
+      const entityOptions = (isLoopPass && loopMeta?.loop_config)
+        ? { ...options, ...loopMeta.loop_config }
+        : options;
 
       return {
         stage_id: stage.id,
@@ -364,7 +399,8 @@ executeRouter.post('/run', async (req, res) => {
         submodule_id: submoduleId,
         step_index: stepIdx,
         status: 'pending',
-        options,
+        options: entityOptions,
+        loop_iteration: loopMeta?.loop_count || 0,
         input_data: {
           entity,
           run_id: runId,
