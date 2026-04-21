@@ -160,8 +160,16 @@ export async function executeRun(runId, config, previousState = null) {
         let expectedEntityCount;
 
         if (existingRun) {
-          if (existingRun.status === 'completed' || existingRun.status === 'approved') {
-            console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: already ${existingRun.status}, skipping trigger`);
+          if (existingRun.status === 'approved') {
+            console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: already approved, skipping`);
+            continue;
+          }
+          if (existingRun.status === 'completed') {
+            // Submodule finished but was never approved (e.g. abort interrupted before approval).
+            // Wait for batchWorker to finalize, then approve so output enters the pool.
+            console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: completed but not approved, approving now`);
+            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+            await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
             continue;
           }
           if (existingRun.status === 'running') {
@@ -232,6 +240,8 @@ export async function executeRun(runId, config, previousState = null) {
 
         // Mid-step approve: approve this submodule immediately so downstream
         // submodules in the same step can see its output in the pool.
+        // Wait for batchWorker to finalize submodule_runs status first (race condition fix).
+        await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
         await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
       }
 
@@ -301,10 +311,10 @@ export async function executeRun(runId, config, previousState = null) {
 
     // Handle abort vs completion
     if (signal.aborted) {
-      console.log(`[auto-execute] Run ${runId}: aborted`);
+      console.log(`[auto-execute] Run ${runId}: aborted at step ${state.current_step}`);
       await db
         .from('pipeline_runs')
-        .update({ status: 'running', auto_execute_state: { ...state, halt_reason: 'Aborted by user', halted_at: new Date().toISOString() } })
+        .update({ status: 'running', auto_execute_state: { ...state, halt_reason: 'Aborted by user', halted_at: new Date().toISOString(), halted_step: state.current_step } })
         .eq('id', runId);
       autoExecuteEvents.emit('run_aborted', { runId, abortedAtStep: state.current_step });
     } else {
@@ -448,7 +458,13 @@ async function handle409(runId, stepIndex, submoduleId) {
   const existing = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId);
   if (!existing) return 'halt';
 
-  if (existing.status === 'completed' || existing.status === 'approved') return 'skip';
+  if (existing.status === 'approved') return 'skip';
+  if (existing.status === 'completed') {
+    // Completed but not approved — approve it (same fix as resume path)
+    await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+    await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
+    return 'skip';
+  }
   if (existing.status === 'failed') {
     // Clear the failed run and retry
     // Actually, the trigger endpoint auto-clears stuck runs >10min,
@@ -466,7 +482,12 @@ async function handle409(runId, stepIndex, submoduleId) {
 
   const rechecked = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId);
   if (!rechecked) return 'halt';
-  if (rechecked.status === 'completed' || rechecked.status === 'approved') return 'skip';
+  if (rechecked.status === 'approved') return 'skip';
+  if (rechecked.status === 'completed') {
+    await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+    await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
+    return 'skip';
+  }
   if (rechecked.status === 'running') {
     // Still running — return the batch info so we can poll it
     return { batchId: rechecked.batch_id, entityCount: rechecked.entity_count };
@@ -568,6 +589,23 @@ async function evaluateStepResult(runId, stepIndex) {
   }
 
   return { completed: completedCount, failed: failedCount, total: totalCount, failureRate, errorSummary };
+}
+
+/**
+ * Wait for batchWorker to finalize submodule_runs status.
+ * pollBatchCompletion checks entity_submodule_runs (child rows) which finish
+ * before the batchWorker updates the parent submodule_runs record.
+ */
+async function waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, targetStatus, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const existing = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId);
+    if (existing && existing.status === targetStatus) return;
+    if (existing && existing.status === 'approved') return; // already approved, even better
+    if (existing && existing.status === 'failed') return;   // failed = no point waiting
+    await sleep(1000);
+  }
+  throw new Error(`Timed out waiting for ${submoduleId} to reach status "${targetStatus}" after ${timeoutMs}ms — batchWorker may be down`);
 }
 
 async function autoApproveSingleSubmodule(runId, stepIndex, submoduleId) {

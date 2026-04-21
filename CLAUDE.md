@@ -208,6 +208,16 @@ Enforcement is in `server/routes/stepContext.js` (three layers):
 
 ---
 
+## ⏱ BatchWorker Timing Contract
+
+The `batchWorker` (separate PM2 process in `server/workers/batchWorker.js`) finalizes the parent `submodule_runs` record AFTER all entity child jobs complete. There is a timing gap: `entity_submodule_runs` rows may all show `completed` before `batchWorker` updates the parent `submodule_runs.status` to `completed`.
+
+**Rule:** Any code that checks batch completion by counting `entity_submodule_runs` MUST then wait for `submodule_runs.status` to reach `completed` before proceeding (e.g., approving). The `waitForSubmoduleRunStatus` helper in `autoExecutor.js` does this with a 30s polling loop.
+
+**Why:** Without this wait, approval logic queries `submodule_runs` for `status='completed'`, finds nothing (still `pending`/`running`), and silently skips approval — data never enters the pool for the next step.
+
+---
+
 ## 📎 Column Alias System
 
 `COLUMN_ALIASES` in `server/routes/stepContext.js` maps common CSV/Excel header variants to canonical column names before `requires_columns` validation runs:
