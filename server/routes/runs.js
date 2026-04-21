@@ -263,6 +263,19 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
     const approvedCount = entityPools ? entityPools.filter(p => p.status !== 'failed').length : 0;
     const entityCount = entityPools ? entityPools.length : 0;
 
+    // Check if Step 10 has loop-router (routing pipeline)
+    let hasRouting = false;
+    if (stepIndex === 10) {
+      const { data: routerRuns } = await db
+        .from('entity_submodule_runs')
+        .select('id')
+        .eq('run_id', runId)
+        .eq('step_index', 10)
+        .like('submodule_id', '%loop-router%')
+        .limit(1);
+      hasRouting = routerRuns && routerRuns.length > 0;
+    }
+
     // Approve via RPC — pools forwarded in the RPC function itself
     const { data: rpcResult, error: rpcErr } = await db
       .rpc('approve_step_v2', {
@@ -270,12 +283,29 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
         p_output_render_schema: stageOutputRenderSchema,
         p_entity_count: entityCount,
         p_approved_count: approvedCount,
+        p_suppress_completion: hasRouting,
       })
       .single();
 
     if (rpcErr) throw rpcErr;
 
     const nextStep = rpcResult.next_step;
+
+    // Initialize entity_run_meta rows at Step 0 (one per entity per run)
+    // Guarded: table may not exist if migration hasn't been applied yet
+    if (stepIndex === 0) {
+      const entityNames = [...new Set((entityPools || []).map(p => p.entity_name))];
+      if (entityNames.length > 0) {
+        try {
+          await db.from('entity_run_meta').upsert(
+            entityNames.map(name => ({ run_id: runId, entity_name: name })),
+            { onConflict: 'run_id,entity_name', ignoreDuplicates: true }
+          );
+        } catch (metaErr) {
+          console.warn('[approve] entity_run_meta upsert skipped:', metaErr.message);
+        }
+      }
+    }
 
     // Populate input_data on the next stage so the UI can display forwarded items.
     // The RPC approve_step_v2 handles entity_stage_pool forwarding (the execution
@@ -390,6 +420,7 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
       next_step: nextStep,
       entity_count: entityCount,
       approved_entity_count: approvedCount,
+      routing_pending: rpcResult.routing_pending || false,
     });
   } catch (err) { next(err); }
 });

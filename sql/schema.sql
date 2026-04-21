@@ -274,14 +274,16 @@ $$ LANGUAGE plpgsql;
 -- ============================================================
 -- RPC: approve_step_v2 (Per-entity mode)
 -- Forwards approved entity pools to the next step.
+-- p_suppress_completion: when true (Step 10 with routing), don't auto-complete run.
 -- ============================================================
 CREATE OR REPLACE FUNCTION approve_step_v2(
   p_stage_id UUID,
   p_output_render_schema JSONB,
   p_entity_count INTEGER,
-  p_approved_count INTEGER
+  p_approved_count INTEGER,
+  p_suppress_completion BOOLEAN DEFAULT FALSE
 )
-RETURNS TABLE(next_step INTEGER, run_completed BOOLEAN) AS $$
+RETURNS TABLE(next_step INTEGER, run_completed BOOLEAN, routing_pending BOOLEAN) AS $$
 DECLARE
   v_run_id UUID;
   v_step_index INTEGER;
@@ -309,12 +311,18 @@ BEGIN
   WHERE id = p_stage_id;
 
   IF v_is_last THEN
-    UPDATE pipeline_runs SET
-      status = 'completed',
-      completed_at = NOW()
-    WHERE id = v_run_id;
+    IF p_suppress_completion THEN
+      -- Routing pipeline: don't complete run, let routing handler decide
+      RETURN QUERY SELECT NULL::INTEGER AS next_step, FALSE AS run_completed, TRUE AS routing_pending;
+    ELSE
+      -- Non-routing pipeline: complete normally (existing behavior)
+      UPDATE pipeline_runs SET
+        status = 'completed',
+        completed_at = NOW()
+      WHERE id = v_run_id;
 
-    RETURN QUERY SELECT NULL::INTEGER AS next_step, TRUE AS run_completed;
+      RETURN QUERY SELECT NULL::INTEGER AS next_step, TRUE AS run_completed, FALSE AS routing_pending;
+    END IF;
   ELSE
     UPDATE pipeline_stages SET
       status = 'active',
@@ -325,6 +333,7 @@ BEGIN
       approved_count = 0
     WHERE run_id = v_run_id AND step_index = v_next_step;
 
+    -- DO UPDATE so loop passes get fresh pool data (was DO NOTHING)
     INSERT INTO entity_stage_pool (run_id, step_index, entity_name, pool_items, status)
     SELECT
       v_run_id,
@@ -336,13 +345,16 @@ BEGIN
     WHERE esp.run_id = v_run_id
       AND esp.step_index = v_step_index
       AND esp.status = 'approved'
-    ON CONFLICT (run_id, step_index, entity_name) DO NOTHING;
+    ON CONFLICT (run_id, step_index, entity_name) DO UPDATE SET
+      pool_items = EXCLUDED.pool_items,
+      status = EXCLUDED.status,
+      updated_at = NOW();
 
     UPDATE pipeline_runs SET
       current_step = v_next_step
     WHERE id = v_run_id;
 
-    RETURN QUERY SELECT v_next_step AS next_step, FALSE AS run_completed;
+    RETURN QUERY SELECT v_next_step AS next_step, FALSE AS run_completed, FALSE AS routing_pending;
   END IF;
 END;
 $$ LANGUAGE plpgsql;
