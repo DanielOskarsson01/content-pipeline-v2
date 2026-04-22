@@ -176,7 +176,14 @@ export async function browserFetch(url, options = {}) {
 
   try {
     const browser = await getBrowser();
-    return await fetchWithBrowser(browser, url, options, hasProxy);
+    const result = await fetchWithBrowser(browser, url, options, hasProxy);
+    // Proxy auth failure (407) — retry without proxy
+    if (hasProxy && result.status === 407) {
+      console.warn(`[browserPool] Proxy auth failed (407) for ${url} — retrying direct`);
+      const directBrowser = await getDirectBrowser();
+      return await fetchWithBrowser(directBrowser, url, options, false);
+    }
+    return result;
   } catch (err) {
     // Proxy tunnel failure — retry without proxy (direct connection)
     if (hasProxy && err.message?.includes('ERR_TUNNEL_CONNECTION_FAILED')) {
