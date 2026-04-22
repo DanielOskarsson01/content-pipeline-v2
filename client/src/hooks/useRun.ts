@@ -26,12 +26,25 @@ export function useApproveStep(runId: string) {
     mutationFn: (stepIndex: number) => api.approveStep(runId, stepIndex),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['run', runId] });
-      showToast(
-        data.next_step !== null
-          ? `Step ${data.step_completed} approved — advancing to Step ${data.next_step}`
-          : `Step ${data.step_completed} approved — run complete!`,
-        'success'
-      );
+      if (data.routing_pending) {
+        const r = data.routing || {};
+        const parts: string[] = [];
+        if (r.routed_count) parts.push(`${r.routed_count} looped`);
+        if (r.approved_count) parts.push(`${r.approved_count} approved`);
+        if (r.failed_count) parts.push(`${r.failed_count} failed`);
+        if (r.flagged_count) parts.push(`${r.flagged_count} flagged`);
+        showToast(
+          `Step ${data.step_completed} routing: ${parts.join(', ')}`,
+          'info'
+        );
+      } else {
+        showToast(
+          data.next_step !== null
+            ? `Step ${data.step_completed} approved — advancing to Step ${data.next_step}`
+            : `Step ${data.step_completed} approved — run complete!`,
+          'success'
+        );
+      }
     },
   });
 }

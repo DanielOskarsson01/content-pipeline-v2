@@ -34,6 +34,16 @@ export interface AutoExecuteState {
   halt_reason?: string;
   halted_at?: string;
   halted_step?: number;
+  routing_loops?: number;
+  routing_events?: Array<{
+    loop: number;
+    earliest_step: number;
+    routed: number;
+    approved: number;
+    failed: number;
+    flagged: number;
+    timestamp: string;
+  }>;
 }
 
 export interface AutoExecuteStepResult {

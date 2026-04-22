@@ -279,6 +279,7 @@ function AutoExecuteBanner({ runId, state }: { runId: string; state?: AutoExecut
         <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
         <span className="text-sm font-medium text-indigo-800">
           Auto-executing — Step {state?.current_step ?? '?'} in progress
+          {state?.routing_loops ? ` (routing loop ${state.routing_loops})` : ''}
         </span>
       </div>
       <button

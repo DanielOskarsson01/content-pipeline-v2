@@ -89,6 +89,8 @@ export async function executeRun(runId, config, previousState = null) {
       failure_thresholds: config.failure_thresholds || {},
       step_timeouts: config.step_timeouts || {},
       per_step_results: previousState?.per_step_results || {},
+      routing_loops: previousState?.routing_loops || 0,
+      routing_events: previousState?.routing_events || [],
     };
 
     await db
@@ -102,7 +104,14 @@ export async function executeRun(runId, config, previousState = null) {
     const submodulesPerStep = config.submodulesPerStep || {};
     state = { ...initialState };
 
-    // 3. Orchestration loop
+    // 3. Orchestration loop (do-while for routing loop continuation)
+    const MAX_ROUTING_LOOPS = 7;
+    let routingLoops = initialState.routing_loops;
+    let routingTriggered = false;
+
+    do {
+    routingTriggered = false;
+
     for (const stepIndex of config.steps) {
       if (signal.aborted) break;
 
@@ -113,7 +122,7 @@ export async function executeRun(runId, config, previousState = null) {
       if (skipSteps.has(stepIndex)) {
         console.log(`[auto-execute] Step ${stepIndex}: skipping (template config)`);
         await safeSkipStep(runId, stepIndex);
-        state.steps_skipped.push(stepIndex);
+        if (!state.steps_skipped.includes(stepIndex)) state.steps_skipped.push(stepIndex);
         await saveState(runId, state);
         continue;
       }
@@ -123,7 +132,7 @@ export async function executeRun(runId, config, previousState = null) {
       if (stepSubmodules.length === 0) {
         console.log(`[auto-execute] Step ${stepIndex}: skipping (no submodules configured)`);
         await safeSkipStep(runId, stepIndex);
-        state.steps_skipped.push(stepIndex);
+        if (!state.steps_skipped.includes(stepIndex)) state.steps_skipped.push(stepIndex);
         await saveState(runId, state);
         continue;
       }
@@ -132,7 +141,7 @@ export async function executeRun(runId, config, previousState = null) {
       const stageStatus = await getStageStatus(runId, stepIndex);
       if (stageStatus === 'completed' || stageStatus === 'skipped' || stageStatus === 'approved') {
         console.log(`[auto-execute] Step ${stepIndex}: already ${stageStatus}, skipping`);
-        state.steps_completed.push(stepIndex);
+        if (!state.steps_completed.includes(stepIndex)) state.steps_completed.push(stepIndex);
         await saveState(runId, state);
         continue;
       }
@@ -292,14 +301,70 @@ export async function executeRun(runId, config, previousState = null) {
       console.log(`[auto-execute] Step ${stepIndex}: approving step`);
       const approveResult = await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/approve`);
 
-      // Routing halt guard: if Step 10 triggered routing, halt for Phase 3 loop continuation
+      // Routing: if Step 10 triggered routing, handle loop continuation
       if (approveResult?.routing_pending) {
         const summary = approveResult.routing || {};
-        const msg = `Step 10 routing: ${summary.routed_count || 0} routed, ` +
-          `${summary.approved_count || 0} approved, ${summary.failed_count || 0} failed`;
-        console.log(`[auto-execute] ${msg} — halting for routing`);
-        await haltRun(runId, state, msg, cleanup);
-        return;
+
+        // All entities terminal — no backward routing, run complete
+        if (summary.all_terminal || summary.routed_count === 0) {
+          console.log(`[auto-execute] All entities terminal after routing`);
+          state.per_step_results[String(stepIndex)] = {
+            status: 'completed', ...evalResult,
+            duration_ms: Date.now() - stepStartTime,
+          };
+          if (!state.steps_completed.includes(stepIndex)) state.steps_completed.push(stepIndex);
+          await saveState(runId, state);
+          continue; // let for-loop end naturally → completion
+        }
+
+        // Actual backward routing — loop continuation
+        routingLoops++;
+        if (routingLoops >= MAX_ROUTING_LOOPS) {
+          await haltRun(runId, state,
+            `Max routing loops reached (${routingLoops}/${MAX_ROUTING_LOOPS})`,
+            cleanup);
+          return;
+        }
+
+        const earliestStep = summary.earliest_step;
+        if (earliestStep == null) {
+          // Defensive: routed_count > 0 but no earliest_step — should never happen
+          await haltRun(runId, state,
+            `Routing returned routed_count=${summary.routed_count} but no earliest_step`,
+            cleanup);
+          return;
+        }
+
+        console.log(`[auto-execute] Routing loop ${routingLoops}: ` +
+          `${summary.routed_count} entities routed to step ${earliestStep}`);
+
+        // Record routing event in state
+        state.routing_loops = routingLoops;
+        if (!state.routing_events) state.routing_events = [];
+        state.routing_events.push({
+          loop: routingLoops,
+          earliest_step: earliestStep,
+          routed: summary.routed_count,
+          approved: summary.approved_count,
+          failed: summary.failed_count,
+          flagged: summary.flagged_count,
+          timestamp: new Date().toISOString(),
+        });
+
+        // Clean state for re-executed steps
+        state.steps_completed = state.steps_completed.filter(s => s < earliestStep);
+        for (const s of config.steps) {
+          if (s >= earliestStep) delete state.per_step_results[String(s)];
+        }
+        await saveState(runId, state);
+
+        autoExecuteEvents.emit('routing_loop', {
+          runId, loop: routingLoops, earliestStep,
+          routed: summary.routed_count,
+        });
+
+        routingTriggered = true;
+        break; // break inner for-loop → do-while re-enters
       }
 
       state.per_step_results[String(stepIndex)] = {
@@ -307,7 +372,7 @@ export async function executeRun(runId, config, previousState = null) {
         ...evalResult,
         duration_ms: Date.now() - stepStartTime,
       };
-      state.steps_completed.push(stepIndex);
+      if (!state.steps_completed.includes(stepIndex)) state.steps_completed.push(stepIndex);
       await saveState(runId, state);
 
       autoExecuteEvents.emit('step_completed', {
@@ -318,6 +383,8 @@ export async function executeRun(runId, config, previousState = null) {
 
       console.log(`[auto-execute] Step ${stepIndex}: completed (${evalResult.completed}/${evalResult.total} entities, ${(Date.now() - stepStartTime) / 1000}s)`);
     }
+
+    } while (routingTriggered && !signal.aborted);
 
     // Handle abort vs completion
     if (signal.aborted) {

@@ -276,6 +276,23 @@ executeRouter.post('/run', async (req, res) => {
 
     if (poolErr) throw poolErr;
 
+    // Filter out terminal entities on loop passes — they already passed QA
+    // and shouldn't re-process (saves ~9x LLM cost per loop-pass step)
+    let filteredPools = entityPools || [];
+    if (isLoopPass) {
+      const { data: terminalEntities } = await db
+        .from('entity_run_meta')
+        .select('entity_name')
+        .eq('run_id', runId)
+        .not('terminal_state', 'is', null);
+
+      const terminalSet = new Set((terminalEntities || []).map(e => e.entity_name));
+      if (terminalSet.size > 0) {
+        filteredPools = filteredPools.filter(p => !terminalSet.has(p.entity_name));
+        console.log(`[submoduleRuns] Loop pass: filtered out ${terminalSet.size} terminal entities, ${filteredPools.length} remaining`);
+      }
+    }
+
     // Load entity_run_meta for loop metadata injection
     let metaMap = new Map();
     if (isLoopPass) {
@@ -289,8 +306,8 @@ executeRouter.post('/run', async (req, res) => {
     // If no entity pools exist yet (Step 0/1), create them from inputData entities
     let entities;
     let originalEntities = null; // Keep full entity objects for input_data
-    if (entityPools && entityPools.length > 0) {
-      entities = entityPools;
+    if (filteredPools.length > 0) {
+      entities = filteredPools;
     } else if (inputData?.entities?.length > 0) {
       // First submodule at this step — initialize entity_stage_pool from input entities
       originalEntities = inputData.entities;
