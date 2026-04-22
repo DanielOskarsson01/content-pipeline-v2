@@ -77,8 +77,10 @@ executeRouter.post('/run', async (req, res) => {
     // 4. Resolve input — auto-resolution priority:
     //    0. Request body entities (sent directly from client — no DB roundtrip)
     //    1. Saved input_config (textarea entities or csv reference)
-    //    2. Previous step output (step_index > 0)
-    //    3. step_context (shared CSV upload, may exist without explicit save)
+    //    2. Previous step output_data (step_index > 0)
+    //    3. Current step input_data (populated by approve_step_v2 forwarding)
+    //    4. step_context (shared CSV upload, may exist without explicit save)
+    //    5. entity_stage_pool at this step (re-run / existing pools)
     let inputData = null;
     let inputFromPool = false; // true when entities are flat pool items that need re-grouping
 
@@ -166,7 +168,29 @@ executeRouter.post('/run', async (req, res) => {
       }
     }
 
-    // Priority 3: step_context (shared CSV upload — may exist without SAVE INPUT)
+    // Priority 3: Current step's input_data (populated by approve_step_v2 forwarding)
+    if (!inputData) {
+      const { data: currentStage } = await db
+        .from('pipeline_stages')
+        .select('input_data')
+        .eq('run_id', runId)
+        .eq('step_index', stepIdx)
+        .maybeSingle();
+
+      if (currentStage?.input_data && Array.isArray(currentStage.input_data) && currentStage.input_data.length > 0) {
+        const poolItems = currentStage.input_data;
+        const entityMap = new Map();
+        for (const item of poolItems) {
+          const name = item.entity_name || 'unknown';
+          if (!entityMap.has(name)) entityMap.set(name, { name, items: [] });
+          entityMap.get(name).items.push(item);
+        }
+        inputData = { entities: Array.from(entityMap.values()), run_id: runId, step_index: stepIdx, submodule_id: submoduleId };
+        inputFromPool = true;
+      }
+    }
+
+    // Priority 4: step_context (shared CSV upload — may exist without SAVE INPUT)
     if (!inputData) {
       const { data: ctx } = await db
         .from('step_context')
@@ -180,7 +204,7 @@ executeRouter.post('/run', async (req, res) => {
       }
     }
 
-    // Priority 4: entity_stage_pool already exists for this step (re-run scenario)
+    // Priority 5: entity_stage_pool already exists for this step (re-run scenario)
     // When a submodule re-runs at a step where pools were already initialized,
     // the previous priorities may fail (e.g. Step N-1 output_data empty in per-entity mode).
     // The pools themselves are the source of truth.
@@ -202,6 +226,7 @@ executeRouter.post('/run', async (req, res) => {
     }
 
     if (!inputData) {
+      console.error(`[submoduleRuns] No input data for ${submoduleId} at step ${stepIdx} run ${runId}`);
       return res.status(400).json({ error: 'No input data available. Upload data or ensure previous step has output.' });
     }
 
