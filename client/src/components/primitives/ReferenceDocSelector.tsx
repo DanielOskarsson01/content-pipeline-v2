@@ -95,8 +95,35 @@ export function ReferenceDocSelector({ projectId, value, onChange }: ReferenceDo
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  const selectedDocs = docs.filter(d => value.includes(d.id));
+  const unselectedDocs = docs.filter(d => !value.includes(d.id));
+
   return (
     <div className="space-y-2">
+      {/* Selected docs summary */}
+      {selectedDocs.length > 0 && (
+        <div className="bg-teal-50 border border-teal-200 rounded p-2 space-y-1">
+          <p className="text-[10px] font-medium text-teal-700 uppercase tracking-wide">
+            Selected ({selectedDocs.length})
+          </p>
+          {selectedDocs.map(doc => (
+            <div key={doc.id} className="flex items-center justify-between text-xs">
+              <span className="text-teal-800 truncate flex-1" title={doc.filename}>
+                {doc.filename}
+              </span>
+              <span className="text-teal-500 flex-shrink-0 mr-2">{formatSize(doc.size_bytes)}</span>
+              <button
+                onClick={() => toggleDoc(doc.id)}
+                className="text-teal-400 hover:text-red-500 flex-shrink-0"
+                title="Remove from selection"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Upload area */}
       <div
         className="border border-dashed border-gray-300 rounded px-3 py-2 text-center cursor-pointer hover:border-[#0891B2] transition-colors"
@@ -115,16 +142,19 @@ export function ReferenceDocSelector({ projectId, value, onChange }: ReferenceDo
         </p>
       </div>
 
-      {/* Doc list */}
+      {/* Available docs (unselected) */}
       {isLoading && <p className="text-xs text-gray-400">Loading docs...</p>}
 
-      {docs.length > 0 && (
+      {unselectedDocs.length > 0 && (
         <div className="space-y-1">
-          {docs.map((doc) => (
+          {selectedDocs.length > 0 && (
+            <p className="text-[10px] text-gray-400 uppercase tracking-wide">Available</p>
+          )}
+          {unselectedDocs.map((doc) => (
             <div key={doc.id} className="flex items-center gap-2 text-xs">
               <input
                 type="checkbox"
-                checked={value.includes(doc.id)}
+                checked={false}
                 onChange={() => toggleDoc(doc.id)}
                 className="w-3.5 h-3.5 rounded border-gray-300 text-[#0891B2] focus:ring-[#0891B2] cursor-pointer"
               />

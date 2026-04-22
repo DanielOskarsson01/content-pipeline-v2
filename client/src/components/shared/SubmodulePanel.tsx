@@ -335,6 +335,16 @@ export function SubmodulePanel({
   const [localOptions, setLocalOptions] = useState<Record<string, unknown>>({});
   const [optionsDirty, setOptionsDirty] = useState(false);
 
+  const docCount = useMemo(() => {
+    if (!submodule?.options) return 0;
+    return submodule.options
+      .filter(o => o.type === 'doc_selector')
+      .reduce((sum, o) => {
+        const val = localOptions[o.name];
+        return sum + (Array.isArray(val) ? val.length : 0);
+      }, 0);
+  }, [submodule?.options, localOptions]);
+
   // Reset local options when submodule or savedConfig changes
   useEffect(() => {
     const base = { ...manifestDefaults };
@@ -761,7 +771,7 @@ export function SubmodulePanel({
           {/* --- OPTIONS ACCORDION --- */}
           <PanelAccordionItem
             title="Options"
-            badge={optionsDirty ? 'unsaved' : undefined}
+            badge={optionsDirty ? 'unsaved' : docCount > 0 ? `${docCount} doc${docCount !== 1 ? 's' : ''}` : undefined}
             isOpen={panelAccordion === 'options'}
             onToggle={() => setPanelAccordion(panelAccordion === 'options' ? null : 'options')}
             variant="teal"

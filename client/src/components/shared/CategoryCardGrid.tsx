@@ -82,6 +82,12 @@ export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, 
                         onOpen={openSubmodulePanel}
                         latestRun={latestRuns[sub.id]}
                         currentDataOp={currentOp}
+                        docCount={
+                          configMap[sub.id]?.options
+                            ? Object.values(configMap[sub.id].options!).reduce<number>(
+                                (sum, v) => sum + (Array.isArray(v) ? v.length : 0), 0)
+                            : 0
+                        }
                         onCycleDataOp={
                           onDataOperationChange
                             ? () => {
@@ -110,6 +116,7 @@ function SubmoduleRow({
   onOpen,
   latestRun,
   currentDataOp,
+  docCount = 0,
   onCycleDataOp,
 }: {
   submodule: SubmoduleManifest;
@@ -117,6 +124,7 @@ function SubmoduleRow({
   onOpen: (submoduleId: string, categoryKey: string) => void;
   latestRun?: { status: string; result_count: number; approved_count: number; progress: { current: number; total: number; message: string } | null; error?: string | null; mode?: 'per_entity'; entity_count?: number; completed_count?: number };
   currentDataOp: string;
+  docCount?: number;
   onCycleDataOp?: () => void;
 }) {
   const opIcon = DATA_OP_ICONS[currentDataOp] || '\uFF1D';
@@ -152,6 +160,11 @@ function SubmoduleRow({
       <div className="flex items-center gap-2">
         {isActive ? (
           <>
+            {docCount > 0 && (
+              <span className="text-[10px] bg-teal-100 text-teal-700 px-1.5 py-0.5 rounded">
+                {docCount} doc{docCount !== 1 ? 's' : ''}
+              </span>
+            )}
             <SubmoduleStatusBadge latestRun={latestRun} />
             <svg
               className="w-4 h-4 text-gray-400 opacity-50 group-hover:opacity-100"
