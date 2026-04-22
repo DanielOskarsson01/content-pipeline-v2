@@ -497,6 +497,7 @@ async function handleEntityJob(job) {
           status: isTimeout ? 'timed_out' : 'error',
           error: err.message,
           entity_name: entity_name,
+          word_count: 0,
         }));
       outputItems = [...partialItems, ...remainingItems];
       console.log(`[worker:entity] ${submodule_id}/${entity_name}: saving ${partialItems.length} partial results + ${remainingItems.length} remaining as ${isTimeout ? 'timed_out' : 'error'}`);
@@ -507,6 +508,7 @@ async function handleEntityJob(job) {
         status: 'error',
         error: `Execution failed: ${err.message}`,
         entity_name: entity_name,
+        word_count: 0,
       }));
     }
 
