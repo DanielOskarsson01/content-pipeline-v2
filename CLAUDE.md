@@ -457,3 +457,47 @@ Entry types: decision | progress | blocker | idea
 
 **Updated by:** session-closer agent
 
+### Session: 2026-04-22 — Phase 4a/4b Escalation & Cascade Planning
+**Accomplished:**
+- Designed Phase 4a (Within-Run Escalation): ~99 lines in 2 files (autoExecutor.js + runs.js). After each step's primary submodules complete, check per-entity item counts — if below threshold, launch escalation submodules; if still below fail_threshold after escalation, mark entity as terminally failed
+- Received thorough architecture review identifying 6 real issues: entity_run_meta consistency, failure ownership overlap with loop-router, loop pass cascade-delete interaction, scope of escalation (pool-wide waste), config placement, thin verification
+- Revised plan (Rev 2) addressing all 6 concerns — escalation failures now write to entity_run_meta (terminal_state='failed', failure_reason='escalation_floor'), 9 verification cases documented
+- Designed Phase 4b (Cascade Runs): ~450 lines, 3 new files, 1 migration. Cross-run retry system where failed entities become seed for new run with different template, routed by failure classification (scrape-blocked, thin-content, etc.)
+- Explored codebase thoroughly: template schema, auto-executor main loop, entity_run_meta terminal state system, approve_step_v2 RPC forwarding logic, cascade-delete in routingHandler, terminal entity filter in submoduleRuns.js
+
+**Decisions:**
+- Phase 4a before 4b: within-run escalation ships first (~99 lines), cascade runs after validation (~450 lines)
+- Failure ownership split: escalation owns "insufficient data" at Steps 1/3 (failure_reason='escalation_floor'), loop-router owns quality failures at Step 10 — no overlap
+- Escalation runs for ALL entities (documented waste): per-entity filtering deferred as future improvement, acceptable at current 10-entity scale
+- entity_run_meta must be written for escalation failures: upsert pattern matches apply_entity_routing RPC, terminal entity filter will exclude on loop passes
+- No DB migration for Phase 4a: entity_stage_pool.status and entity_run_meta.terminal_state are free TEXT columns, execution_plan is JSONB
+- Config as separate `escalation_rules` key in execution_plan (not nested into step objects): less refactoring, step numbers correlate across both keys
+- Step 7 routing is a separate project (user clarification) — not part of Phase 4a/4b scope
+
+**Blockers/Questions:**
+- Phase 4a not yet implemented — plan approved in principle, code not written
+- Step 1 escalation submodule (google-search-discovery) is a brief, not yet built — needed for real testing of Step 1 escalation
+- Phase 4b depends on 4a being shipped and validated first
+
+**Updated by:** session-closer agent
+
+### Session: 2026-04-22 — Pronetgaming scraping fixes + proxy 407 fallback
+**Accomplished:**
+- Investigated pronetgaming.com scraping issues: broken sitemap (missing `/blog/` path segment → 404s), `word_count = NaN` in pass-through paths, no built-in URL exclusion patterns, browser-crawler missing `waitForSelector` for RSC/SPA pages
+- Fixed `word_count` NaN propagation in stageWorker.js — added `word_count: 0` to both synthetic error item maps (lines ~495 and ~505)
+- Created `scripts/seed-url-filter-preset.js` — idempotent script inserting global "Recommended" preset (16 social/junk URL patterns) into `option_presets` table. Verified on server (create + skip)
+- Fixed proxy 407 fallback in `browserPool.js` — added HTTP status check before returning result, retries with direct browser on 407 (previously only caught thrown `ERR_TUNNEL_CONNECTION_FAILED` errors)
+- Commits: `0a88e8c` (word_count guard + seed script), `10d4311` (proxy 407 fallback)
+- Acceptance test PASSED: browser-crawler discovered 7 blog URLs from pronetgaming.com (threshold was 5)
+
+**Decisions:**
+- Deferred Fix #3 (pass full URL to url-relevance LLM) to separate PR — changes classification behavior globally
+- Empty defaults + preset system for url-filter exclude_patterns — not hardcoded patterns in manifest
+- `?? 0` for pass-through maps (preserves legitimate zero), `|| 0` for sum reduces (falsy fine in summation)
+- Proxy 407 treated same as ERR_TUNNEL_CONNECTION_FAILED — retry with direct (no-proxy) browser
+
+**Blockers/Questions:**
+- None — all fixes deployed and verified
+
+**Updated by:** session-closer agent
+
