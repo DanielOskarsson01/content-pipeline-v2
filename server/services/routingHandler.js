@@ -5,10 +5,11 @@
  * backstop, cascade-deletes stale intermediate data, and calls the
  * apply_entity_routing RPC in a single atomic transaction.
  *
- * Called by the Step 10 approval handler in runs.js when routing_pending=true.
+ * Called by the approval handler in runs.js when routing is detected.
  */
 
 const MAX_LOOPS = 3;
+const LAST_STEP = 10; // Pipeline ceiling (from stepConfig)
 
 // Decision → target_step mapping (hardcoded — escalation config deferred)
 const DECISION_TARGET_MAP = {
@@ -23,16 +24,17 @@ const DECISION_TARGET_MAP = {
  *
  * @param {object} db - Supabase client
  * @param {string} runId - The run UUID
+ * @param {number} routingStep - The step index where routing runs (default 10)
  * @returns {object} Routing summary from the RPC
  * @throws {Error} If no router output found (always a bug) or RPC fails
  */
-export async function applyRouting(db, runId) {
+export async function applyRouting(db, runId, routingStep = 10) {
   // ── a) Read loop-router output ──────────────────────────────────────
   const { data: routerRuns, error: routerErr } = await db
     .from('entity_submodule_runs')
     .select('entity_name, output_data')
     .eq('run_id', runId)
-    .eq('step_index', 10)
+    .eq('step_index', routingStep)
     .like('submodule_id', '%loop-router%')
     .in('status', ['completed', 'approved']);
 
@@ -72,7 +74,7 @@ export async function applyRouting(db, runId) {
 
   const { data: allEntities, error: metaErr } = await db
     .from('entity_run_meta')
-    .select('entity_name, loop_count')
+    .select('entity_name, loop_count, terminal_state')
     .eq('run_id', runId);
 
   if (metaErr) {
@@ -85,6 +87,9 @@ export async function applyRouting(db, runId) {
 
   const decisions = [];
   for (const meta of (allEntities || [])) {
+    // Skip entities already in terminal state from a previous routing pass
+    if (meta.terminal_state) continue;
+
     const entityName = meta.entity_name;
     const routerItem = routerDecisions.get(entityName);
 
@@ -139,7 +144,7 @@ export async function applyRouting(db, runId) {
       .eq('run_id', runId)
       .eq('entity_name', d.entity_name)
       .gte('step_index', d.target_step)
-      .lte('step_index', 10);
+      .lte('step_index', LAST_STEP);
 
     if (delErr) {
       console.error(
@@ -159,7 +164,7 @@ export async function applyRouting(db, runId) {
       .select('id')
       .eq('run_id', runId)
       .gte('step_index', earliestTarget)
-      .lte('step_index', 10);
+      .lte('step_index', LAST_STEP);
 
     if (staleStages && staleStages.length > 0) {
       const { error: smDelErr } = await db
@@ -170,7 +175,7 @@ export async function applyRouting(db, runId) {
       if (smDelErr) {
         console.error(`[routingHandler] Failed to delete stale submodule_runs: ${smDelErr.message}`);
       } else {
-        console.log(`[routingHandler] Deleted submodule_runs for steps ${earliestTarget}-10 (${staleStages.length} stages)`);
+        console.log(`[routingHandler] Deleted submodule_runs for steps ${earliestTarget}-${LAST_STEP} (${staleStages.length} stages)`);
       }
     }
   }
@@ -179,6 +184,7 @@ export async function applyRouting(db, runId) {
   const { data: rpcResult, error: rpcErr } = await db.rpc('apply_entity_routing', {
     p_run_id: runId,
     p_routing_decisions: decisions,
+    p_routing_step: routingStep,
   }).single();
 
   if (rpcErr) {

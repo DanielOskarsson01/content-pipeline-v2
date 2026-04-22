@@ -105,7 +105,6 @@ export async function executeRun(runId, config, previousState = null) {
     state = { ...initialState };
 
     // 3. Orchestration loop (do-while for routing loop continuation)
-    const MAX_ROUTING_LOOPS = 7;
     let routingLoops = initialState.routing_loops;
     let routingTriggered = false;
 
@@ -301,7 +300,7 @@ export async function executeRun(runId, config, previousState = null) {
       console.log(`[auto-execute] Step ${stepIndex}: approving step`);
       const approveResult = await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/approve`);
 
-      // Routing: if Step 10 triggered routing, handle loop continuation
+      // Routing: if routing step triggered routing, handle loop continuation
       if (approveResult?.routing_pending) {
         const summary = approveResult.routing || {};
 
@@ -319,12 +318,6 @@ export async function executeRun(runId, config, previousState = null) {
 
         // Actual backward routing — loop continuation
         routingLoops++;
-        if (routingLoops >= MAX_ROUTING_LOOPS) {
-          await haltRun(runId, state,
-            `Max routing loops reached (${routingLoops}/${MAX_ROUTING_LOOPS})`,
-            cleanup);
-          return;
-        }
 
         const earliestStep = summary.earliest_step;
         if (earliestStep == null) {

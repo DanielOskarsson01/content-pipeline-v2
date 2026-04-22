@@ -394,18 +394,16 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
     const approvedCount = entityPools ? entityPools.filter(p => p.status !== 'failed').length : 0;
     const entityCount = entityPools ? entityPools.length : 0;
 
-    // Check if Step 10 has loop-router (routing pipeline)
+    // Check if this step has loop-router (routing pipeline — step-agnostic)
     let hasRouting = false;
-    if (stepIndex === 10) {
-      const { data: routerRuns } = await db
-        .from('entity_submodule_runs')
-        .select('id')
-        .eq('run_id', runId)
-        .eq('step_index', 10)
-        .like('submodule_id', '%loop-router%')
-        .limit(1);
-      hasRouting = routerRuns && routerRuns.length > 0;
-    }
+    const { data: routerRuns } = await db
+      .from('entity_submodule_runs')
+      .select('id')
+      .eq('run_id', runId)
+      .eq('step_index', stepIndex)
+      .like('submodule_id', '%loop-router%')
+      .limit(1);
+    hasRouting = routerRuns && routerRuns.length > 0;
 
     // Approve via RPC — pools forwarded in the RPC function itself
     const { data: rpcResult, error: rpcErr } = await db
@@ -422,7 +420,7 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
 
     const nextStep = rpcResult.next_step;
 
-    // ── Routing branch: Step 10 with loop-router ──
+    // ── Routing branch: step has loop-router ──
     if (rpcResult.routing_pending) {
       // Progressive save runs even for routing steps
       try {
@@ -443,8 +441,57 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
       });
 
       // Apply routing — throws on failure (never silently completes)
-      const routingSummary = await applyRouting(db, runId);
+      const routingSummary = await applyRouting(db, runId, stepIndex);
 
+      // ALL entities terminal — forward entire batch to next step
+      if (routingSummary.all_terminal && stepIndex < 10) {
+        const nextStep = stepIndex + 1;
+
+        // Get ALL terminal entities from entity_run_meta (approved + failed + flagged)
+        const { data: terminalEntities } = await db
+          .from('entity_run_meta')
+          .select('entity_name, terminal_state')
+          .eq('run_id', runId)
+          .not('terminal_state', 'is', null);
+
+        // Get their pool data from the routing step
+        const terminalNames = (terminalEntities || []).map(e => e.entity_name);
+        const { data: pools } = await db
+          .from('entity_stage_pool')
+          .select('entity_name, pool_items')
+          .eq('run_id', runId)
+          .eq('step_index', stepIndex)
+          .in('entity_name', terminalNames);
+
+        // Forward all terminal entities to next step
+        for (const pool of (pools || [])) {
+          await db.from('entity_stage_pool').upsert({
+            run_id: runId, step_index: nextStep,
+            entity_name: pool.entity_name,
+            pool_items: pool.pool_items, status: 'pending',
+          }, { onConflict: 'run_id,step_index,entity_name' });
+        }
+
+        // Activate next step + update run pointer
+        await db.from('pipeline_stages').update({
+          status: 'active', started_at: new Date().toISOString(),
+          entity_count: pools?.length || 0,
+          completed_count: 0, failed_count: 0, approved_count: 0,
+        }).eq('run_id', runId).eq('step_index', nextStep);
+
+        await db.from('pipeline_runs').update({ current_step: nextStep }).eq('id', runId);
+
+        return res.json({
+          step_completed: stepIndex,
+          next_step: nextStep,
+          entity_count: entityCount,
+          approved_entity_count: approvedCount,
+          routing_pending: false,
+          routing: routingSummary,
+        });
+      }
+
+      // Backward routing triggered — auto-executor handles loop re-entry
       return res.json({
         step_completed: stepIndex,
         next_step: routingSummary.earliest_step || null,

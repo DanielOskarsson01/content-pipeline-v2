@@ -311,19 +311,20 @@ BEGIN
     approved_count = p_approved_count
   WHERE id = p_stage_id;
 
-  IF v_is_last THEN
-    IF p_suppress_completion THEN
-      -- Routing pipeline: don't complete run, let routing handler decide
-      RETURN QUERY SELECT NULL::INTEGER AS next_step, FALSE AS run_completed, TRUE AS routing_pending;
-    ELSE
-      -- Non-routing pipeline: complete normally (existing behavior)
-      UPDATE pipeline_runs SET
-        status = 'completed',
-        completed_at = NOW()
-      WHERE id = v_run_id;
+  -- Routing suppression takes priority (loop-router decides what happens next)
+  -- This fires at ANY step where p_suppress_completion is set, not just the last step.
+  IF p_suppress_completion THEN
+    RETURN QUERY SELECT v_next_step AS next_step, FALSE AS run_completed, TRUE AS routing_pending;
 
-      RETURN QUERY SELECT NULL::INTEGER AS next_step, TRUE AS run_completed, FALSE AS routing_pending;
-    END IF;
+  ELSIF v_is_last THEN
+    -- Last step, no routing: complete run
+    UPDATE pipeline_runs SET
+      status = 'completed',
+      completed_at = NOW()
+    WHERE id = v_run_id;
+
+    RETURN QUERY SELECT NULL::INTEGER AS next_step, TRUE AS run_completed, FALSE AS routing_pending;
+
   ELSE
     UPDATE pipeline_stages SET
       status = 'active',
