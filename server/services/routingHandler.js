@@ -145,8 +145,33 @@ export async function applyRouting(db, runId) {
       console.error(
         `[routingHandler] Failed to delete stale runs for ${d.entity_name}: ${delErr.message}`
       );
-      // Non-fatal — the RPC will still work, but checkExistingSubmoduleRun may
-      // find stale rows. Log and continue.
+    }
+  }
+
+  // Also delete parent submodule_runs records for reactivated steps.
+  // Without this, checkExistingSubmoduleRun in autoExecutor finds old 'approved'
+  // records and skips every submodule on loop re-entry — silently breaking routing.
+  if (routedEntities.length > 0) {
+    const earliestTarget = Math.min(...routedEntities.map(d => d.target_step));
+
+    const { data: staleStages } = await db
+      .from('pipeline_stages')
+      .select('id')
+      .eq('run_id', runId)
+      .gte('step_index', earliestTarget)
+      .lte('step_index', 10);
+
+    if (staleStages && staleStages.length > 0) {
+      const { error: smDelErr } = await db
+        .from('submodule_runs')
+        .delete()
+        .in('stage_id', staleStages.map(s => s.id));
+
+      if (smDelErr) {
+        console.error(`[routingHandler] Failed to delete stale submodule_runs: ${smDelErr.message}`);
+      } else {
+        console.log(`[routingHandler] Deleted submodule_runs for steps ${earliestTarget}-10 (${staleStages.length} stages)`);
+      }
     }
   }
 
