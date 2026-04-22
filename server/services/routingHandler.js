@@ -60,6 +60,16 @@ export async function applyRouting(db, runId) {
   }
 
   // ── b) Build decisions for ALL entities ─────────────────────────────
+  // Safety net: ensure entity_run_meta rows exist for all entities in this run.
+  // Normally created at Step 0 approval, but Step 0 may be skipped.
+  const entityNames = [...routerDecisions.keys()];
+  if (entityNames.length > 0) {
+    await db.from('entity_run_meta').upsert(
+      entityNames.map(name => ({ run_id: runId, entity_name: name })),
+      { onConflict: 'run_id,entity_name', ignoreDuplicates: true }
+    );
+  }
+
   const { data: allEntities, error: metaErr } = await db
     .from('entity_run_meta')
     .select('entity_name, loop_count')
