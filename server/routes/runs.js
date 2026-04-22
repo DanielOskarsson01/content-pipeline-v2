@@ -2,7 +2,7 @@ import { Router } from 'express';
 import db from '../services/db.js';
 import { extractToBlob } from '../services/poolBlobs.js';
 import { executeRun, isAutoExecuting, abortAutoExecute } from '../services/autoExecutor.js';
-import { getSubmodules, getSubmodulesGroupedByCategory } from '../services/moduleLoader.js';
+import { getSubmodules, getSubmodulesGroupedByCategory, getSubmoduleById } from '../services/moduleLoader.js';
 import { CATEGORY_ORDER, sortSubmoduleIds } from '../services/moduleOrder.js';
 import { applyRouting } from '../services/routingHandler.js';
 
@@ -46,14 +46,82 @@ async function progressiveSave(db, runId, stepIndex) {
       const submodulesPerStep = { ...(execPlan.submodules_per_step || {}) };
       const stepSubs = [];
 
+      // Copy doc_selector docs from project → template_reference_docs and build remap
+      const docIdMap = {};
+      const projectId = runRow.project_id;
+      const templateId = project.template_id;
+
+      for (const cfg of stepConfigs) {
+        if (!cfg.options) continue;
+        const manifest = getSubmoduleById(cfg.submodule_id);
+        const manifestOptions = manifest?.options || [];
+
+        for (const [optName, optValue] of Object.entries(cfg.options)) {
+          const optDef = manifestOptions.find(o => o.name === optName);
+          if (optDef?.type === 'doc_selector' && Array.isArray(optValue)) {
+            for (const projDocId of optValue) {
+              if (docIdMap[projDocId]) continue;
+
+              const { data: projDoc } = await db
+                .from('project_reference_docs')
+                .select('filename, content, content_type, size_bytes')
+                .eq('id', projDocId)
+                .eq('project_id', projectId)
+                .single();
+              if (!projDoc) continue;
+
+              const { data: tDoc, error: docErr } = await db
+                .from('template_reference_docs')
+                .insert({
+                  template_id: templateId,
+                  filename: projDoc.filename,
+                  content: projDoc.content,
+                  content_type: projDoc.content_type,
+                  size_bytes: projDoc.size_bytes,
+                })
+                .select('id')
+                .single();
+
+              if (!docErr && tDoc) {
+                docIdMap[projDocId] = tDoc.id;
+              } else if (docErr?.code === '23505') {
+                const { data: existing } = await db
+                  .from('template_reference_docs')
+                  .select('id')
+                  .eq('template_id', templateId)
+                  .eq('filename', projDoc.filename)
+                  .single();
+                if (existing) docIdMap[projDocId] = existing.id;
+              }
+            }
+          }
+        }
+      }
+
+      const hasDocRemap = Object.keys(docIdMap).length > 0;
+
       for (const cfg of stepConfigs) {
         if (!cfg.options || typeof cfg.options !== 'object') continue;
         stepSubs.push(cfg.submodule_id);
 
+        // Remap doc_selector IDs from project → template
+        let mergedOptions = cfg.options;
+        if (hasDocRemap) {
+          mergedOptions = { ...cfg.options };
+          const manifest = getSubmoduleById(cfg.submodule_id);
+          const manifestOptions = manifest?.options || [];
+          for (const [optName, optValue] of Object.entries(mergedOptions)) {
+            const optDef = manifestOptions.find(o => o.name === optName);
+            if (optDef?.type === 'doc_selector' && Array.isArray(optValue)) {
+              mergedOptions[optName] = optValue.map(id => docIdMap[id] || id);
+            }
+          }
+        }
+
         const existing = presetMap[cfg.submodule_id] || { preset_name: '', fallback_values: {} };
         presetMap[cfg.submodule_id] = {
           preset_name: existing.preset_name,
-          fallback_values: { ...existing.fallback_values, ...cfg.options },
+          fallback_values: { ...existing.fallback_values, ...mergedOptions },
         };
       }
 
@@ -65,7 +133,7 @@ async function progressiveSave(db, runId, stepIndex) {
         .update({ preset_map: presetMap, execution_plan: execPlan, updated_at: new Date().toISOString() })
         .eq('id', project.template_id);
 
-      console.log(`[progressive-save] Updated template ${project.template_id} from step ${stepIndex} (${stepSubs.length} submodules)`);
+      console.log(`[progressive-save] Updated template ${templateId} from step ${stepIndex} (${stepSubs.length} submodules${hasDocRemap ? `, ${Object.keys(docIdMap).length} docs synced` : ''})`);
     }
   }
 }
