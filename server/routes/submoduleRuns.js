@@ -868,13 +868,18 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         const outputItems = entityRun.output_data?.items || [];
 
         // __all__ sentinel: approve every item without the client needing to fetch detail
-        // BUT respect flagged_when rules — flagged items (e.g. DROP) are excluded
+        // BUT respect flagged_when rules — flagged items (e.g. DROP) are excluded.
+        // EXCEPTION: QA submodules (Step 6+) skip flagged_when during auto-execute.
+        // QA failures MUST reach the pool so loop-router can route them.
         let resolvedKeys;
         if (approvedKeys === '__all__') {
           const flaggedWhen = manifest?.output_schema?.flagged_when;
+          const submoduleStep = manifest?.step ?? 0;
+          const skipFlagFilter = submoduleStep >= 6;
+
           resolvedKeys = outputItems
             .filter(item => {
-              if (!flaggedWhen) return true;
+              if (skipFlagFilter || !flaggedWhen) return true;
               return !Object.entries(flaggedWhen).some(
                 ([field, values]) => values.includes(String(item[field] ?? ''))
               );

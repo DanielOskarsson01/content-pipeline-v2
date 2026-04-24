@@ -29,6 +29,8 @@ export const DEFAULT_FAILURE_THRESHOLDS = {
   3: 0.6,   // Scraping — high failure is normal (403s, timeouts)
   4: 0.3,   // Filtering & Assembly
   5: 0.2,   // Analysis & Generation
+  6: 0.3,   // QA — some failures expected (that's the point)
+  7: 0.1,   // Routing — low tolerance (routing itself shouldn't fail)
   8: 0.1,   // Bundling — low tolerance
 };
 export const DEFAULT_THRESHOLD = 0.3;
@@ -40,6 +42,8 @@ export const DEFAULT_STEP_TIMEOUTS = {
   3: 2700,   // 45 min
   4: 300,    // 5 min
   5: 3600,   // 60 min
+  6: 1800,   // 30 min (4-6 QA modules × LLM calls)
+  7: 300,    // 5 min (routing decisions are fast)
   8: 300,    // 5 min
 };
 export const DEFAULT_STEP_TIMEOUT = 600; // 10 min fallback
@@ -51,6 +55,8 @@ export const ENTITY_TIMEOUT_FACTOR = {
   3: 120,
   4: 120,
   5: 300,
+  6: 180,   // QA: ~3 min/entity for multiple LLM checks
+  7: 30,    // Routing: fast decision logic per entity
   8: 120,
 };
 export const DEFAULT_ENTITY_FACTOR = 120;

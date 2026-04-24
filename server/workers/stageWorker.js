@@ -139,7 +139,7 @@ function buildTools(runId, submoduleId) {
   const AI_BASE_DELAY_MS = 2000; // 2s → 4s → 8s exponential backoff
 
   const ai = {
-    complete: async ({ prompt, model = 'haiku', provider = 'anthropic' }) => {
+    complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens }) => {
       const startTime = Date.now();
       const modelId = MODEL_MAP[model] || model;
 
@@ -160,8 +160,9 @@ function buildTools(runId, submoduleId) {
               },
               body: JSON.stringify({
                 model: modelId,
-                max_tokens: 16384,
+                max_tokens: max_tokens ?? 16384,
                 messages: [{ role: 'user', content: prompt }],
+                ...(temperature != null && { temperature }),
               }),
             });
             return { status: res.status, body: await res.text() };
@@ -206,6 +207,8 @@ function buildTools(runId, submoduleId) {
               body: JSON.stringify({
                 model: modelId,
                 messages: [{ role: 'user', content: prompt }],
+                ...(max_tokens && { max_tokens }),
+                ...(temperature != null && { temperature }),
               }),
             });
             return { status: res.status, body: await res.text() };

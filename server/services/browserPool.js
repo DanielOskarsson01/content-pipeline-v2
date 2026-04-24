@@ -122,6 +122,7 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
     timeout = 30000,
     waitForNetworkIdle = false,
     waitForSelector = null,
+    autoScroll = false,
   } = options;
 
   const contextOptions = {
@@ -160,6 +161,36 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
 
     // Small delay for final JS execution
     await page.waitForTimeout(500);
+
+    // Auto-scroll to trigger lazy-loaded content
+    if (autoScroll) {
+      try {
+        await page.evaluate(async () => {
+          await new Promise((resolve) => {
+            let totalHeight = 0;
+            const distance = 400;
+            const delay = 200;
+            const maxScrolls = 30;
+            let scrollCount = 0;
+            const timer = setInterval(() => {
+              const scrollHeight = document.body.scrollHeight;
+              window.scrollBy(0, distance);
+              totalHeight += distance;
+              scrollCount++;
+              if (totalHeight >= scrollHeight || scrollCount >= maxScrolls) {
+                clearInterval(timer);
+                window.scrollTo(0, 0);
+                resolve();
+              }
+            }, delay);
+            setTimeout(() => { clearInterval(timer); resolve(); }, maxScrolls * delay + 1000);
+          });
+        });
+        await page.waitForTimeout(1000);
+      } catch {
+        // Non-fatal: continue with whatever loaded
+      }
+    }
 
     const body = await page.content();
     const status = response?.status() || 200;
