@@ -84,14 +84,14 @@ function buildTools(runId, submoduleId) {
       return withTimeout(async (signal) => {
         const res = await fetch(url, { signal, headers: options.headers || {} });
         const body = await res.text();
-        return { status: res.status, headers: Object.fromEntries(res.headers), body };
+        return { status: res.status, headers: Object.fromEntries(res.headers), body, url: res.url };
       }, timeout);
     },
     head: async (url, options = {}) => {
       const timeout = options.timeout || 30000;
       return withTimeout(async (signal) => {
         const res = await fetch(url, { method: 'HEAD', signal, headers: options.headers || {} });
-        return { status: res.status, headers: Object.fromEntries(res.headers) };
+        return { status: res.status, headers: Object.fromEntries(res.headers), url: res.url };
       }, timeout);
     },
     post: async (url, body, options = {}) => {
