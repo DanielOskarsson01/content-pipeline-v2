@@ -123,6 +123,9 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
     waitForNetworkIdle = false,
     waitForSelector = null,
     autoScroll = false,
+    clickSelector = null,
+    maxClicks = 0,
+    maxClickSeconds = 120,
   } = options;
 
   const contextOptions = {
@@ -189,6 +192,49 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
         await page.waitForTimeout(1000);
       } catch {
         // Non-fatal: continue with whatever loaded
+      }
+    }
+
+    // Click "Load More" / "See More" buttons to reveal paginated content
+    if (clickSelector && maxClicks > 0) {
+      let clicks = 0;
+      let noChangeCount = 0;
+      const deadline = Date.now() + maxClickSeconds * 1000;
+      for (let i = 0; i < maxClicks; i++) {
+        if (Date.now() >= deadline) {
+          console.log(`[browserPool] Click loop hit wall-time budget (${maxClickSeconds}s) after ${clicks} click(s) on ${url}`);
+          break;
+        }
+        try {
+          const btn = await page.$(clickSelector);
+          if (!btn) break;
+          const isVisible = await btn.isVisible();
+          if (!isVisible) break;
+          const isEnabled = await btn.isEnabled();
+          if (!isEnabled) {
+            await page.waitForTimeout(2000);
+            const retryEnabled = await btn.isEnabled().catch(() => false);
+            if (!retryEnabled) break;
+          }
+          const beforeLen = (await page.content()).length;
+          await btn.scrollIntoViewIfNeeded().catch(() => {});
+          await btn.click();
+          clicks++;
+          await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+          await page.waitForTimeout(1000);
+          const afterLen = (await page.content()).length;
+          if (afterLen <= beforeLen) {
+            noChangeCount++;
+            if (noChangeCount >= 2) break;
+          } else {
+            noChangeCount = 0;
+          }
+        } catch {
+          break;
+        }
+      }
+      if (clicks > 0) {
+        console.log(`[browserPool] Clicked "${clickSelector}" ${clicks} time(s) on ${url}`);
       }
     }
 

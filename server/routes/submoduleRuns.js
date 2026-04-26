@@ -936,12 +936,19 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         } else if (dataOperation === 'transform') {
           // Transform replaces items with matching keys — remove ALL existing
           // items that share a key with the approved items (regardless of source).
-          // Original input items (no source_submodule) and sibling submodule items
-          // are both replaced by the enriched versions.
-          const approvedUrlSet = new Set(approvedItems.map(item => String(item[itemKey] ?? '')));
+          // Build removal set from BOTH output keys AND original_url fields
+          // so items that were transformed (URL changed) get properly replaced.
+          const removalSet = new Set();
+          for (const item of approvedItems) {
+            removalSet.add(String(item[itemKey] ?? ''));
+            if (item.original_url != null && String(item.original_url) !== String(item[itemKey] ?? '')) {
+              removalSet.add(String(item.original_url));
+              console.log(`[transform] Canonicalized: ${item.original_url} → ${item[itemKey]}`);
+            }
+          }
           entityPool = entityPool.filter(item => {
             const key = String(item[itemKey] ?? '');
-            return !approvedUrlSet.has(key);
+            return !removalSet.has(key);
           });
           entityPool.push(...approvedItems);
         }
