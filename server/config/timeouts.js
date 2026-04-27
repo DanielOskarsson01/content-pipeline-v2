@@ -38,7 +38,7 @@ export const DEFAULT_THRESHOLD = 0.3;
 // Base step timeout in seconds (minimum, before entity scaling).
 export const DEFAULT_STEP_TIMEOUTS = {
   1: 300,    // 5 min
-  2: 300,    // 5 min
+  2: 600,    // 10 min — 4 submodules + browser fallback for Cloudflare sites
   3: 2700,   // 45 min
   4: 300,    // 5 min
   5: 3600,   // 60 min
