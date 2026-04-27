@@ -11,6 +11,10 @@
  * Lazy-loaded by stageWorker.js — only imported when a submodule
  * actually calls tools.browser.fetch(). Zero cost for modules that
  * don't use it.
+ *
+ * Bright Data Web Unlocker: automatic fallback when browser hits a
+ * Cloudflare challenge page. Requires BRIGHT_DATA_API_KEY +
+ * BRIGHT_DATA_UNLOCKER_ZONE env vars. Zero cost if not configured.
  */
 
 import { chromium as playwrightChromium } from 'playwright';
@@ -265,28 +269,92 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
   }
 }
 
+// Cloudflare challenge markers — if browser result body contains these,
+// the page is a challenge page, not real content.
+const CHALLENGE_MARKERS = [
+  'cf-browser-verification',
+  'Checking your browser',
+  'Just a moment...',
+];
+
+function hasCloudflareChallenge(body) {
+  return CHALLENGE_MARKERS.some(m => body.includes(m));
+}
+
+/**
+ * Fetch a URL using Bright Data Web Unlocker API.
+ * Handles Cloudflare, CAPTCHAs, and bot protection server-side.
+ * Returns same shape as browserFetch() for drop-in compatibility.
+ *
+ * Requires: BRIGHT_DATA_API_KEY + BRIGHT_DATA_UNLOCKER_ZONE env vars.
+ */
+export async function webUnlockerFetch(url) {
+  const apiKey = process.env.BRIGHT_DATA_API_KEY;
+  const zone = process.env.BRIGHT_DATA_UNLOCKER_ZONE;
+
+  if (!apiKey || !zone) {
+    throw new Error('[webUnlocker] BRIGHT_DATA_API_KEY and BRIGHT_DATA_UNLOCKER_ZONE env vars required');
+  }
+
+  console.log(`[webUnlocker] Fetching ${url} via Web Unlocker (zone: ${zone})`);
+
+  const response = await fetch('https://api.brightdata.com/request', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ zone, url, format: 'raw' }),
+  });
+
+  const body = await response.text();
+  const status = response.status;
+
+  if (status >= 200 && status < 300) {
+    console.log(`[webUnlocker] Success for ${url} (${body.length} bytes)`);
+  } else {
+    console.warn(`[webUnlocker] Non-2xx response for ${url}: ${status}`);
+  }
+
+  return { status, body, url, headers: {} };
+}
+
 export async function browserFetch(url, options = {}) {
   const hasProxy = !!process.env.PROXY_URL;
+  const hasUnlocker = !!(process.env.BRIGHT_DATA_API_KEY && process.env.BRIGHT_DATA_UNLOCKER_ZONE);
 
+  let result;
   try {
     const browser = await getBrowser();
-    const result = await fetchWithBrowser(browser, url, options, hasProxy);
+    result = await fetchWithBrowser(browser, url, options, hasProxy);
     // Proxy auth failure (407) — retry without proxy
     if (hasProxy && result.status === 407) {
       console.warn(`[browserPool] Proxy auth failed (407) for ${url} — retrying direct`);
       const directBrowser = await getDirectBrowser();
-      return await fetchWithBrowser(directBrowser, url, options, false);
+      result = await fetchWithBrowser(directBrowser, url, options, false);
     }
-    return result;
   } catch (err) {
     // Proxy tunnel failure — retry without proxy (direct connection)
     if (hasProxy && err.message?.includes('ERR_TUNNEL_CONNECTION_FAILED')) {
       console.warn(`[browserPool] Proxy tunnel failed for ${url} — retrying direct`);
       const directBrowser = await getDirectBrowser();
-      return await fetchWithBrowser(directBrowser, url, options, false);
+      result = await fetchWithBrowser(directBrowser, url, options, false);
+    } else {
+      throw err;
     }
-    throw err;
   }
+
+  // Cloudflare challenge detected — fall back to Web Unlocker if configured
+  if (hasUnlocker && result.body && hasCloudflareChallenge(result.body)) {
+    console.warn(`[browserPool] Cloudflare challenge detected for ${url} — falling back to Web Unlocker`);
+    try {
+      return await webUnlockerFetch(url);
+    } catch (unlockErr) {
+      console.warn(`[webUnlocker] Failed for ${url}: ${unlockErr.message} — returning browser result`);
+    }
+  }
+
+  return result;
 }
 
 /**

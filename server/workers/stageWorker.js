@@ -269,7 +269,15 @@ function buildTools(runId, submoduleId) {
     },
   };
 
-  return { logger, http, browser, progress, ai, _logs: logs, _partialItems: [] };
+  const unlocker = {
+    fetch: async (url) => {
+      // Bright Data Web Unlocker — bypasses Cloudflare/CAPTCHAs server-side
+      const { webUnlockerFetch } = await import('../services/browserPool.js');
+      return webUnlockerFetch(url);
+    },
+  };
+
+  return { logger, http, browser, unlocker, progress, ai, _logs: logs, _partialItems: [] };
 }
 
 /**
