@@ -585,12 +585,18 @@ router.post('/:id/launch', upload.single('file'), async (req, res, next) => {
             const firstVal = Object.values(e).find(v => typeof v === 'string' && v.length > 0);
             e.name = firstVal || `Entity ${i + 1}`;
           }
+          // Strip trailing semicolons/commas from URL-like fields (common paste artifacts)
+          for (const field of ['website', 'url', 'linkedin', 'youtube']) {
+            if (typeof e[field] === 'string') {
+              e[field] = e[field].trim().replace(/[;,]+$/, '');
+            }
+          }
           return e;
         });
       } else if (req.body.urls?.trim()) {
         // Raw URL text fallback (backward compat)
         entities = req.body.urls.trim().split(/\r?\n/).filter(Boolean).map(line => {
-          const url = line.trim();
+          const url = line.trim().replace(/[;,]+$/, '');
           let entityName = url;
           try {
             const parsed = new URL(url.startsWith('http') ? url : `https://${url}`);

@@ -239,7 +239,7 @@ executeRouter.post('/run', async (req, res) => {
       .eq('submodule_id', submoduleId)
       .maybeSingle();
 
-    const options = optConfig?.options || manifest.options_defaults || {};
+    const options = { ...(manifest.options_defaults || {}), ...(optConfig?.options || {}) };
 
     // 5a. Persist resolved options so progressive save / from-run template creation
     // can pick them up. Must happen BEFORE doc_selector expansion (which replaces

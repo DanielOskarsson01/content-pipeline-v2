@@ -70,7 +70,7 @@ export function parseTextareaToEntities(
         // Only treat as name;url if the part after semicolon looks like a URL/domain
         if (after && /^(https?:\/\/|www\.|[a-z0-9-]+\.[a-z]{2,})/i.test(after)) {
           name = before;
-          value = after;
+          value = after.replace(/[;,]+$/, '');
         }
       }
 

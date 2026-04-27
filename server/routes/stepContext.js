@@ -172,11 +172,17 @@ router.post('/', upload.single('file'), async (req, res) => {
     if (!Array.isArray(entities) || entities.length === 0) {
       return res.status(400).json({ error: 'entities must be a non-empty array' });
     }
-    // Enforce name contract
+    // Enforce name contract + sanitize URL fields
     entities = entities.map((e, i) => {
       if (!e.name) {
         const firstVal = Object.values(e).find(v => typeof v === 'string' && v.length > 0);
         e.name = firstVal || `Entity ${i + 1}`;
+      }
+      // Strip trailing semicolons/commas from URL-like fields (common paste artifacts)
+      for (const field of ['website', 'url', 'linkedin', 'youtube']) {
+        if (typeof e[field] === 'string') {
+          e[field] = e[field].trim().replace(/[;,]+$/, '');
+        }
       }
       return e;
     });

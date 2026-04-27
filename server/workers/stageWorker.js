@@ -389,7 +389,7 @@ async function handleEntityJob(job) {
 
   // 7. Prepare input — single entity format
   const input = entityRun.input_data;
-  const options = entityRun.options || manifest.options_defaults || {};
+  const options = { ...(manifest.options_defaults || {}), ...(entityRun.options || {}) };
 
   // 7b. Enrich: merge downloadable fields from upstream for this entity's items
   const requiresColumns = manifest.requires_columns || [];
