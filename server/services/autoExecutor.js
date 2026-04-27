@@ -222,8 +222,18 @@ export async function executeRun(runId, config, previousState = null) {
         const elapsed = (Date.now() - stepStartTime) / 1000;
         const remainingTimeout = stepTimeout - elapsed;
         if (remainingTimeout <= 0) {
+          // No time left — cancel remaining entities for this submodule
+          console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: step timeout reached before polling`);
+          await cancelTimeoutEntities(batchId);
           stepTimedOut = true;
-          break;
+          // Approve completed entities so their results enter the pool
+          try {
+            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+            await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
+          } catch (approveErr) {
+            console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: could not approve after timeout: ${approveErr.message}`);
+          }
+          continue; // remaining submodules will also timeout immediately
         }
 
         const pollResult = await pollBatchCompletion(batchId, remainingTimeout, signal);
@@ -233,12 +243,22 @@ export async function executeRun(runId, config, previousState = null) {
         if (pollResult === 'timeout') {
           stepTimedOut = true;
           await cancelTimeoutEntities(batchId);
+          const cancelledCount = await countEntitiesByStatus(batchId, ['failed']);
+          const completedCount = await countEntitiesByStatus(batchId, ['completed']);
           autoExecuteEvents.emit('step_timeout', {
-            runId, stepIndex,
-            cancelledCount: await countEntitiesByStatus(batchId, ['pending', 'running']),
-            completedCount: await countEntitiesByStatus(batchId, ['completed']),
+            runId, stepIndex, submoduleId,
+            cancelledCount,
+            completedCount,
           });
-          break;
+          console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: timed out (${completedCount} completed, ${cancelledCount} cancelled) — approving completed and continuing`);
+          // Approve completed entities so their results enter the pool
+          try {
+            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+            await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
+          } catch (approveErr) {
+            console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: could not approve after timeout: ${approveErr.message}`);
+          }
+          continue; // try next submodule — don't halt the step
         }
 
         autoExecuteEvents.emit('submodule_completed', {
@@ -255,15 +275,10 @@ export async function executeRun(runId, config, previousState = null) {
 
       if (signal.aborted) break;
 
+      // Step timeout occurred for one or more submodules — evaluate by failure threshold
+      // instead of hard-halting. Completed entities are already approved and in the pool.
       if (stepTimedOut) {
-        const evalResult = await evaluateStepResult(runId, stepIndex);
-        state.per_step_results[String(stepIndex)] = {
-          status: 'timeout',
-          ...evalResult,
-          duration_ms: Date.now() - stepStartTime,
-        };
-        await haltRun(runId, state, `Step ${stepIndex} timed out after ${stepTimeout}s`, cleanup);
-        return;
+        console.log(`[auto-execute] Step ${stepIndex}: timeout occurred — evaluating failure threshold`);
       }
 
       // Evaluate failure [#6]
@@ -295,6 +310,19 @@ export async function executeRun(runId, config, previousState = null) {
       }
 
       if (signal.aborted) break;
+
+      // If ALL entities failed (100% failure after timeout), skip step-level approve
+      if (stepTimedOut && evalResult.completed === 0) {
+        console.warn(`[auto-execute] Step ${stepIndex}: all entities failed/timed out — skipping step approve`);
+        state.per_step_results[String(stepIndex)] = {
+          status: 'timeout',
+          ...evalResult,
+          duration_ms: Date.now() - stepStartTime,
+        };
+        if (!state.steps_completed.includes(stepIndex)) state.steps_completed.push(stepIndex);
+        await saveState(runId, state);
+        continue;
+      }
 
       // Auto-approve step (submodules already approved individually above)
       console.log(`[auto-execute] Step ${stepIndex}: approving step`);
