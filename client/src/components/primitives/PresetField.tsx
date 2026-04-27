@@ -61,7 +61,7 @@ export function PresetField({
 
   return (
     <div className="flex items-center gap-2 mb-1">
-      {/* Preset dropdown */}
+      {/* Preset dropdown — always shows all saved presets */}
       <select
         value={activePreset?.id || ''}
         onChange={(e) => {
@@ -70,30 +70,25 @@ export function PresetField({
         }}
         className="flex-1 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-700 focus:outline-none focus:border-[#0891B2]"
       >
-        <option value="">
-          {activePreset ? activePreset.preset_name : '— Presets —'}
-        </option>
-        {presets
-          ?.filter((p) => p.id !== activePreset?.id)
-          .map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.preset_name}
-              {p.is_default ? ' ★' : ''}
-              {p.project_id ? '' : ' (global)'}
-            </option>
-          ))}
+        <option value="">— Presets —</option>
+        {presets?.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.preset_name}
+            {p.is_default ? ' ★' : ''}
+            {p.project_id ? '' : ' (global)'}
+          </option>
+        ))}
       </select>
 
-      {/* Save / actions */}
-      {!activePreset && (
-        <button
-          onClick={() => setShowSaveDialog(true)}
-          className="text-[10px] text-[#0891B2] hover:underline whitespace-nowrap"
-        >
-          Save as preset
-        </button>
-      )}
+      {/* Always show save button */}
+      <button
+        onClick={() => setShowSaveDialog(true)}
+        className="text-[10px] text-[#0891B2] hover:underline whitespace-nowrap"
+      >
+        {activePreset ? '+' : 'Save as preset'}
+      </button>
 
+      {/* Star / delete only when a preset is selected */}
       {activePreset && (
         <div className="flex gap-1">
           {!activePreset.is_default && (
