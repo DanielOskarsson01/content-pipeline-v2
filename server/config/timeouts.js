@@ -51,7 +51,7 @@ export const DEFAULT_STEP_TIMEOUT = 600; // 10 min fallback
 // Seconds per entity — step timeout = max(entities * factor, base timeout).
 export const ENTITY_TIMEOUT_FACTOR = {
   1: 120,
-  2: 10,
+  2: 60,     // 1 min/entity — status check + browser fallback for 403s
   3: 120,
   4: 120,
   5: 300,
