@@ -38,6 +38,7 @@ const BASE_LAUNCH_ARGS = [
   '--disable-setuid-sandbox',
   '--disable-dev-shm-usage',
   '--disable-gpu',
+  '--disable-blink-features=AutomationControlled',
 ];
 
 /**
@@ -129,14 +130,30 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
   } = options;
 
   const contextOptions = {
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
     viewport: { width: 1920, height: 1080 },
     locale: 'en-US',
+    timezoneId: 'America/New_York',
+    colorScheme: 'light',
+    permissions: ['geolocation'],
   };
   if (useProxy) contextOptions.ignoreHTTPSErrors = true;
   const context = await browser.newContext(contextOptions);
 
   const page = await context.newPage();
+
+  // Remove automation fingerprints (belt-and-suspenders with stealth plugin)
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    // Chrome runtime stub — Cloudflare checks for its absence
+    if (!window.chrome) {
+      window.chrome = { runtime: {}, loadTimes: () => ({}), csi: () => ({}) };
+    }
+    // Realistic languages (fallback when stealth plugin not loaded)
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['en-US', 'en'],
+    });
+  });
 
   try {
     await page.setExtraHTTPHeaders({
