@@ -233,6 +233,18 @@ Drop zone hint in `client/src/components/primitives/CsvUploadInput.tsx` mentions
 
 ---
 
+## ⛔ Production Server — No Git Commands
+
+**NEVER run git commands on the production server (188.245.110.34).** The server has no `.git` directory. It is deployed exclusively by CI/CD (rsync `--delete` from GitHub Actions). Running `git pull`, `git checkout`, or `git reset` on the server will either fail or corrupt the deployment.
+
+- **To deploy a fix:** commit and push to `main` -- CI/CD handles the rest
+- **For emergency server-side fix:** edit files via SSH + `pm2 restart all`, then commit the same fix locally and push (to prevent CI/CD from overwriting it on next deploy)
+- **To verify deployed version:** `curl -s https://www.jugadorvip.com/api/version` or check `build-info.json` on the server
+
+**Background (2026-04-28 outage):** A stale `.git` directory on the server (left from the initial clone, never updated by rsync) allowed git commands to silently overwrite CI/CD-deployed files with old code. The `.git` directory has since been removed by CI/CD.
+
+---
+
 ## ⚠️ Common Mistakes to Avoid
 
 1. **Building the results table inside the skeleton as a fixed component.** The skeleton uses ContentRenderer which reads render_schema from the module's output_schema. Different modules produce different displays (url_list, table, content_cards, file_list).

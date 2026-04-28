@@ -37,6 +37,7 @@ jobs:
             --exclude='.github' \
             --exclude='.DS_Store' \
             --exclude='logs' \
+            --exclude='DEPLOY_ONLY' \
             -e "ssh -i ~/.ssh/deploy_key" \
             ./ root@188.245.110.34:/opt/content-pipeline-v2/
 
@@ -45,7 +46,21 @@ jobs:
           ssh -i ~/.ssh/deploy_key root@188.245.110.34 \
             "grep -q client_max_body_size /etc/nginx/sites-available/default || sed -i '/server_name/a\\    client_max_body_size 50m;' /etc/nginx/sites-available/default && nginx -t && systemctl reload nginx"
 
+      - name: Remove stale .git and mark as CI/CD-only
+        run: |
+          ssh -i ~/.ssh/deploy_key root@188.245.110.34 \
+            "rm -rf /opt/content-pipeline-v2/.git && echo 'This directory is deployed by CI/CD (GitHub Actions). DO NOT run git commands here. Any git pull/checkout will fail or corrupt the deployment. To deploy: push to main branch on GitHub.' > /opt/content-pipeline-v2/DEPLOY_ONLY"
+
       - name: Install deps and restart
         run: |
           ssh -i ~/.ssh/deploy_key root@188.245.110.34 \
             "cd /opt/content-pipeline-v2 && mkdir -p logs && npm install --omit=dev && npx playwright install --with-deps chromium && pm2 delete content-pipeline-v2 2>/dev/null || true && pm2 startOrReload ecosystem.config.cjs --update-env && pm2 save"
+
+      - name: Verify deployment
+        run: |
+          DEPLOYED_COMMIT=$(ssh -i ~/.ssh/deploy_key root@188.245.110.34 "cat /opt/content-pipeline-v2/build-info.json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"commit\"])' 2>/dev/null || echo 'UNKNOWN'")
+          EXPECTED_COMMIT=$(git rev-parse --short HEAD)
+          echo "Expected: $EXPECTED_COMMIT | Deployed: $DEPLOYED_COMMIT"
+          if [ "$DEPLOYED_COMMIT" != "$EXPECTED_COMMIT" ]; then
+            echo "::warning::Deployment verification failed — build-info.json commit ($DEPLOYED_COMMIT) does not match expected ($EXPECTED_COMMIT)"
+          fi
