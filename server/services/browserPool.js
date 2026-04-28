@@ -216,10 +216,10 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
       }
     }
 
-    // Click "Load More" / "See More" buttons to reveal paginated content.
+    // Repeated click on a target element (e.g. pagination, expand, load-more).
     // clickSelector: string (single selector) or array of strings (tried in
     // priority order — first visible match wins). Uses Playwright locator API
-    // to support :has-text() pseudo-selectors for text-based button detection.
+    // to support :has-text() pseudo-selectors for text-based element detection.
     if (clickSelector && maxClicks > 0) {
       let resolvedSelector = null;
       if (Array.isArray(clickSelector)) {
@@ -228,13 +228,13 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
             const loc = page.locator(sel).first();
             if (await loc.count() > 0 && await loc.isVisible().catch(() => false)) {
               resolvedSelector = sel;
-              console.log(`[browserPool] Auto-detected Load More: "${sel}" on ${url}`);
+              console.log(`[browserPool] Auto-detected click target: "${sel}" on ${url}`);
               break;
             }
           } catch { /* skip invalid selectors */ }
         }
         if (!resolvedSelector) {
-          console.log(`[browserPool] No Load More button detected on ${url}`);
+          console.log(`[browserPool] No click target detected on ${url}`);
         }
       } else {
         resolvedSelector = clickSelector;
