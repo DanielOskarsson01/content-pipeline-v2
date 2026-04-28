@@ -216,46 +216,67 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
       }
     }
 
-    // Click "Load More" / "See More" buttons to reveal paginated content
+    // Click "Load More" / "See More" buttons to reveal paginated content.
+    // clickSelector: string (single selector) or array of strings (tried in
+    // priority order — first visible match wins). Uses Playwright locator API
+    // to support :has-text() pseudo-selectors for text-based button detection.
     if (clickSelector && maxClicks > 0) {
-      let clicks = 0;
-      let noChangeCount = 0;
-      const deadline = Date.now() + maxClickSeconds * 1000;
-      for (let i = 0; i < maxClicks; i++) {
-        if (Date.now() >= deadline) {
-          console.log(`[browserPool] Click loop hit wall-time budget (${maxClickSeconds}s) after ${clicks} click(s) on ${url}`);
-          break;
+      let resolvedSelector = null;
+      if (Array.isArray(clickSelector)) {
+        for (const sel of clickSelector) {
+          try {
+            const loc = page.locator(sel).first();
+            if (await loc.count() > 0 && await loc.isVisible().catch(() => false)) {
+              resolvedSelector = sel;
+              console.log(`[browserPool] Auto-detected Load More: "${sel}" on ${url}`);
+              break;
+            }
+          } catch { /* skip invalid selectors */ }
         }
-        try {
-          const btn = await page.$(clickSelector);
-          if (!btn) break;
-          const isVisible = await btn.isVisible();
-          if (!isVisible) break;
-          const isEnabled = await btn.isEnabled();
-          if (!isEnabled) {
-            await page.waitForTimeout(2000);
-            const retryEnabled = await btn.isEnabled().catch(() => false);
-            if (!retryEnabled) break;
-          }
-          const beforeLen = (await page.content()).length;
-          await btn.scrollIntoViewIfNeeded().catch(() => {});
-          await btn.click();
-          clicks++;
-          await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
-          await page.waitForTimeout(1000);
-          const afterLen = (await page.content()).length;
-          if (afterLen <= beforeLen) {
-            noChangeCount++;
-            if (noChangeCount >= 2) break;
-          } else {
-            noChangeCount = 0;
-          }
-        } catch {
-          break;
+        if (!resolvedSelector) {
+          console.log(`[browserPool] No Load More button detected on ${url}`);
         }
+      } else {
+        resolvedSelector = clickSelector;
       }
-      if (clicks > 0) {
-        console.log(`[browserPool] Clicked "${clickSelector}" ${clicks} time(s) on ${url}`);
+
+      if (resolvedSelector) {
+        let clicks = 0;
+        let noChangeCount = 0;
+        const deadline = Date.now() + maxClickSeconds * 1000;
+        for (let i = 0; i < maxClicks; i++) {
+          if (Date.now() >= deadline) {
+            console.log(`[browserPool] Click loop hit wall-time budget (${maxClickSeconds}s) after ${clicks} click(s) on ${url}`);
+            break;
+          }
+          try {
+            const locator = page.locator(resolvedSelector).first();
+            if (await locator.count() === 0) break;
+            if (!await locator.isVisible().catch(() => false)) break;
+            if (!await locator.isEnabled().catch(() => false)) {
+              await page.waitForTimeout(2000);
+              if (!await locator.isEnabled().catch(() => false)) break;
+            }
+            const beforeLen = (await page.content()).length;
+            await locator.scrollIntoViewIfNeeded().catch(() => {});
+            await locator.click();
+            clicks++;
+            await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+            await page.waitForTimeout(1000);
+            const afterLen = (await page.content()).length;
+            if (afterLen <= beforeLen) {
+              noChangeCount++;
+              if (noChangeCount >= 2) break;
+            } else {
+              noChangeCount = 0;
+            }
+          } catch {
+            break;
+          }
+        }
+        if (clicks > 0) {
+          console.log(`[browserPool] Clicked "${resolvedSelector}" ${clicks} time(s) on ${url}`);
+        }
       }
     }
 
