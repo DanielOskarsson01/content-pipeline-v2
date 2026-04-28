@@ -963,10 +963,12 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
       }
 
       // Bulk update entity_stage_pool (UPSERT for idempotency)
+      // Reset status to 'pending' so next submodule at this step can process
+      // these entities (critical for is_loop_pass steps where only 'pending' pools are loaded)
       for (const [entityName, poolItems] of poolMap) {
         await db
           .from('entity_stage_pool')
-          .update({ pool_items: poolItems, updated_at: new Date().toISOString() })
+          .update({ pool_items: poolItems, status: 'pending', updated_at: new Date().toISOString() })
           .eq('run_id', subRun.run_id)
           .eq('step_index', subRun.input_data?.step_index ?? 0)
           .eq('entity_name', entityName);

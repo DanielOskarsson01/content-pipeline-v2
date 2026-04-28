@@ -382,14 +382,14 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
       }
     }
 
-    // Mark completed entity pools at this step as 'approved'
-    // Guard: only transition 'completed' → 'approved' (idempotent on retry)
+    // Mark completed/pending entity pools at this step as 'approved'
+    // Matches both 'completed' (set by stageWorker) and 'pending' (reset by submodule approval)
     await db
       .from('entity_stage_pool')
       .update({ status: 'approved', updated_at: new Date().toISOString() })
       .eq('run_id', runId)
       .eq('step_index', stepIndex)
-      .eq('status', 'completed');
+      .in('status', ['completed', 'pending']);
 
     const approvedCount = entityPools ? entityPools.filter(p => p.status !== 'failed').length : 0;
     const entityCount = entityPools ? entityPools.length : 0;
