@@ -132,7 +132,7 @@ function buildTools(runId, submoduleId) {
   // Per-request timeout for LLM API calls (5 minutes).
   // Generous for large prompts (content-writer: 100KB+). Cheap modules are bounded
   // by their entity-level COST_CONFIG timeout (2-5 min) which fires first.
-  const AI_REQUEST_TIMEOUT_MS = 300_000;
+  const AI_REQUEST_TIMEOUT_MS = 600_000;
 
   // Retry config for transient failures
   const AI_MAX_RETRIES = 3;
