@@ -10,9 +10,9 @@
  * - priority: BullMQ job priority (lower = higher priority).
  */
 export const COST_CONFIG = {
-  cheap:     { timeout: 2 * 60 * 1000,  attempts: 3, priority: 1  },
-  medium:    { timeout: 5 * 60 * 1000,  attempts: 2, priority: 5  },
-  expensive: { timeout: 30 * 60 * 1000, attempts: 2, priority: 10 },
+  cheap:     { timeout: 5 * 60 * 1000,  attempts: 3, priority: 1  },
+  medium:    { timeout: 15 * 60 * 1000, attempts: 2, priority: 5  },
+  expensive: { timeout: 60 * 60 * 1000, attempts: 2, priority: 10 },
 };
 
 /**
