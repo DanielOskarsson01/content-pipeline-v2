@@ -176,7 +176,7 @@ export async function executeRun(runId, config, previousState = null) {
             // Submodule finished but was never approved (e.g. abort interrupted before approval).
             // Wait for batchWorker to finalize, then approve so output enters the pool.
             console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: completed but not approved, approving now`);
-            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
             await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
             continue;
           }
@@ -228,7 +228,7 @@ export async function executeRun(runId, config, previousState = null) {
           stepTimedOut = true;
           // Approve completed entities so their results enter the pool
           try {
-            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
             await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
           } catch (approveErr) {
             console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: could not approve after timeout: ${approveErr.message}`);
@@ -253,7 +253,7 @@ export async function executeRun(runId, config, previousState = null) {
           console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: timed out (${completedCount} completed, ${cancelledCount} cancelled) — approving completed and continuing`);
           // Approve completed entities so their results enter the pool
           try {
-            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
             await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
           } catch (approveErr) {
             console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: could not approve after timeout: ${approveErr.message}`);
@@ -269,7 +269,7 @@ export async function executeRun(runId, config, previousState = null) {
         // Mid-step approve: approve this submodule immediately so downstream
         // submodules in the same step can see its output in the pool.
         // Wait for batchWorker to finalize submodule_runs status first (race condition fix).
-        await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+        await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
         await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
       }
 
@@ -559,7 +559,7 @@ async function handle409(runId, stepIndex, submoduleId) {
   if (existing.status === 'approved') return 'skip';
   if (existing.status === 'completed') {
     // Completed but not approved — approve it (same fix as resume path)
-    await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+    await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
     await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
     return 'skip';
   }
@@ -582,7 +582,7 @@ async function handle409(runId, stepIndex, submoduleId) {
   if (!rechecked) return 'halt';
   if (rechecked.status === 'approved') return 'skip';
   if (rechecked.status === 'completed') {
-    await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 30_000);
+    await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
     await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
     return 'skip';
   }

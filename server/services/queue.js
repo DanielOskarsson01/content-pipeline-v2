@@ -70,6 +70,7 @@ export async function enqueueEntityBatch({ batchId, submoduleRunId, submoduleId,
         backoff: { type: 'exponential', delay: 5000 },
         removeOnComplete: 100,
         removeOnFail: 50,
+        removeDependencyOnFailure: true,
       },
     })),
   });
