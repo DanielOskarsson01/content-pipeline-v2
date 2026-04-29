@@ -287,6 +287,19 @@ executeRouter.post('/run', async (req, res) => {
       .single();
     const isLoopPass = stageRow?.is_loop_pass === true;
 
+    // On loop passes: reset 'completed' pools back to 'pending' before loading.
+    // stageWorker sets pool status to 'completed' after each submodule run, but
+    // subsequent submodules at the same step still need to process these entities.
+    // Only 'failed' pools stay excluded.
+    if (isLoopPass) {
+      await db
+        .from('entity_stage_pool')
+        .update({ status: 'pending', updated_at: new Date().toISOString() })
+        .eq('run_id', runId)
+        .eq('step_index', stepIdx)
+        .eq('status', 'completed');
+    }
+
     // Bulk-read entity pools for this step (MANDATORY: 1 query, not N)
     // On loop passes: only process pending entities (routed entities)
     let poolQuery = db
