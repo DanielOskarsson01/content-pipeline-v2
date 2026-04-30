@@ -721,7 +721,7 @@ async function autoApproveSingleSubmodule(runId, stepIndex, submoduleId) {
     .select('id, batch_id, status')
     .eq('stage_id', stage.id)
     .eq('submodule_id', submoduleId)
-    .in('status', ['completed']);
+    .in('status', ['completed', 'failed']);
 
   const subRun = subRuns?.[0];
   if (!subRun) return;
@@ -732,16 +732,48 @@ async function autoApproveSingleSubmodule(runId, stepIndex, submoduleId) {
     .eq('batch_id', subRun.batch_id)
     .eq('status', 'completed');
 
-  if (!entityNames?.length) return;
-
   const entityApprovals = {};
   const seen = new Set();
-  for (const row of entityNames) {
+  for (const row of (entityNames || [])) {
     if (!seen.has(row.entity_name)) {
       entityApprovals[row.entity_name] = '__all__';
       seen.add(row.entity_name);
     }
   }
+
+  // Rescue: failed entities that saved partial results (output_data is not null)
+  // should still be approved so their scraped data flows to downstream steps.
+  const { data: rescuable } = await db
+    .from('entity_submodule_runs')
+    .select('id, entity_name')
+    .eq('batch_id', subRun.batch_id)
+    .eq('status', 'failed')
+    .not('output_data', 'is', null);
+
+  if (rescuable?.length > 0) {
+    for (const entity of rescuable) {
+      // Re-mark as completed so the approval endpoint includes them
+      await db
+        .from('entity_submodule_runs')
+        .update({ status: 'completed' })
+        .eq('id', entity.id);
+      if (!seen.has(entity.entity_name)) {
+        entityApprovals[entity.entity_name] = '__all__';
+        seen.add(entity.entity_name);
+      }
+    }
+    // Also update parent submodule_runs to 'completed' — the approval endpoint
+    // rejects non-completed/approved status with 400.
+    if (subRun.status === 'failed') {
+      await db
+        .from('submodule_runs')
+        .update({ status: 'completed' })
+        .eq('id', subRun.id);
+    }
+    console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: rescued ${rescuable.length} entities with partial results`);
+  }
+
+  if (Object.keys(entityApprovals).length === 0) return;
 
   console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: approving (${Object.keys(entityApprovals).length} entities)`);
   await callEndpoint('POST', `/api/submodule-runs/${subRun.id}/approve`, {
@@ -750,13 +782,40 @@ async function autoApproveSingleSubmodule(runId, stepIndex, submoduleId) {
 }
 
 async function cancelTimeoutEntities(batchId) {
-  // Mark remaining pending/running entities as failed
   const now = new Date().toISOString();
+
+  // 1. Hard-fail pending entities (no work in progress, no partial results possible)
   await db
     .from('entity_submodule_runs')
     .update({ status: 'failed', error: 'Step timeout exceeded', completed_at: now })
     .eq('batch_id', batchId)
-    .in('status', ['pending', 'running']);
+    .eq('status', 'pending');
+
+  // 2. For running entities, send abort signal so workers can save partial results.
+  //    The worker polls abort:entity:{id} every 2s (stageWorker.js) and on abort
+  //    saves tools._partialItems before exiting — preserving scraped pages.
+  const { data: runningEntities } = await db
+    .from('entity_submodule_runs')
+    .select('id, entity_name')
+    .eq('batch_id', batchId)
+    .eq('status', 'running');
+
+  if (runningEntities?.length > 0) {
+    for (const entity of runningEntities) {
+      await redis.set(`abort:entity:${entity.id}`, '1', 'EX', 60);
+    }
+    console.log(`[auto-execute] Sent abort signal to ${runningEntities.length} running entities — waiting for partial results`);
+
+    // Grace period: workers poll abort every 2s, then need a few seconds to save.
+    await sleep(15_000);
+
+    // Hard-fail anything still running after grace period (worker didn't respond)
+    await db
+      .from('entity_submodule_runs')
+      .update({ status: 'failed', error: 'Step timeout exceeded', completed_at: new Date().toISOString() })
+      .eq('batch_id', batchId)
+      .eq('status', 'running');
+  }
 
   // Try to remove pending BullMQ jobs (best effort)
   try {
