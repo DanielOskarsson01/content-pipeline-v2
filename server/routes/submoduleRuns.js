@@ -796,6 +796,20 @@ submoduleRunRouter.post('/entity/:id/abort', async (req, res) => {
 });
 
 /**
+ * Resolve entity name from a template string with {field} placeholders.
+ * E.g. "{title} - {company}" → "Senior Developer - Betsson"
+ * Falls back to item title → item url → parentName-item
+ */
+function resolveEntityNameTemplate(template, item, parentName) {
+  let name = template.replace(/\{(\w+)\}/g, (_, field) => {
+    const val = item[field];
+    return (val != null && val !== '') ? String(val).trim() : '';
+  });
+  if (!name.trim()) name = item.title || item.url || `${parentName}-item`;
+  return name.replace(/[\x00-\x1f]/g, '').trim().slice(0, 200);
+}
+
+/**
  * POST /api/submodule-runs/:id/approve
  * Approve (or re-approve) a submodule run.
  * Body: { approved_item_keys: [...] }
@@ -915,64 +929,139 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
         totalApproved += approvedItems.length;
 
-        // Update entity pool based on data_operation
-        let entityPool = poolMap.get(entityName) || [];
+        // Check if entity_production is enabled (each item → new entity)
+        const entityProduction = subRun.options?.entity_production === true;
 
-        if (dataOperation === 'add') {
-          // Upsert by composite key (itemKey + source_submodule): replace existing
-          // items from the same submodule, add new ones. This makes re-runs work —
-          // re-approving a submodule replaces its previous output in the pool.
-          const compositeKey = (item) => `${String(item[itemKey] ?? '')}::${item.source_submodule || ''}`;
-          const approvedKeys = new Set(approvedItems.map(compositeKey));
-          entityPool = entityPool.filter(item => !approvedKeys.has(compositeKey(item)));
-          entityPool.push(...approvedItems);
-        } else if (dataOperation === 'remove') {
-          // Filter to keep only approved items, AND merge any enriched fields
-          // from the submodule output (e.g. url-relevance adds "relevance" field).
-          const approvedItemMap = new Map(
-            approvedItems.map(item => [String(item[itemKey] ?? ''), item])
-          );
-          entityPool = entityPool.filter(item => {
-            const keyVal = String(item[itemKey] ?? '');
-            if (!approvedKeySet.has(keyVal)) return false;
-            // Merge enriched fields from the approved output into the pool item
-            const enriched = approvedItemMap.get(keyVal);
-            if (enriched) {
-              for (const [k, v] of Object.entries(enriched)) {
-                if (k !== itemKey && k !== 'source_submodule' && !(k in item)) {
-                  item[k] = v;
+        if (entityProduction && approvedItems.length > 0) {
+          // ── ENTITY PRODUCTION MODE ──
+          // Each approved item becomes a new entity for downstream steps.
+          const entityNameTemplate = subRun.options?.entity_name_template || '{title}';
+
+          const producedEntities = [];
+          for (const item of approvedItems) {
+            const newEntityName = resolveEntityNameTemplate(entityNameTemplate, item, entityName);
+            producedEntities.push({
+              run_id: subRun.run_id,
+              step_index: subRun.input_data?.step_index ?? 0,
+              entity_name: newEntityName,
+              pool_items: [item],
+              status: 'pending',
+            });
+          }
+
+          // Disambiguate duplicate entity names
+          const nameCount = new Map();
+          for (const pe of producedEntities) {
+            const count = (nameCount.get(pe.entity_name) || 0) + 1;
+            nameCount.set(pe.entity_name, count);
+            if (count > 1) pe.entity_name += ` (${count})`;
+          }
+
+          // Batch upsert produced entities into entity_stage_pool
+          const { error: prodErr } = await db
+            .from('entity_stage_pool')
+            .upsert(producedEntities, { onConflict: 'run_id,step_index,entity_name' });
+          if (prodErr) throw prodErr;
+
+          // Create entity_run_meta rows for produced entities
+          try {
+            await db.from('entity_run_meta').upsert(
+              producedEntities.map(pe => ({ run_id: subRun.run_id, entity_name: pe.entity_name })),
+              { onConflict: 'run_id,entity_name', ignoreDuplicates: true }
+            );
+          } catch (metaErr) {
+            console.warn('[approve:entity_production] entity_run_meta upsert skipped:', metaErr.message);
+          }
+
+          // Remove the parent/seed entity from the pool (it's done its job)
+          await db
+            .from('entity_stage_pool')
+            .delete()
+            .eq('run_id', subRun.run_id)
+            .eq('step_index', subRun.input_data?.step_index ?? 0)
+            .eq('entity_name', entityName);
+
+          // Mark parent as handled so final pool update skips it
+          poolMap.delete(entityName);
+
+          console.log(`[approve:entity_production] ${entityName}: produced ${producedEntities.length} entities`);
+
+        } else {
+          // ── NORMAL MODE ──
+          // Update entity pool based on data_operation
+          let entityPool = poolMap.get(entityName) || [];
+
+          if (dataOperation === 'add') {
+            // Upsert by composite key (itemKey + source_submodule): replace existing
+            // items from the same submodule, add new ones. This makes re-runs work —
+            // re-approving a submodule replaces its previous output in the pool.
+            const compositeKey = (item) => `${String(item[itemKey] ?? '')}::${item.source_submodule || ''}`;
+            const approvedKeys = new Set(approvedItems.map(compositeKey));
+            entityPool = entityPool.filter(item => !approvedKeys.has(compositeKey(item)));
+            entityPool.push(...approvedItems);
+          } else if (dataOperation === 'remove') {
+            // Filter to keep only approved items, AND merge any enriched fields
+            // from the submodule output (e.g. url-relevance adds "relevance" field).
+            const approvedItemMap = new Map(
+              approvedItems.map(item => [String(item[itemKey] ?? ''), item])
+            );
+            entityPool = entityPool.filter(item => {
+              const keyVal = String(item[itemKey] ?? '');
+              if (!approvedKeySet.has(keyVal)) return false;
+              // Merge enriched fields from the approved output into the pool item
+              const enriched = approvedItemMap.get(keyVal);
+              if (enriched) {
+                for (const [k, v] of Object.entries(enriched)) {
+                  if (k !== itemKey && k !== 'source_submodule' && !(k in item)) {
+                    item[k] = v;
+                  }
                 }
               }
+              return true;
+            });
+          } else if (dataOperation === 'transform') {
+            // Transform replaces items with matching keys — remove ALL existing
+            // items that share a key with the approved items (regardless of source).
+            // Build removal set from BOTH output keys AND original_url fields
+            // so items that were transformed (URL changed) get properly replaced.
+            const removalSet = new Set();
+            for (const item of approvedItems) {
+              removalSet.add(String(item[itemKey] ?? ''));
+              if (item.original_url != null && String(item.original_url) !== String(item[itemKey] ?? '')) {
+                removalSet.add(String(item.original_url));
+                console.log(`[transform] Canonicalized: ${item.original_url} → ${item[itemKey]}`);
+              }
             }
-            return true;
-          });
-        } else if (dataOperation === 'transform') {
-          // Transform replaces items with matching keys — remove ALL existing
-          // items that share a key with the approved items (regardless of source).
-          // Build removal set from BOTH output keys AND original_url fields
-          // so items that were transformed (URL changed) get properly replaced.
-          const removalSet = new Set();
-          for (const item of approvedItems) {
-            removalSet.add(String(item[itemKey] ?? ''));
-            if (item.original_url != null && String(item.original_url) !== String(item[itemKey] ?? '')) {
-              removalSet.add(String(item.original_url));
-              console.log(`[transform] Canonicalized: ${item.original_url} → ${item[itemKey]}`);
-            }
+            entityPool = entityPool.filter(item => {
+              const key = String(item[itemKey] ?? '');
+              return !removalSet.has(key);
+            });
+            entityPool.push(...approvedItems);
           }
-          entityPool = entityPool.filter(item => {
-            const key = String(item[itemKey] ?? '');
-            return !removalSet.has(key);
-          });
-          entityPool.push(...approvedItems);
-        }
 
-        poolMap.set(entityName, entityPool);
+          poolMap.set(entityName, entityPool);
+        }
 
         // Update entity_submodule_runs status
         await db
           .from('entity_submodule_runs')
           .update({ status: 'approved', approved_items: resolvedKeys })
           .eq('id', entityRun.id);
+      }
+
+      // Update pipeline_stages.entity_count (may have changed due to entity_production)
+      if (subRun.options?.entity_production === true) {
+        const { count } = await db
+          .from('entity_stage_pool')
+          .select('*', { count: 'exact', head: true })
+          .eq('run_id', subRun.run_id)
+          .eq('step_index', subRun.input_data?.step_index ?? 0);
+
+        await db
+          .from('pipeline_stages')
+          .update({ entity_count: count })
+          .eq('run_id', subRun.run_id)
+          .eq('step_index', subRun.input_data?.step_index ?? 0);
       }
 
       // Bulk update entity_stage_pool (UPSERT for idempotency)
