@@ -19,7 +19,9 @@ interface SectionDef {
 
 export interface DetailSchema {
   header_fields: HeaderFieldEntry[];
-  sections: SectionDef[];
+  sections?: SectionDef[];
+  /** When set, reads section definitions from this field on the item (for dynamic LLM output) */
+  dynamic_sections_field?: string;
 }
 
 interface DetailModalProps {
@@ -184,7 +186,10 @@ export function DetailModal({
 
         {/* Sections */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-          {detailSchema.sections.map((section, i) => {
+          {(detailSchema.dynamic_sections_field
+            ? (Array.isArray(item[detailSchema.dynamic_sections_field]) ? item[detailSchema.dynamic_sections_field] as SectionDef[] : [])
+            : detailSchema.sections || []
+          ).map((section, i) => {
             const value = String(item[section.field] ?? '');
             return (
               <div key={i}>

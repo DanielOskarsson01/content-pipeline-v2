@@ -8,9 +8,9 @@
 import { getSubmoduleById } from './moduleLoader.js';
 
 export const CATEGORY_ORDER = {
-  crawling: 1, news: 2, filtering: 3, scraping: 4, analysis: 5,
-  planning: 6, generation: 7, seo: 8, review: 9, qa: 10,
-  formatting: 11, bundling: 12, media: 13, data: 14, website: 15, testing: 16,
+  website: 1, crawling: 2, search: 3, news: 4, filtering: 5, scraping: 6, analysis: 7,
+  planning: 8, generation: 9, seo: 10, review: 11, qa: 12,
+  formatting: 13, bundling: 14, media: 15, data: 16, testing: 17,
 };
 
 /**

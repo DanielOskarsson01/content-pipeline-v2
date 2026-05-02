@@ -22,7 +22,9 @@ export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, 
 
   // Sort categories in logical pipeline order (not alphabetical/load order)
   const CATEGORY_ORDER: Record<string, number> = {
-    crawling: 1, news: 2, filtering: 3, scraping: 4, analysis: 5, planning: 6, generation: 7,
+    website: 1, crawling: 2, search: 3, news: 4, filtering: 5, scraping: 6, analysis: 7,
+    planning: 8, generation: 9, seo: 10, review: 11, qa: 12,
+    formatting: 13, bundling: 14, media: 15, data: 16, testing: 17,
   };
   const categoryEntries = Object.entries(categories).sort(
     ([a], [b]) => (CATEGORY_ORDER[a] ?? 99) - (CATEGORY_ORDER[b] ?? 99)
