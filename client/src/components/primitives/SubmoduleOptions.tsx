@@ -1,6 +1,10 @@
+import { useState } from 'react';
 import type { SubmoduleOption } from '../../types/step';
 import { ReferenceDocSelector } from './ReferenceDocSelector';
 import { PresetField } from './PresetField';
+import { TagListEditor } from './TagListEditor';
+import { ProviderEditor } from './ProviderEditor';
+import { KeyValueEditor } from './KeyValueEditor';
 
 interface SubmoduleOptionsProps {
   options: SubmoduleOption[];
@@ -162,6 +166,18 @@ export function SubmoduleOptions({
               </div>
             );
 
+          case 'json':
+            return (
+              <JsonOptionField
+                key={option.name}
+                option={option}
+                value={value}
+                onChange={(v) => onChange(option.name, v)}
+                presetDropdown={presetDropdown}
+                allValues={values}
+              />
+            );
+
           case 'text':
           default:
             return (
@@ -185,4 +201,138 @@ export function SubmoduleOptions({
       })}
     </div>
   );
+}
+
+// ── JSON option field with smart sub-editor detection ──────────────
+
+function JsonOptionField({
+  option,
+  value,
+  onChange,
+  presetDropdown,
+  allValues,
+}: {
+  option: SubmoduleOption;
+  value: unknown;
+  onChange: (v: unknown) => void;
+  presetDropdown: React.ReactNode;
+  allValues: Record<string, unknown>;
+}) {
+  const [rawMode, setRawMode] = useState(false);
+
+  // Parse value if it's a string (UI may have stored JSON as string)
+  const parsed = parseJsonValue(value, option.default);
+
+  // Detect which editor to use based on option name and shape
+  const isProviders = option.name === 'providers';
+  const isProviderParams = option.name === 'provider_params';
+  const isStringArray = Array.isArray(parsed) && (parsed.length === 0 || typeof parsed[0] === 'string');
+
+  // Raw JSON fallback
+  if (rawMode || (!isProviders && !isProviderParams && !isStringArray)) {
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="block text-xs text-gray-600">{option.label}</label>
+          {(isProviders || isProviderParams || isStringArray) && (
+            <button type="button" onClick={() => setRawMode(false)} className="text-[10px] text-[#0891B2]">Form view</button>
+          )}
+        </div>
+        {presetDropdown}
+        <JsonTextarea value={parsed} onChange={onChange} />
+        {option.description && (
+          <p className="text-[10px] text-gray-400 mt-1">{option.description}</p>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <label className="block text-xs text-gray-600">{option.label}</label>
+        <button type="button" onClick={() => setRawMode(true)} className="text-[10px] text-gray-400 hover:text-gray-600">JSON</button>
+      </div>
+      {presetDropdown}
+
+      {isProviders && (
+        <ProviderEditor
+          value={Array.isArray(parsed) ? parsed : []}
+          onChange={onChange}
+        />
+      )}
+
+      {isProviderParams && (
+        <KeyValueEditor
+          value={typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, Record<string, string>> : {}}
+          onChange={onChange}
+          groupKeys={getProviderIds(allValues)}
+        />
+      )}
+
+      {isStringArray && !isProviders && (
+        <TagListEditor
+          value={parsed as string[]}
+          onChange={onChange}
+          placeholder={`Add ${option.label.toLowerCase()}...`}
+        />
+      )}
+
+      {option.description && (
+        <p className="text-[10px] text-gray-400 mt-1">{option.description}</p>
+      )}
+    </div>
+  );
+}
+
+function JsonTextarea({ value, onChange }: { value: unknown; onChange: (v: unknown) => void }) {
+  const [text, setText] = useState(() => JSON.stringify(value, null, 2));
+  const [error, setError] = useState<string | null>(null);
+
+  const handleChange = (raw: string) => {
+    setText(raw);
+    try {
+      const parsed = JSON.parse(raw);
+      onChange(parsed);
+      setError(null);
+    } catch {
+      setError('Invalid JSON');
+    }
+  };
+
+  return (
+    <>
+      <textarea
+        value={text}
+        onChange={(e) => handleChange(e.target.value)}
+        rows={6}
+        className={`w-full bg-white border rounded px-3 py-2 text-gray-900 text-xs font-mono focus:outline-none resize-y ${error ? 'border-red-300 focus:border-red-400' : 'border-gray-300 focus:border-[#0891B2]'}`}
+      />
+      {error && <p className="text-[10px] text-red-500 mt-0.5">{error}</p>}
+    </>
+  );
+}
+
+function parseJsonValue(value: unknown, defaultValue: unknown): unknown {
+  if (value === undefined || value === null) return defaultValue ?? [];
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+      try { return JSON.parse(trimmed); } catch { /* fall through */ }
+    }
+    // Might be comma-separated
+    if (Array.isArray(defaultValue)) {
+      return trimmed ? trimmed.split(',').map(s => s.trim()).filter(Boolean) : [];
+    }
+    return defaultValue ?? value;
+  }
+  return value;
+}
+
+function getProviderIds(values: Record<string, unknown>): string[] {
+  const providers = values.providers;
+  if (!providers) return [];
+  const parsed = typeof providers === 'string' ? (() => { try { return JSON.parse(providers); } catch { return []; } })() : providers;
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((p: { id?: string }) => p.id).filter(Boolean);
 }

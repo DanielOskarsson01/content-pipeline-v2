@@ -122,7 +122,7 @@ export interface SubmoduleManifest {
 
 export interface SubmoduleOption {
   name: string;
-  type: 'boolean' | 'number' | 'text' | 'select' | 'textarea' | 'doc_selector';
+  type: 'boolean' | 'number' | 'text' | 'select' | 'textarea' | 'doc_selector' | 'json';
   label: string;
   description: string;
   default: unknown;
