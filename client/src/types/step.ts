@@ -122,7 +122,7 @@ export interface SubmoduleManifest {
 
 export interface SubmoduleOption {
   name: string;
-  type: 'boolean' | 'number' | 'text' | 'select' | 'textarea' | 'doc_selector' | 'json';
+  type: 'boolean' | 'number' | 'text' | 'select' | 'textarea' | 'doc_selector' | 'json' | 'file_upload';
   label: string;
   description: string;
   default: unknown;
@@ -131,6 +131,8 @@ export interface SubmoduleOption {
   values?: string[];
   maxLength?: number;
   presets_enabled?: boolean;
+  accept?: string;
+  upload_endpoint?: string;
 }
 
 // Phase 12a: Option presets

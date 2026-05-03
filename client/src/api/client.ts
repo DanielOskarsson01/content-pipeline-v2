@@ -256,6 +256,22 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  // CSV Upload (for csv-discovery)
+  uploadCsvFiles: (projectId: string, formData: FormData) =>
+    fetch(`${API_BASE}/api/projects/${projectId}/csv-upload`, {
+      method: 'POST',
+      body: formData,
+    }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      return r.json() as Promise<{ files: { filename: string; original_filename: string; rows: number; size_bytes: number; converted: boolean }[]; upload_dir: string; errors: string[] }>;
+    }),
+  listCsvFiles: (projectId: string) =>
+    apiFetch<{ files: { filename: string; size_bytes: number; uploaded_at: string }[]; upload_dir: string }>(`/api/projects/${projectId}/csv-upload`),
+  deleteCsvFile: (projectId: string, filename: string) =>
+    apiFetch<{ deleted: boolean; filename: string }>(`/api/projects/${projectId}/csv-upload/${encodeURIComponent(filename)}`, {
+      method: 'DELETE',
+    }),
+
   // Submodules with full detail (for template editor) — returns flat array
   getSubmodulesFull: () =>
     apiFetch<SubmoduleManifest[]>('/api/submodules?detail=full'),

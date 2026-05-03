@@ -42,6 +42,9 @@ temp/
 # Package manager locks (optional - some teams commit these)
 # package-lock.json
 
+# Runtime data (CSV uploads, etc.)
+data/
+
 # Secrets and credentials
 *.pem
 *.key

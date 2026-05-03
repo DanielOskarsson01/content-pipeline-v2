@@ -5,6 +5,7 @@ import { PresetField } from './PresetField';
 import { TagListEditor } from './TagListEditor';
 import { ProviderEditor } from './ProviderEditor';
 import { KeyValueEditor } from './KeyValueEditor';
+import { CsvDiscoveryUpload } from './CsvDiscoveryUpload';
 
 interface SubmoduleOptionsProps {
   options: SubmoduleOption[];
@@ -159,6 +160,23 @@ export function SubmoduleOptions({
                   projectId={projectId}
                   value={Array.isArray(value) ? value as string[] : []}
                   onChange={(docIds) => onChange(option.name, docIds)}
+                />
+                {option.description && (
+                  <p className="text-[10px] text-gray-400 mt-1">{option.description}</p>
+                )}
+              </div>
+            );
+
+          case 'file_upload':
+            return (
+              <div key={option.name}>
+                <label className="block text-xs text-gray-600 mb-1">
+                  {option.label}
+                </label>
+                <CsvDiscoveryUpload
+                  projectId={projectId}
+                  accept={option.accept}
+                  onChange={(uploadDir) => onChange(option.name, uploadDir)}
                 />
                 {option.description && (
                   <p className="text-[10px] text-gray-400 mt-1">{option.description}</p>

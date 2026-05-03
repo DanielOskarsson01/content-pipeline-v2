@@ -18,6 +18,7 @@ import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { COST_CONFIG } from '../config/timeouts.js';
 import { extractToBlob, hydrateItems } from '../services/poolBlobs.js';
+import { convertXlsxInDir } from '../utils/xlsxConverter.js';
 
 // Load submodule manifests (worker is a separate process from server.js)
 loadModules();
@@ -390,6 +391,17 @@ async function handleEntityJob(job) {
   // 7. Prepare input — single entity format
   const input = entityRun.input_data;
   const options = { ...(manifest.options_defaults || {}), ...(entityRun.options || {}) };
+
+  // 7a. Pre-process: convert .xlsx/.xls → .csv before csv-discovery runs
+  if (submodule_id === 'csv-discovery') {
+    for (const dirKey of ['source_dir', 'upload_dir']) {
+      if (options[dirKey]) {
+        const { converted, errors } = convertXlsxInDir(options[dirKey]);
+        if (converted > 0) console.log(`[worker:entity] Converted ${converted} XLSX file(s) in ${options[dirKey]}`);
+        if (errors.length > 0) console.warn(`[worker:entity] XLSX conversion errors: ${errors.join('; ')}`);
+      }
+    }
+  }
 
   // 7b. Enrich: merge downloadable fields from upstream for this entity's items
   const requiresColumns = manifest.requires_columns || [];
