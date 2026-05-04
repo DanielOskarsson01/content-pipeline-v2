@@ -934,15 +934,19 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
         if (entityProduction && approvedItems.length > 0) {
           // ── ENTITY PRODUCTION MODE ──
-          // Each approved item becomes a new entity for downstream steps.
+          // Each approved item becomes a new entity for DOWNSTREAM steps (step+1).
+          // The parent entity stays at the current step so other submodules
+          // (e.g. api-search) can still process it independently.
           const entityNameTemplate = subRun.options?.entity_name_template || '{title}';
+          const currentStep = subRun.input_data?.step_index ?? 0;
+          const targetStep = Math.min(currentStep + 1, 10);
 
           const producedEntities = [];
           for (const item of approvedItems) {
             const newEntityName = resolveEntityNameTemplate(entityNameTemplate, item, entityName);
             producedEntities.push({
               run_id: subRun.run_id,
-              step_index: subRun.input_data?.step_index ?? 0,
+              step_index: targetStep,
               entity_name: newEntityName,
               pool_items: [item],
               status: 'pending',
@@ -973,18 +977,11 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
             console.warn('[approve:entity_production] entity_run_meta upsert skipped:', metaErr.message);
           }
 
-          // Remove the parent/seed entity from the pool (it's done its job)
-          await db
-            .from('entity_stage_pool')
-            .delete()
-            .eq('run_id', subRun.run_id)
-            .eq('step_index', subRun.input_data?.step_index ?? 0)
-            .eq('entity_name', entityName);
+          // Keep parent entity at current step (clear its pool so subsequent
+          // submodules like api-search start fresh for this entity).
+          poolMap.set(entityName, []);
 
-          // Mark parent as handled so final pool update skips it
-          poolMap.delete(entityName);
-
-          console.log(`[approve:entity_production] ${entityName}: produced ${producedEntities.length} entities`);
+          console.log(`[approve:entity_production] ${entityName}: produced ${producedEntities.length} entities at step ${targetStep}`);
 
         } else {
           // ── NORMAL MODE ──
@@ -1049,19 +1046,25 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
           .eq('id', entityRun.id);
       }
 
-      // Update pipeline_stages.entity_count (may have changed due to entity_production)
+      // Update pipeline_stages.entity_count (produced entities go to step+1)
       if (subRun.options?.entity_production === true) {
-        const { count } = await db
+        const currentStep = subRun.input_data?.step_index ?? 0;
+        const targetStep = Math.min(currentStep + 1, 10);
+
+        // Update target step entity_count (where produced entities now live)
+        const { count: targetCount } = await db
           .from('entity_stage_pool')
           .select('*', { count: 'exact', head: true })
           .eq('run_id', subRun.run_id)
-          .eq('step_index', subRun.input_data?.step_index ?? 0);
+          .eq('step_index', targetStep);
 
-        await db
-          .from('pipeline_stages')
-          .update({ entity_count: count })
-          .eq('run_id', subRun.run_id)
-          .eq('step_index', subRun.input_data?.step_index ?? 0);
+        if (targetCount > 0) {
+          await db
+            .from('pipeline_stages')
+            .update({ entity_count: targetCount })
+            .eq('run_id', subRun.run_id)
+            .eq('step_index', targetStep);
+        }
       }
 
       // Bulk update entity_stage_pool (UPSERT for idempotency)

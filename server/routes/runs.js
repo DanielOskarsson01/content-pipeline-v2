@@ -420,6 +420,25 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
 
     const nextStep = rpcResult.next_step;
 
+    // Fix entity_count at next step: entity_production may have placed
+    // entities there before propagation. The RPC sets entity_count from
+    // p_approved_count (current step), which undercounts.
+    if (nextStep != null) {
+      const { count: actualNextCount } = await db
+        .from('entity_stage_pool')
+        .select('*', { count: 'exact', head: true })
+        .eq('run_id', runId)
+        .eq('step_index', nextStep);
+
+      if (actualNextCount != null) {
+        await db
+          .from('pipeline_stages')
+          .update({ entity_count: actualNextCount })
+          .eq('run_id', runId)
+          .eq('step_index', nextStep);
+      }
+    }
+
     // ── Routing branch: step has loop-router ──
     if (rpcResult.routing_pending) {
       // Progressive save runs even for routing steps
