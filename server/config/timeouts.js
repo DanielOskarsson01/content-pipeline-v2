@@ -38,7 +38,7 @@ export const DEFAULT_THRESHOLD = 0.3;
 // Base step timeout in seconds (minimum, before entity scaling).
 export const DEFAULT_STEP_TIMEOUTS = {
   1: 300,    // 5 min
-  2: 600,    // 10 min — 4 submodules + browser fallback for Cloudflare sites
+  2: 1800,   // 30 min — 4 submodules: dedup + canonicalizer HEAD requests + filter + LLM relevance
   3: 2700,   // 45 min
   4: 300,    // 5 min
   5: 3600,   // 60 min
@@ -51,7 +51,7 @@ export const DEFAULT_STEP_TIMEOUT = 600; // 10 min fallback
 // Seconds per entity — step timeout = max(entities * factor, base timeout).
 export const ENTITY_TIMEOUT_FACTOR = {
   1: 120,
-  2: 60,     // 1 min/entity — status check + browser fallback for 403s
+  2: 180,    // 3 min/entity — HEAD requests + browser fallback + LLM relevance classification
   3: 120,
   4: 120,
   5: 300,
