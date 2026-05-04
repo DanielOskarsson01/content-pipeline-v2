@@ -277,12 +277,12 @@ export const api = {
     apiFetch<SubmoduleManifest[]>('/api/submodules?detail=full'),
 
   // Phase 12c: Auto-execute
-  autoExecuteRun: (runId: string, config?: { failure_thresholds?: Record<string, number>; step_timeouts?: Record<string, number> }) =>
+  autoExecuteRun: (runId: string, config?: { failure_thresholds?: Record<string, number> }) =>
     apiFetch<{ status: string; started_at: string }>(`/api/runs/${runId}/auto-execute`, {
       method: 'POST',
       body: JSON.stringify(config || {}),
     }),
-  resumeAutoExecute: (runId: string, config?: { override_threshold?: Record<string, number>; skip_step?: number; step_timeouts?: Record<string, number> }) =>
+  resumeAutoExecute: (runId: string, config?: { override_threshold?: Record<string, number>; skip_step?: number }) =>
     apiFetch<{ status: string; resumed_from_step: number }>(`/api/runs/${runId}/auto-execute/resume`, {
       method: 'POST',
       body: JSON.stringify(config || {}),

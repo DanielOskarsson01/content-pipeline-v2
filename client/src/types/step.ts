@@ -29,7 +29,6 @@ export interface AutoExecuteState {
   steps_completed: number[];
   steps_skipped: number[];
   failure_thresholds: Record<string, number>;
-  step_timeouts: Record<string, number>;
   per_step_results: Record<string, AutoExecuteStepResult>;
   halt_reason?: string;
   halted_at?: string;
@@ -202,7 +201,6 @@ export interface TemplateExecutionPlan {
   submodules_per_step?: Record<string, string[]>;
   skip_steps?: number[];
   failure_thresholds?: Record<string, number>;
-  step_timeouts?: Record<string, number>;
 }
 
 export interface TemplateSeedConfig {

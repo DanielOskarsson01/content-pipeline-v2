@@ -1064,7 +1064,7 @@ router.get('/:runId/report', async (req, res, next) => {
 /**
  * POST /api/runs/:runId/auto-execute
  * Start hands-free pipeline execution.
- * Body (optional overrides): { failure_thresholds, step_timeouts }
+ * Body (optional overrides): { failure_thresholds }
  */
 router.post('/:runId/auto-execute', async (req, res, next) => {
   try {
@@ -1129,7 +1129,6 @@ router.post('/:runId/auto-execute', async (req, res, next) => {
       skipSteps: (executionPlan.skip_steps || []).map(Number),
       submodulesPerStep,
       failure_thresholds: { ...(executionPlan.failure_thresholds || {}), ...(req.body?.failure_thresholds || {}) },
-      step_timeouts: { ...(executionPlan.step_timeouts || {}), ...(req.body?.step_timeouts || {}) },
     };
 
     // Fire-and-forget
@@ -1201,7 +1200,6 @@ router.post('/:runId/auto-execute/resume', async (req, res, next) => {
       skipSteps,
       submodulesPerStep: executionPlan.submodules_per_step || {},
       failure_thresholds: mergedThresholds,
-      step_timeouts: { ...(state.step_timeouts || {}), ...(executionPlan.step_timeouts || {}), ...(req.body?.step_timeouts || {}) },
     };
 
     executeRun(runId, config, state);

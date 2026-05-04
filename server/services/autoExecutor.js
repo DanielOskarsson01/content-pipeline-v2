@@ -15,19 +15,15 @@
 import { EventEmitter } from 'events';
 import db from './db.js';
 import { redis } from './queue.js';
-import { pipelineQueue } from './queue.js';
 import {
   DEFAULT_FAILURE_THRESHOLDS,
   DEFAULT_THRESHOLD,
-  DEFAULT_STEP_TIMEOUTS,
-  DEFAULT_STEP_TIMEOUT,
-  ENTITY_TIMEOUT_FACTOR,
-  DEFAULT_ENTITY_FACTOR,
 } from '../config/timeouts.js';
 
 const PORT = process.env.PORT || 3001;
 const LOCK_TTL = 300;       // 5 min Redis lock TTL
 const LOCK_RENEW_INTERVAL = 60_000; // Renew every 60s
+const MAX_BATCH_TIMEOUT = 6 * 60 * 60; // 6 hours — safety net per submodule batch, should never fire
 
 // --- EventEmitter ---
 export const autoExecuteEvents = new EventEmitter();
@@ -87,7 +83,6 @@ export async function executeRun(runId, config, previousState = null) {
       steps_completed: previousState?.steps_completed || [],
       steps_skipped: previousState?.steps_skipped || [],
       failure_thresholds: config.failure_thresholds || {},
-      step_timeouts: config.step_timeouts || {},
       per_step_results: previousState?.per_step_results || {},
       routing_loops: previousState?.routing_loops || 0,
       routing_events: previousState?.routing_events || [],
@@ -149,16 +144,14 @@ export async function executeRun(runId, config, previousState = null) {
 
       const stepStartTime = Date.now();
       const entityCount = await getEntityCount(runId, stepIndex);
-      const stepTimeout = computeStepTimeout(stepIndex, entityCount, config.step_timeouts || {});
 
       autoExecuteEvents.emit('step_started', {
         runId, stepIndex, submodules: stepSubmodules, entityCount,
       });
 
-      console.log(`[auto-execute] Step ${stepIndex}: starting (${stepSubmodules.length} submodules, ${entityCount} entities, timeout: ${stepTimeout}s)`);
+      console.log(`[auto-execute] Step ${stepIndex}: starting (${stepSubmodules.length} submodules, ${entityCount} entities)`);
 
       // Run each submodule sequentially
-      let stepTimedOut = false;
       for (const submoduleId of stepSubmodules) {
         if (signal.aborted) break;
 
@@ -218,47 +211,16 @@ export async function executeRun(runId, config, previousState = null) {
           }
         }
 
-        // Poll for completion [#2, #10]
-        const elapsed = (Date.now() - stepStartTime) / 1000;
-        const remainingTimeout = stepTimeout - elapsed;
-        if (remainingTimeout <= 0) {
-          // No time left — cancel remaining entities for this submodule
-          console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: step timeout reached before polling`);
-          await cancelTimeoutEntities(batchId);
-          stepTimedOut = true;
-          // Approve completed entities so their results enter the pool
-          try {
-            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
-            await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
-          } catch (approveErr) {
-            console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: could not approve after timeout: ${approveErr.message}`);
-          }
-          continue; // remaining submodules will also timeout immediately
-        }
-
-        const pollResult = await pollBatchCompletion(batchId, remainingTimeout, signal);
+        // Poll for completion — job-level timeouts (COST_CONFIG) handle per-entity limits.
+        // MAX_BATCH_TIMEOUT is a safety net only (6 hours).
+        const pollResult = await pollBatchCompletion(batchId, MAX_BATCH_TIMEOUT, signal);
 
         if (signal.aborted) break;
 
         if (pollResult === 'timeout') {
-          stepTimedOut = true;
-          await cancelTimeoutEntities(batchId);
-          const cancelledCount = await countEntitiesByStatus(batchId, ['failed']);
-          const completedCount = await countEntitiesByStatus(batchId, ['completed']);
-          autoExecuteEvents.emit('step_timeout', {
-            runId, stepIndex, submoduleId,
-            cancelledCount,
-            completedCount,
-          });
-          console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: timed out (${completedCount} completed, ${cancelledCount} cancelled) — approving completed and continuing`);
-          // Approve completed entities so their results enter the pool
-          try {
-            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
-            await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
-          } catch (approveErr) {
-            console.warn(`[auto-execute] Step ${stepIndex}/${submoduleId}: could not approve after timeout: ${approveErr.message}`);
-          }
-          continue; // try next submodule — don't halt the step
+          // 6-hour safety net fired — something is catastrophically wrong
+          await haltRun(runId, state, `Submodule ${submoduleId} at step ${stepIndex} exceeded maximum batch timeout (6 hours)`, cleanup);
+          return;
         }
 
         autoExecuteEvents.emit('submodule_completed', {
@@ -274,12 +236,6 @@ export async function executeRun(runId, config, previousState = null) {
       }
 
       if (signal.aborted) break;
-
-      // Step timeout occurred for one or more submodules — evaluate by failure threshold
-      // instead of hard-halting. Completed entities are already approved and in the pool.
-      if (stepTimedOut) {
-        console.log(`[auto-execute] Step ${stepIndex}: timeout occurred — evaluating failure threshold`);
-      }
 
       // Evaluate failure [#6]
       const evalResult = await evaluateStepResult(runId, stepIndex);
@@ -310,19 +266,6 @@ export async function executeRun(runId, config, previousState = null) {
       }
 
       if (signal.aborted) break;
-
-      // If ALL entities failed (100% failure after timeout), skip step-level approve
-      if (stepTimedOut && evalResult.completed === 0) {
-        console.warn(`[auto-execute] Step ${stepIndex}: all entities failed/timed out — skipping step approve`);
-        state.per_step_results[String(stepIndex)] = {
-          status: 'timeout',
-          ...evalResult,
-          duration_ms: Date.now() - stepStartTime,
-        };
-        if (!state.steps_completed.includes(stepIndex)) state.steps_completed.push(stepIndex);
-        await saveState(runId, state);
-        continue;
-      }
 
       // Auto-approve step (submodules already approved individually above)
       console.log(`[auto-execute] Step ${stepIndex}: approving step`);
@@ -628,15 +571,6 @@ async function pollBatchCompletion(batchId, timeoutSec, signal) {
   return 'timeout';
 }
 
-async function countEntitiesByStatus(batchId, statuses) {
-  const { count } = await db
-    .from('entity_submodule_runs')
-    .select('id', { count: 'exact', head: true })
-    .eq('batch_id', batchId)
-    .in('status', statuses);
-  return count || 0;
-}
-
 async function getEntityCounts(batchId) {
   const { data } = await db
     .from('entity_submodule_runs')
@@ -755,7 +689,7 @@ async function autoApproveSingleSubmodule(runId, stepIndex, submoduleId) {
       // Re-mark as completed so the approval endpoint includes them
       await db
         .from('entity_submodule_runs')
-        .update({ status: 'completed' })
+        .update({ status: 'completed', error: null })
         .eq('id', entity.id);
       if (!seen.has(entity.entity_name)) {
         entityApprovals[entity.entity_name] = '__all__';
@@ -779,60 +713,6 @@ async function autoApproveSingleSubmodule(runId, stepIndex, submoduleId) {
   await callEndpoint('POST', `/api/submodule-runs/${subRun.id}/approve`, {
     entity_approvals: entityApprovals,
   });
-}
-
-async function cancelTimeoutEntities(batchId) {
-  const now = new Date().toISOString();
-
-  // 1. Hard-fail pending entities (no work in progress, no partial results possible)
-  await db
-    .from('entity_submodule_runs')
-    .update({ status: 'failed', error: 'Step timeout exceeded', completed_at: now })
-    .eq('batch_id', batchId)
-    .eq('status', 'pending');
-
-  // 2. For running entities, send abort signal so workers can save partial results.
-  //    The worker polls abort:entity:{id} every 2s (stageWorker.js) and on abort
-  //    saves tools._partialItems before exiting — preserving scraped pages.
-  const { data: runningEntities } = await db
-    .from('entity_submodule_runs')
-    .select('id, entity_name')
-    .eq('batch_id', batchId)
-    .eq('status', 'running');
-
-  if (runningEntities?.length > 0) {
-    for (const entity of runningEntities) {
-      await redis.set(`abort:entity:${entity.id}`, '1', 'EX', 60);
-    }
-    console.log(`[auto-execute] Sent abort signal to ${runningEntities.length} running entities — waiting for partial results`);
-
-    // Grace period: workers poll abort every 2s, then need a few seconds to save.
-    await sleep(15_000);
-
-    // Hard-fail anything still running after grace period (worker didn't respond)
-    await db
-      .from('entity_submodule_runs')
-      .update({ status: 'failed', error: 'Step timeout exceeded', completed_at: new Date().toISOString() })
-      .eq('batch_id', batchId)
-      .eq('status', 'running');
-  }
-
-  // Try to remove pending BullMQ jobs (best effort)
-  try {
-    const { data: pendingRuns } = await db
-      .from('entity_submodule_runs')
-      .select('id')
-      .eq('batch_id', batchId)
-      .eq('status', 'failed')
-      .like('error', 'Step timeout%');
-
-    // BullMQ doesn't have a direct "remove by data" API,
-    // but the jobs will fail on their own when the worker tries
-    // to write results and sees the entity is already failed.
-    // The status update above is the authoritative guard.
-  } catch (err) {
-    console.warn(`[auto-execute] Failed to clean up BullMQ jobs for batch ${batchId}:`, err.message);
-  }
 }
 
 async function haltRun(runId, state, reason, cleanup) {
@@ -860,13 +740,6 @@ async function safeSkipStep(runId, stepIndex) {
   } else {
     console.log(`[auto-execute] Step ${stepIndex}: stage is "${status || 'missing'}", no skip API call needed`);
   }
-}
-
-function computeStepTimeout(stepIndex, entityCount, overrides) {
-  if (overrides[String(stepIndex)]) return overrides[String(stepIndex)];
-  const base = DEFAULT_STEP_TIMEOUTS[stepIndex] || DEFAULT_STEP_TIMEOUT;
-  const factor = ENTITY_TIMEOUT_FACTOR[stepIndex] || DEFAULT_ENTITY_FACTOR;
-  return Math.max(entityCount * factor, base);
 }
 
 function getThreshold(stepIndex, overrides) {

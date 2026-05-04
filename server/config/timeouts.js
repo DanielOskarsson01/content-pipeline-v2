@@ -16,10 +16,10 @@ export const COST_CONFIG = {
 };
 
 /**
- * Phase 12c: Auto-execute step-level defaults.
+ * Auto-execute failure thresholds.
  *
  * Failure threshold = max fraction of entities allowed to fail before halting.
- * Step timeout (seconds) = base minimum; scaled up by entity count.
+ * Per-entity timeouts are handled by COST_CONFIG above (job-level).
  */
 
 // Per-step failure thresholds. Unlisted steps default to DEFAULT_THRESHOLD.
@@ -34,29 +34,3 @@ export const DEFAULT_FAILURE_THRESHOLDS = {
   8: 0.1,   // Bundling — low tolerance
 };
 export const DEFAULT_THRESHOLD = 0.3;
-
-// Base step timeout in seconds (minimum, before entity scaling).
-export const DEFAULT_STEP_TIMEOUTS = {
-  1: 300,    // 5 min
-  2: 1800,   // 30 min — 4 submodules: dedup + canonicalizer HEAD requests + filter + LLM relevance
-  3: 2700,   // 45 min
-  4: 300,    // 5 min
-  5: 3600,   // 60 min
-  6: 1800,   // 30 min (4-6 QA modules × LLM calls)
-  7: 300,    // 5 min (routing decisions are fast)
-  8: 300,    // 5 min
-};
-export const DEFAULT_STEP_TIMEOUT = 600; // 10 min fallback
-
-// Seconds per entity — step timeout = max(entities * factor, base timeout).
-export const ENTITY_TIMEOUT_FACTOR = {
-  1: 120,
-  2: 180,    // 3 min/entity — HEAD requests + browser fallback + LLM relevance classification
-  3: 120,
-  4: 120,
-  5: 300,
-  6: 180,   // QA: ~3 min/entity for multiple LLM checks
-  7: 30,    // Routing: fast decision logic per entity
-  8: 120,
-};
-export const DEFAULT_ENTITY_FACTOR = 120;
