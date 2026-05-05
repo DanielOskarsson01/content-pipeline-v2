@@ -116,8 +116,8 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
       {run.status === 'auto_executing' && (
         <AutoExecuteBanner runId={runId} state={run.auto_execute_state} />
       )}
-      {run.status === 'halted' && (
-        <HaltedBanner runId={runId} state={run.auto_execute_state} />
+      {(run.status === 'halted' || run.status === 'paused') && (
+        <HaltedBanner runId={runId} state={run.auto_execute_state} isPaused={run.status === 'paused'} />
       )}
 
       <div className="space-y-2">
@@ -293,7 +293,7 @@ function AutoExecuteBanner({ runId, state }: { runId: string; state?: AutoExecut
   );
 }
 
-function HaltedBanner({ runId, state }: { runId: string; state?: AutoExecuteState | null }) {
+function HaltedBanner({ runId, state, isPaused = false }: { runId: string; state?: AutoExecuteState | null; isPaused?: boolean }) {
   const { showToast } = useAppStore();
   const resumeMutation = useMutation({
     mutationFn: (config?: { override_threshold?: Record<string, number>; skip_step?: number }) =>
@@ -304,43 +304,51 @@ function HaltedBanner({ runId, state }: { runId: string; state?: AutoExecuteStat
     },
   });
 
+  const bannerLabel = isPaused
+    ? `Paused before Step ${state?.halted_step ?? '?'}`
+    : `Halted at Step ${state?.halted_step ?? '?'}`;
+
   return (
-    <div className="mb-3 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+    <div className={`mb-3 ${isPaused ? 'bg-blue-50 border-blue-200' : 'bg-amber-50 border-amber-200'} border rounded-lg px-4 py-3`}>
       <div className="flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-amber-500" />
-            <span className="text-sm font-medium text-amber-800">Halted at Step {state?.halted_step ?? '?'}</span>
+            <span className={`w-2 h-2 rounded-full ${isPaused ? 'bg-blue-500' : 'bg-amber-500'}`} />
+            <span className={`text-sm font-medium ${isPaused ? 'text-blue-800' : 'text-amber-800'}`}>{bannerLabel}</span>
           </div>
           {state?.halt_reason && (
-            <p className="text-xs text-amber-600 mt-1 ml-4">{state.halt_reason}</p>
+            <p className={`text-xs mt-1 ml-4 ${isPaused ? 'text-blue-600' : 'text-amber-600'}`}>{state.halt_reason}</p>
           )}
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => resumeMutation.mutate()}
             disabled={resumeMutation.isPending}
-            className="px-3 py-1 text-xs font-medium text-white bg-amber-600 rounded hover:bg-amber-700 disabled:opacity-50"
+            className={`px-3 py-1 text-xs font-medium text-white rounded disabled:opacity-50 ${isPaused ? 'bg-blue-600 hover:bg-blue-700' : 'bg-amber-600 hover:bg-amber-700'}`}
           >
             {resumeMutation.isPending ? 'Resuming...' : 'Resume'}
           </button>
-          <button
-            onClick={() => resumeMutation.mutate({ skip_step: state?.halted_step })}
-            disabled={resumeMutation.isPending || !state?.halted_step}
-            className="px-3 py-1 text-xs font-medium text-amber-700 bg-white border border-amber-300 rounded hover:bg-amber-50 disabled:opacity-50"
-          >
-            Skip Step
-          </button>
-          <button
-            onClick={() => {
-              const step = state?.halted_step;
-              if (step != null) resumeMutation.mutate({ override_threshold: { [step]: 1.0 } });
-            }}
-            disabled={resumeMutation.isPending || !state?.halted_step}
-            className="px-3 py-1 text-xs font-medium text-amber-700 bg-white border border-amber-300 rounded hover:bg-amber-50 disabled:opacity-50"
-          >
-            Override Threshold
-          </button>
+          {!isPaused && (
+            <>
+              <button
+                onClick={() => resumeMutation.mutate({ skip_step: state?.halted_step })}
+                disabled={resumeMutation.isPending || !state?.halted_step}
+                className="px-3 py-1 text-xs font-medium text-amber-700 bg-white border border-amber-300 rounded hover:bg-amber-50 disabled:opacity-50"
+              >
+                Skip Step
+              </button>
+              <button
+                onClick={() => {
+                  const step = state?.halted_step;
+                  if (step != null) resumeMutation.mutate({ override_threshold: { [step]: 1.0 } });
+                }}
+                disabled={resumeMutation.isPending || !state?.halted_step}
+                className="px-3 py-1 text-xs font-medium text-amber-700 bg-white border border-amber-300 rounded hover:bg-amber-50 disabled:opacity-50"
+              >
+                Override Threshold
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

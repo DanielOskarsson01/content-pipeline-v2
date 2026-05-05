@@ -87,6 +87,7 @@ export async function executeRun(runId, config, previousState = null) {
       routing_loops: previousState?.routing_loops || 0,
       routing_events: previousState?.routing_events || [],
       auto_resumed: previousState?.auto_resumed || false,
+      paused_at_steps: previousState?.paused_at_steps || [],
     };
 
     await db
@@ -120,6 +121,22 @@ export async function executeRun(runId, config, previousState = null) {
         if (!state.steps_skipped.includes(stepIndex)) state.steps_skipped.push(stepIndex);
         await saveState(runId, state);
         continue;
+      }
+
+      // Pause before step (template config — user reviews entities before continuing)
+      // Guard: only pause once per step (paused_at_steps tracks consumed pauses)
+      if (config.pauseBeforeSteps?.includes(stepIndex) && !state.paused_at_steps.includes(stepIndex)) {
+        console.log(`[auto-execute] ${runId}: pausing before step ${stepIndex}`);
+        state.paused_at_steps.push(stepIndex);
+        state.halt_reason = `Paused before step ${stepIndex} (template config)`;
+        state.halted_at = new Date().toISOString();
+        state.halted_step = stepIndex;
+        await db
+          .from('pipeline_runs')
+          .update({ status: 'paused', auto_execute_state: state })
+          .eq('id', runId);
+        await cleanup();
+        return;
       }
 
       // No submodules configured for this step → skip

@@ -200,6 +200,7 @@ export type TemplatePresetMap = Record<string, TemplatePresetMapEntry>;
 export interface TemplateExecutionPlan {
   submodules_per_step?: Record<string, string[]>;
   skip_steps?: number[];
+  pause_before_steps?: number[];
   failure_thresholds?: Record<string, number>;
 }
 
