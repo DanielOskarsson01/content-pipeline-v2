@@ -111,38 +111,81 @@ app.get('/api/metrics/summary', async (_req, res, next) => {
 // Load submodule manifests from MODULES_PATH
 loadModules();
 
-// Phase 12c: Startup recovery — halt orphaned auto-executing runs
+// Startup recovery — auto-resume orphaned auto-executing runs (once per run).
+// If the same run was already auto-resumed and the server restarted again, halt it permanently.
 (async () => {
   try {
-    const { data: orphaned } = await db
-      .from('pipeline_runs')
-      .select('id, auto_execute_state')
-      .eq('status', 'auto_executing')
-      .not('auto_execute_state', 'is', null);
-
-    if (orphaned?.length) {
-      for (const run of orphaned) {
-        await db
-          .from('pipeline_runs')
-          .update({
-            status: 'halted',
-            auto_execute_state: {
-              ...(run.auto_execute_state || {}),
-              halt_reason: 'Server restarted during execution',
-              halted_at: new Date().toISOString(),
-            },
-          })
-          .eq('id', run.id);
-      }
-      console.log(`[startup] Halted ${orphaned.length} orphaned auto-executing run(s)`);
-    }
-
-    // Clean up stale Redis locks
+    // Clean up stale Redis locks first (before resuming)
     const { redis } = await import('./services/queue.js');
     const keys = await redis.keys('auto_execute:*');
     if (keys.length) {
       await redis.del(...keys);
       console.log(`[startup] Cleaned ${keys.length} stale auto-execute lock(s)`);
+    }
+
+    const { data: orphaned } = await db
+      .from('pipeline_runs')
+      .select('id, auto_execute_state, project_id')
+      .eq('status', 'auto_executing')
+      .not('auto_execute_state', 'is', null);
+
+    if (!orphaned?.length) return;
+
+    const { executeRun } = await import('./services/autoExecutor.js');
+
+    for (const run of orphaned) {
+      const state = run.auto_execute_state || {};
+
+      // Guard: if this run was already auto-resumed once, halt permanently
+      if (state.auto_resumed) {
+        await db
+          .from('pipeline_runs')
+          .update({
+            status: 'halted',
+            auto_execute_state: {
+              ...state,
+              halt_reason: 'Server restarted twice during execution — halted permanently',
+              halted_at: new Date().toISOString(),
+            },
+          })
+          .eq('id', run.id);
+        console.log(`[startup] Halted run ${run.id} — already auto-resumed once`);
+        continue;
+      }
+
+      // Resolve template execution_plan for config
+      const haltedStep = state.halted_step ?? state.current_step ?? 0;
+      let executionPlan = {};
+      const { data: project } = await db
+        .from('projects')
+        .select('template_id')
+        .eq('id', run.project_id)
+        .single();
+
+      if (project?.template_id) {
+        const { data: template } = await db
+          .from('templates')
+          .select('execution_plan')
+          .eq('id', project.template_id)
+          .single();
+        executionPlan = template?.execution_plan || {};
+      }
+
+      const config = {
+        steps: Array.from({ length: 11 }, (_, i) => i).filter(i => i >= haltedStep),
+        skipSteps: [...(executionPlan.skip_steps || []).map(Number)],
+        submodulesPerStep: executionPlan.submodules_per_step || {},
+        failure_thresholds: {
+          ...(state.failure_thresholds || {}),
+          ...(executionPlan.failure_thresholds || {}),
+        },
+      };
+
+      // Mark as auto-resumed so a second restart halts permanently
+      const resumeState = { ...state, auto_resumed: true };
+
+      console.log(`[startup] Auto-resuming run ${run.id} from step ${haltedStep}`);
+      executeRun(run.id, config, resumeState);
     }
   } catch (err) {
     console.error('[startup] Auto-execute recovery failed:', err.message);

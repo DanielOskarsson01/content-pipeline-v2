@@ -86,6 +86,7 @@ export async function executeRun(runId, config, previousState = null) {
       per_step_results: previousState?.per_step_results || {},
       routing_loops: previousState?.routing_loops || 0,
       routing_events: previousState?.routing_events || [],
+      auto_resumed: previousState?.auto_resumed || false,
     };
 
     await db
