@@ -16,6 +16,7 @@ import templatesRouter from './routes/templates.js';
 import seedRouter from './routes/seed.js';
 import csvUploadRouter from './routes/csvUpload.js';
 import { loadModules } from './services/moduleLoader.js';
+import { startRetention } from './services/retention.js';
 import db from './services/db.js';
 
 // Workers run as separate PM2 processes — see ecosystem.config.cjs
@@ -191,6 +192,9 @@ loadModules();
     console.error('[startup] Auto-execute recovery failed:', err.message);
   }
 })();
+
+// Automated retention — delete run data older than 7 days
+startRetention();
 
 // SPA fallback — serve React app for non-API routes
 app.get('*', (req, res, next) => {
