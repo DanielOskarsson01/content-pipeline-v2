@@ -125,7 +125,12 @@ async function progressiveSave(db, runId, stepIndex) {
         };
       }
 
-      submodulesPerStep[String(stepIndex)] = sortSubmoduleIds(stepSubs);
+      // Preserve existing order from template — only sort genuinely new submodules (B046 fix)
+      const existingOrder = submodulesPerStep[String(stepIndex)] || [];
+      const existingSet = new Set(existingOrder);
+      const newSubs = stepSubs.filter(id => !existingSet.has(id));
+      const preserved = existingOrder.filter(id => stepSubs.includes(id));
+      submodulesPerStep[String(stepIndex)] = [...preserved, ...sortSubmoduleIds(newSubs)];
       execPlan.submodules_per_step = submodulesPerStep;
 
       await db

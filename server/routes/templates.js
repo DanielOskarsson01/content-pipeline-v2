@@ -413,9 +413,28 @@ router.post('/from-run/:runId', async (req, res, next) => {
       }
     }
 
-    // Sort submodules within each step by category + sort_order
+    // Preserve execution order from source template if available (B046 fix)
+    // Only sort genuinely new submodules not in the original order
+    const { data: srcProject } = await db
+      .from('projects')
+      .select('template_id')
+      .eq('id', run.project_id)
+      .single();
+    let srcOrder = {};
+    if (srcProject?.template_id) {
+      const { data: srcTpl } = await db
+        .from('templates')
+        .select('execution_plan')
+        .eq('id', srcProject.template_id)
+        .single();
+      srcOrder = srcTpl?.execution_plan?.submodules_per_step || {};
+    }
     for (const stepIdx of Object.keys(submodulesPerStep)) {
-      submodulesPerStep[stepIdx] = sortSubmoduleIds(submodulesPerStep[stepIdx]);
+      const existing = srcOrder[stepIdx] || [];
+      const existingSet = new Set(existing);
+      const newSubs = submodulesPerStep[stepIdx].filter(id => !existingSet.has(id));
+      const preserved = existing.filter(id => submodulesPerStep[stepIdx].includes(id));
+      submodulesPerStep[stepIdx] = [...preserved, ...sortSubmoduleIds(newSubs)];
     }
     const executionPlan = { submodules_per_step: submodulesPerStep };
     const finalSeedConfig = seed_config || { seed_type: 'csv' };
