@@ -404,6 +404,16 @@ async function handleEntityJob(job) {
   }
 
   // 7b. Enrich: merge downloadable fields from upstream for this entity's items
+  // Helper: item_data stores objects as JSON strings — parse them back
+  const parseContent = (val) => {
+    if (typeof val !== 'string') return val;
+    const trimmed = val.trimStart();
+    if ((trimmed[0] === '{' || trimmed[0] === '[') && trimmed.length > 1) {
+      try { return JSON.parse(val); } catch { /* not JSON */ }
+    }
+    return val;
+  };
+
   const enrichedFields = new Set();
   const requiresColumns = manifest.requires_columns || [];
   const entityItems = input?.entity?.items || [];
@@ -416,17 +426,20 @@ async function handleEntityJob(job) {
     if (missingColumns.length > 0) {
       console.log(`[worker:entity] Enriching "${entity_name}": ${missingColumns.join(', ')} missing from ${entityItems.length} items`);
 
-      // Find upstream completed entity_submodule_runs for this entity
+      // Find upstream completed entity_submodule_runs for this entity (with step_index for ordering)
       const pipelineRunId = entityRun.run_id;
       const { data: upstreamRuns } = await db
         .from('entity_submodule_runs')
-        .select('id')
+        .select('id, step_index')
         .eq('run_id', pipelineRunId)
         .eq('entity_name', entity_name)
         .in('status', ['completed', 'approved']);
 
-      const upstreamRunIds = (upstreamRuns || []).map(r => r.id)
-        .filter(id => id !== entity_submodule_run_id);
+      const upstreamRunList = (upstreamRuns || [])
+        .filter(r => r.id !== entity_submodule_run_id);
+      const upstreamRunIds = upstreamRunList.map(r => r.id);
+      // Map submodule_run_id → step_index so we can sort item_data rows
+      const stepIndexMap = Object.fromEntries(upstreamRunList.map(r => [r.id, r.step_index]));
 
       if (upstreamRunIds.length > 0) {
         const itemKeyField = manifest.item_key || 'url';
@@ -436,19 +449,26 @@ async function handleEntityJob(job) {
 
         const ENRICH_BATCH = 200;
         const lookup = new Map();
+        const allItemDataRows = [];
         for (let i = 0; i < itemKeys.length; i += ENRICH_BATCH) {
           const keyBatch = itemKeys.slice(i, i + ENRICH_BATCH);
           const { data: itemData } = await db
             .from('submodule_run_item_data')
-            .select('item_key, field_name, content')
+            .select('submodule_run_id, item_key, field_name, content')
             .in('submodule_run_id', upstreamRunIds)
             .in('field_name', missingColumns)
             .in('item_key', keyBatch);
 
-          for (const row of (itemData || [])) {
-            if (!lookup.has(row.item_key)) lookup.set(row.item_key, {});
-            lookup.get(row.item_key)[row.field_name] = row.content;
-          }
+          if (itemData) allItemDataRows.push(...itemData);
+        }
+        // Sort by step_index ascending so later steps (e.g. boilerplate-stripper step 4)
+        // overwrite earlier steps (e.g. page-scraper step 3) in the lookup map
+        allItemDataRows.sort((a, b) =>
+          (stepIndexMap[a.submodule_run_id] || 0) - (stepIndexMap[b.submodule_run_id] || 0)
+        );
+        for (const row of allItemDataRows) {
+          if (!lookup.has(row.item_key)) lookup.set(row.item_key, {});
+          lookup.get(row.item_key)[row.field_name] = parseContent(row.content);
         }
 
         let mergedCount = 0;
@@ -479,18 +499,24 @@ async function handleEntityJob(job) {
             )];
             if (urlKeys.length > 0) {
               const lookup2 = new Map();
+              const crossRows = [];
               for (let i = 0; i < urlKeys.length; i += ENRICH_BATCH) {
                 const keyBatch = urlKeys.slice(i, i + ENRICH_BATCH);
                 const { data: itemData } = await db
                   .from('submodule_run_item_data')
-                  .select('item_key, field_name, content')
+                  .select('submodule_run_id, item_key, field_name, content')
                   .in('submodule_run_id', upstreamRunIds)
                   .in('field_name', stillMissing)
                   .in('item_key', keyBatch);
-                for (const row of (itemData || [])) {
-                  if (!lookup2.has(row.item_key)) lookup2.set(row.item_key, {});
-                  lookup2.get(row.item_key)[row.field_name] = row.content;
-                }
+                if (itemData) crossRows.push(...itemData);
+              }
+              // Sort by step_index ascending so later steps overwrite earlier
+              crossRows.sort((a, b) =>
+                (stepIndexMap[a.submodule_run_id] || 0) - (stepIndexMap[b.submodule_run_id] || 0)
+              );
+              for (const row of crossRows) {
+                if (!lookup2.has(row.item_key)) lookup2.set(row.item_key, {});
+                lookup2.get(row.item_key)[row.field_name] = parseContent(row.content);
               }
               let crossCount = 0;
               for (const item of entityItems) {
@@ -526,7 +552,7 @@ async function handleEntityJob(job) {
                   .in('item_key', entityKeys);
                 const entLookup = {};
                 for (const row of (itemData || [])) {
-                  entLookup[row.field_name] = row.content;
+                  entLookup[row.field_name] = parseContent(row.content);
                 }
                 if (Object.keys(entLookup).length > 0) {
                   let entCount = 0;
