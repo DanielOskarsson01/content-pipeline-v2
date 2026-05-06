@@ -33,6 +33,8 @@ export interface AutoExecuteState {
   halt_reason?: string;
   halted_at?: string;
   halted_step?: number;
+  paused_at_steps?: number[];
+  paused_after_submodules?: string[];
   routing_loops?: number;
   routing_events?: Array<{
     loop: number;
@@ -201,6 +203,7 @@ export interface TemplateExecutionPlan {
   submodules_per_step?: Record<string, string[]>;
   skip_steps?: number[];
   pause_before_steps?: number[];
+  pause_after_submodules?: string[];
   failure_thresholds?: Record<string, number>;
 }
 

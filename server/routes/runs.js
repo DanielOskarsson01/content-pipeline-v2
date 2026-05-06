@@ -1133,6 +1133,7 @@ router.post('/:runId/auto-execute', async (req, res, next) => {
       steps: Array.from({ length: 11 }, (_, i) => i),
       skipSteps: (executionPlan.skip_steps || []).map(Number),
       pauseBeforeSteps: (executionPlan.pause_before_steps || []).map(Number),
+      pauseAfterSubmodules: executionPlan.pause_after_submodules || [],
       submodulesPerStep,
       failure_thresholds: { ...(executionPlan.failure_thresholds || {}), ...(req.body?.failure_thresholds || {}) },
     };
@@ -1205,6 +1206,7 @@ router.post('/:runId/auto-execute/resume', async (req, res, next) => {
       steps: Array.from({ length: 11 }, (_, i) => i).filter(i => i >= haltedStep),
       skipSteps,
       pauseBeforeSteps: (executionPlan.pause_before_steps || []).map(Number),
+      pauseAfterSubmodules: executionPlan.pause_after_submodules || [],
       submodulesPerStep: executionPlan.submodules_per_step || {},
       failure_thresholds: mergedThresholds,
     };

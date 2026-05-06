@@ -88,6 +88,7 @@ export async function executeRun(runId, config, previousState = null) {
       routing_events: previousState?.routing_events || [],
       auto_resumed: previousState?.auto_resumed || false,
       paused_at_steps: previousState?.paused_at_steps || [],
+      paused_after_submodules: previousState?.paused_after_submodules || [],
     };
 
     await db
@@ -184,8 +185,12 @@ export async function executeRun(runId, config, previousState = null) {
             continue;
           }
           if (existingRun.status === 'completed') {
-            // Submodule finished but was never approved (e.g. abort interrupted before approval).
-            // Wait for batchWorker to finalize, then approve so output enters the pool.
+            // LOAD-BEARING for pause_after_submodules: when resuming after a submodule pause,
+            // this path fires if the user resumed WITHOUT manually approving — auto-approves all.
+            // If the user DID manually approve, status will be 'approved' and we skip above.
+            if (config.pauseAfterSubmodules?.includes(submoduleId)) {
+              console.warn(`[auto-execute] ${runId}: ${submoduleId} was in pause_after_submodules but resumed without manual approval — auto-approving all entities`);
+            }
             console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: completed but not approved, approving now`);
             await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
             await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
@@ -250,6 +255,27 @@ export async function executeRun(runId, config, previousState = null) {
         // submodules in the same step can see its output in the pool.
         // Wait for batchWorker to finalize submodule_runs status first (race condition fix).
         await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
+
+        // Pause after submodule (template config — user reviews & approves manually)
+        // NOTE: pause_after_submodules matches on submoduleId globally across all steps.
+        // The pauseKey (stepIndex:submoduleId) ensures each step-instance only pauses once.
+        const pauseKey = `${stepIndex}:${submoduleId}`;
+        if (config.pauseAfterSubmodules?.includes(submoduleId) &&
+            !state.paused_after_submodules?.includes(pauseKey)) {
+          console.log(`[auto-execute] ${runId}: pausing after ${submoduleId} at step ${stepIndex} — manual approval required`);
+          if (!state.paused_after_submodules) state.paused_after_submodules = [];
+          state.paused_after_submodules.push(pauseKey);
+          state.halt_reason = `Paused after ${submoduleId} — review results and approve before resuming`;
+          state.halted_at = new Date().toISOString();
+          state.halted_step = stepIndex;
+          await db
+            .from('pipeline_runs')
+            .update({ status: 'paused', auto_execute_state: state })
+            .eq('id', runId);
+          await cleanup();
+          return;
+        }
+
         await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
       }
 

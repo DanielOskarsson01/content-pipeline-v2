@@ -424,20 +424,37 @@ function ExecutionPlanSection({
     return sub?.name || id;
   };
 
+  // Must be before early return (React Hooks rules)
+  const [selectedPause, setSelectedPause] = useState('');
+
   if (entries.length === 0) {
     return (
       <div className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
         <h3 className="text-sm font-semibold text-gray-900 mb-2">Execution Plan</h3>
         <p className="text-xs text-gray-400">No execution plan. Will be populated when template is saved from a run.</p>
-        <p className="text-[10px] text-gray-400 mt-1">Auto-execute is 12c scope — metadata only in 12b.</p>
       </div>
     );
   }
 
+  // Pause after submodules state
+  const pauseAfter = plan.pause_after_submodules || [];
+  const allSubmoduleIds = [...new Set(entries.flatMap(([, subs]) => subs as string[]))];
+  const availableForPause = allSubmoduleIds.filter(id => !pauseAfter.includes(id));
+
+  const addPause = (subId: string) => {
+    if (!subId) return;
+    onSave({ ...plan, pause_after_submodules: [...pauseAfter, subId] });
+    setSelectedPause('');
+  };
+
+  const removePause = (subId: string) => {
+    onSave({ ...plan, pause_after_submodules: pauseAfter.filter(id => id !== subId) });
+  };
+
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
       <h3 className="text-sm font-semibold text-gray-900 mb-3">Execution Plan</h3>
-      <p className="text-[10px] text-gray-400 mb-2">Submodules used per step (metadata only — auto-execute in 12c)</p>
+      <p className="text-[10px] text-gray-400 mb-2">Submodules used per step during auto-execute</p>
       <div className="space-y-1">
         {entries.map(([stepIdx, subs]) => (
           <div key={stepIdx} className="flex items-start gap-2 bg-gray-50 rounded px-3 py-1.5">
@@ -451,6 +468,51 @@ function ExecutionPlanSection({
             </div>
           </div>
         ))}
+      </div>
+
+      {/* Pause after submodule */}
+      <div className="mt-4 pt-3 border-t border-gray-100">
+        <h4 className="text-xs font-medium text-gray-700 mb-2">Pause after submodule</h4>
+        <p className="text-[10px] text-gray-400 mb-2">Auto-executor pauses after these submodules so you can review and approve results before continuing.</p>
+
+        {pauseAfter.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {pauseAfter.map(subId => (
+              <span key={subId} className="inline-flex items-center gap-1 text-[10px] bg-blue-50 border border-blue-200 rounded px-2 py-0.5 text-blue-700">
+                {submoduleName(subId)}
+                <button
+                  onClick={() => removePause(subId)}
+                  disabled={isPending}
+                  className="text-blue-400 hover:text-red-500 ml-0.5"
+                >
+                  &times;
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {availableForPause.length > 0 && (
+          <div className="flex items-center gap-2">
+            <select
+              value={selectedPause}
+              onChange={e => setSelectedPause(e.target.value)}
+              className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-600"
+            >
+              <option value="">Select submodule...</option>
+              {availableForPause.map(subId => (
+                <option key={subId} value={subId}>{submoduleName(subId)}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => addPause(selectedPause)}
+              disabled={!selectedPause || isPending}
+              className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+            >
+              + Add pause
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
