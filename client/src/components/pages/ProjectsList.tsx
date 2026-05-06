@@ -232,6 +232,7 @@ function ProjectDetailPanel({ project }: { project: ProjectListItem }) {
                     run.status === 'running' ? 'bg-sky-500' :
                     run.status === 'auto_executing' ? 'bg-indigo-500' :
                     run.status === 'halted' ? 'bg-amber-500' :
+                    run.status === 'paused' ? 'bg-blue-500' :
                     run.status === 'failed' ? 'bg-red-500' : 'bg-gray-300'
                   }`} />
                   <span className="text-gray-700 font-medium">Step {run.current_step}</span>

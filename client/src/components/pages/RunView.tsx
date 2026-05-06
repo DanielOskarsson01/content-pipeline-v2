@@ -92,6 +92,7 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
             Run {runId.slice(0, 8)} · Step {run.current_step} of 10 · {
               run.status === 'auto_executing' ? 'Auto-Executing' :
               run.status === 'halted' ? 'Halted' :
+              run.status === 'paused' ? 'Paused' :
               run.status
             }
           </p>
@@ -305,7 +306,9 @@ function HaltedBanner({ runId, state, isPaused = false }: { runId: string; state
   });
 
   const bannerLabel = isPaused
-    ? `Paused before Step ${state?.halted_step ?? '?'}`
+    ? (state?.halt_reason?.startsWith('Paused after')
+      ? `Paused at Step ${state?.halted_step ?? '?'}`
+      : `Paused before Step ${state?.halted_step ?? '?'}`)
     : `Halted at Step ${state?.halted_step ?? '?'}`;
 
   return (
