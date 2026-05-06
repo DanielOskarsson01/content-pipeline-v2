@@ -461,42 +461,85 @@ async function handleEntityJob(job) {
             mergedCount++;
           }
         }
-        console.log(`[worker:entity] Enriched ${mergedCount}/${entityItems.length} items for "${entity_name}"`);
+        if (mergedCount > 0) {
+          console.log(`[worker:entity] Enriched ${mergedCount}/${entityItems.length} items for "${entity_name}" via primary key (${itemKeyField})`);
+        }
 
-        // Cross-key fallback: if primary key found nothing and items have a url field,
-        // try matching by url (e.g. Step 5 modules with item_key=entity_name need
-        // text_content stored by Step 3 scrapers with item_key=url).
-        if (mergedCount === 0 && itemKeyField !== 'url') {
-          const urlKeys = [...new Set(
-            entityItems.map(item => String(item.url ?? '')).filter(Boolean)
-          )];
-          if (urlKeys.length > 0) {
-            const lookup2 = new Map();
-            for (let i = 0; i < urlKeys.length; i += ENRICH_BATCH) {
-              const keyBatch = urlKeys.slice(i, i + ENRICH_BATCH);
-              const { data: itemData } = await db
-                .from('submodule_run_item_data')
-                .select('item_key, field_name, content')
-                .in('submodule_run_id', upstreamRunIds)
-                .in('field_name', missingColumns)
-                .in('item_key', keyBatch)
-    ;
-              for (const row of (itemData || [])) {
-                if (!lookup2.has(row.item_key)) lookup2.set(row.item_key, {});
-                lookup2.get(row.item_key)[row.field_name] = row.content;
+        // Cross-key fallback: check which required fields are STILL missing after
+        // primary enrichment, then try alternate keys (url ↔ entity_name).
+        const stillMissing = missingColumns.filter(col =>
+          entityItems.some(item => item[col] === undefined || item[col] === null)
+        );
+
+        if (stillMissing.length > 0) {
+          // Try url-based lookup (for entity_name-keyed modules needing url-keyed data)
+          if (itemKeyField !== 'url') {
+            const urlKeys = [...new Set(
+              entityItems.map(item => String(item.url ?? '')).filter(Boolean)
+            )];
+            if (urlKeys.length > 0) {
+              const lookup2 = new Map();
+              for (let i = 0; i < urlKeys.length; i += ENRICH_BATCH) {
+                const keyBatch = urlKeys.slice(i, i + ENRICH_BATCH);
+                const { data: itemData } = await db
+                  .from('submodule_run_item_data')
+                  .select('item_key, field_name, content')
+                  .in('submodule_run_id', upstreamRunIds)
+                  .in('field_name', stillMissing)
+                  .in('item_key', keyBatch);
+                for (const row of (itemData || [])) {
+                  if (!lookup2.has(row.item_key)) lookup2.set(row.item_key, {});
+                  lookup2.get(row.item_key)[row.field_name] = row.content;
+                }
+              }
+              let crossCount = 0;
+              for (const item of entityItems) {
+                const urlVal = String(item.url ?? '');
+                const extra = lookup2.get(urlVal);
+                if (extra) {
+                  for (const k of Object.keys(extra)) enrichedFields.add(k);
+                  Object.assign(item, extra);
+                  crossCount++;
+                }
+              }
+              if (crossCount > 0) {
+                console.log(`[worker:entity] Cross-key enriched ${crossCount}/${entityItems.length} items for "${entity_name}" (url fallback, fields: ${stillMissing.join(', ')})`);
               }
             }
-            for (const item of entityItems) {
-              const urlVal = String(item.url ?? '');
-              const extra = lookup2.get(urlVal);
-              if (extra) {
-                for (const k of Object.keys(extra)) enrichedFields.add(k);
-                Object.assign(item, extra);
-                mergedCount++;
+          }
+
+          // Try entity_name-based lookup (for url-keyed modules needing entity_name-keyed data)
+          if (itemKeyField !== 'entity_name') {
+            const stillMissing2 = stillMissing.filter(col =>
+              entityItems.some(item => item[col] === undefined || item[col] === null)
+            );
+            if (stillMissing2.length > 0) {
+              const entityKeys = [...new Set(
+                entityItems.map(item => String(item.entity_name ?? '')).filter(Boolean)
+              )];
+              if (entityKeys.length > 0) {
+                const { data: itemData } = await db
+                  .from('submodule_run_item_data')
+                  .select('item_key, field_name, content')
+                  .in('submodule_run_id', upstreamRunIds)
+                  .in('field_name', stillMissing2)
+                  .in('item_key', entityKeys);
+                const entLookup = {};
+                for (const row of (itemData || [])) {
+                  entLookup[row.field_name] = row.content;
+                }
+                if (Object.keys(entLookup).length > 0) {
+                  let entCount = 0;
+                  for (const item of entityItems) {
+                    if (item.entity_name && entityKeys.includes(item.entity_name)) {
+                      Object.assign(item, entLookup);
+                      entCount++;
+                    }
+                  }
+                  for (const k of Object.keys(entLookup)) enrichedFields.add(k);
+                  console.log(`[worker:entity] Cross-key enriched ${entCount}/${entityItems.length} items for "${entity_name}" (entity_name fallback, fields: ${stillMissing2.join(', ')})`);
+                }
               }
-            }
-            if (mergedCount > 0) {
-              console.log(`[worker:entity] Cross-key enriched ${mergedCount}/${entityItems.length} items for "${entity_name}" (url fallback)`);
             }
           }
         }
