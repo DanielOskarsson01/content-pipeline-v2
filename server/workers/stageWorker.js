@@ -17,7 +17,7 @@ import db from '../services/db.js';
 import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { COST_CONFIG } from '../config/timeouts.js';
-import { extractToBlob, hydrateItems } from '../services/poolBlobs.js';
+import { hydrateItems } from '../services/poolBlobs.js';
 import { convertXlsxInDir } from '../utils/xlsxConverter.js';
 
 // Load submodule manifests (worker is a separate process from server.js)
@@ -404,6 +404,7 @@ async function handleEntityJob(job) {
   }
 
   // 7b. Enrich: merge downloadable fields from upstream for this entity's items
+  const enrichedFields = new Set();
   const requiresColumns = manifest.requires_columns || [];
   const entityItems = input?.entity?.items || [];
   if (requiresColumns.length > 0 && entityItems.length > 0) {
@@ -455,11 +456,50 @@ async function handleEntityJob(job) {
           const key = String(item[itemKeyField] ?? '');
           const extra = lookup.get(key);
           if (extra) {
+            for (const k of Object.keys(extra)) enrichedFields.add(k);
             Object.assign(item, extra);
             mergedCount++;
           }
         }
         console.log(`[worker:entity] Enriched ${mergedCount}/${entityItems.length} items for "${entity_name}"`);
+
+        // Cross-key fallback: if primary key found nothing and items have a url field,
+        // try matching by url (e.g. Step 5 modules with item_key=entity_name need
+        // text_content stored by Step 3 scrapers with item_key=url).
+        if (mergedCount === 0 && itemKeyField !== 'url') {
+          const urlKeys = [...new Set(
+            entityItems.map(item => String(item.url ?? '')).filter(Boolean)
+          )];
+          if (urlKeys.length > 0) {
+            const lookup2 = new Map();
+            for (let i = 0; i < urlKeys.length; i += ENRICH_BATCH) {
+              const keyBatch = urlKeys.slice(i, i + ENRICH_BATCH);
+              const { data: itemData } = await db
+                .from('submodule_run_item_data')
+                .select('item_key, field_name, content')
+                .in('submodule_run_id', upstreamRunIds)
+                .in('field_name', missingColumns)
+                .in('item_key', keyBatch)
+    ;
+              for (const row of (itemData || [])) {
+                if (!lookup2.has(row.item_key)) lookup2.set(row.item_key, {});
+                lookup2.get(row.item_key)[row.field_name] = row.content;
+              }
+            }
+            for (const item of entityItems) {
+              const urlVal = String(item.url ?? '');
+              const extra = lookup2.get(urlVal);
+              if (extra) {
+                for (const k of Object.keys(extra)) enrichedFields.add(k);
+                Object.assign(item, extra);
+                mergedCount++;
+              }
+            }
+            if (mergedCount > 0) {
+              console.log(`[worker:entity] Cross-key enriched ${mergedCount}/${entityItems.length} items for "${entity_name}" (url fallback)`);
+            }
+          }
+        }
       }
     }
   }
@@ -617,17 +657,37 @@ async function handleEntityJob(job) {
       }
       console.log(`[worker:entity] Stored ${storedCount}/${itemDataRows.length} downloadable field entries for ${submodule_id}/${entity_name}`);
 
-      // Strip large downloadable fields from result ONLY if all inserts succeeded.
-      // If inserts failed (e.g. FK constraint), keep data inline so it's not lost.
-      // Fields are stored in pool_item_blobs (for downstream pool consumers like
-      // bundlers and reports) and in submodule_run_item_data (for download button UI).
-      const totalSize = itemDataRows.reduce((sum, row) => sum + row.content.length, 0);
-      if (!insertFailed && totalSize > 1 * 1024 * 1024) {
+      // Data is safely stored in submodule_run_item_data (above).
+      // Strip downloadable fields from result so pool_items stays lean.
+      // We intentionally do NOT use extractToBlob — _blob_ref + hydrateItems
+      // restores content for ALL modules, defeating selective field loading
+      // via requires_columns. Direct delete + enrichment = selective loading.
+      if (!insertFailed) {
         for (const item of result.items) {
-          await extractToBlob(item, downloadFieldNames);
+          for (const field of downloadFieldNames) {
+            delete item[field];
+          }
         }
-      } else if (insertFailed) {
+        console.log(`[worker:entity] Stripped ${downloadFieldNames.join(', ')} from ${result.items.length} items for ${submodule_id}/${entity_name} (preserved in item_data)`);
+      } else {
         console.warn(`[worker:entity] Keeping downloadable fields inline for ${submodule_id}/${entity_name} because item_data insert failed`);
+      }
+    }
+  }
+
+  // 9b. Strip enriched-but-not-produced fields from output.
+  // Transform modules (e.g. intent-tagger) use { ...item, newField } which copies
+  // enriched fields (like text_content) back into output, re-inflating pool_items.
+  // Strip any enriched field that the module doesn't declare as its own output.
+  if (enrichedFields.size > 0 && result?.items) {
+    const outputFields = new Set(Object.keys(manifest.output_schema || {}));
+    const moduleDownloadable = new Set((manifest.output_schema?.downloadable_fields || []).map(d => d.field));
+    for (const item of result.items) {
+      for (const field of enrichedFields) {
+        // Keep if module declares it as its own output or as downloadable
+        if (!outputFields.has(field) && !moduleDownloadable.has(field)) {
+          delete item[field];
+        }
       }
     }
   }
