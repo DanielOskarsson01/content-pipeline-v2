@@ -172,10 +172,29 @@ loadModules();
         executionPlan = template?.execution_plan || {};
       }
 
+      // Fallback: if no template (or empty submodules_per_step), build from run_submodule_config
+      let submodulesPerStep = executionPlan.submodules_per_step || {};
+      if (Object.keys(submodulesPerStep).length === 0) {
+        const { data: runConfig } = await db
+          .from('run_submodule_config')
+          .select('step_index, submodule_id')
+          .eq('run_id', run.id)
+          .order('step_index', { ascending: true });
+        if (runConfig?.length) {
+          submodulesPerStep = {};
+          for (const row of runConfig) {
+            const key = String(row.step_index);
+            if (!submodulesPerStep[key]) submodulesPerStep[key] = [];
+            submodulesPerStep[key].push(row.submodule_id);
+          }
+          console.log(`[startup] Built submodulesPerStep from run_submodule_config for run ${run.id}`);
+        }
+      }
+
       const config = {
         steps: Array.from({ length: 11 }, (_, i) => i).filter(i => i >= haltedStep),
         skipSteps: [...(executionPlan.skip_steps || []).map(Number)],
-        submodulesPerStep: executionPlan.submodules_per_step || {},
+        submodulesPerStep,
         failure_thresholds: {
           ...(state.failure_thresholds || {}),
           ...(executionPlan.failure_thresholds || {}),
