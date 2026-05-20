@@ -493,6 +493,84 @@ Entry types: decision | progress | blocker | idea
 
 **Updated by:** session-closer agent
 
+### Session: 2026-04-27 — Phase 2 scraping hardening + browser anti-detection
+**Accomplished:**
+- Phase 2 batch: B032 transform fix + B1 Load More click loop in browserPool
+- Bumped Step 2 timeout factor 10s→60s per entity, base timeout 300s→600s for browser fallback workloads
+- Step timeout now evaluates failure threshold instead of hard-halting the run
+- Fixed PresetField: always show all presets in dropdown, allow saving new ones
+- Hardened browser pool anti-detection for bot-protected sites
+- Added Bright Data Web Unlocker as Cloudflare fallback
+- Exposed `res.url` in http.get/head for redirect detection
+
+**Commits:** 7 commits (Apr 25-28)
+
+**Updated by:** CTO audit catchup (2026-05-21)
+
+### Session: 2026-04-28 — CI/CD safeguards + browserPool locator migration
+**Accomplished:**
+- Migrated browserPool click loop to locator API with array selector support
+- Added CI/CD safeguards to prevent server desync from manual git commands (removes .git after rsync — learned from outage)
+- Fixed options merge bug and URL sanitization for entity input
+- Fixed pool status blocking multi-submodule steps on loop passes
+- Reset completed pools to pending before submodule run on loop passes
+- Fixed batch finalization blocked by failed entity jobs
+
+**Commits:** 6 commits (Apr 28-29)
+
+**Updated by:** CTO audit catchup (2026-05-21)
+
+### Session: 2026-04-29 to 2026-05-03 — Operational hardening + entity production + JSON form editors
+**Accomplished:**
+- Increased entity execution timeouts across all cost tiers
+- Added iGaming preset seed script for url-filter exclude patterns
+- Preserved partial scraping results on step timeout
+- Increased per-LLM-call timeout from 300s to 600s
+- Added entity_production support in approval logic + placement at next step
+- Support dynamic detail sections and update category ordering
+- Added form-based editors for JSON options (providers, keywords, params) — improves TemplateEditor UX
+- Added XLSX support and CSV upload for csv-discovery
+- Increased Step 2 timeout from 10min to 30min for high-volume URL validation
+- Fixed entity_production: place produced entities at next step
+
+**Commits:** 10 commits (Apr 29 – May 3)
+
+**Updated by:** CTO audit catchup (2026-05-21)
+
+### Session: 2026-05-05 to 2026-05-06 — Auto-executor enhancements + data flow optimization
+**Accomplished:**
+- Removed step-level timeouts — rely on job-level timeouts only
+- Auto-resume orphaned runs on server restart (with crash-loop guard: if same run auto-resumed twice, halt permanently)
+- Added automated 7-day data retention for pipeline runs
+- Added pause_before_steps to auto-executor for triage checkpoints
+- Activated selective field loading to reduce pool_items IO by ~95% (envelope system)
+- Fixed cross-key enrichment: check per-field + add reverse direction
+- Fixed enrichment: parse JSON strings + sort by step_index
+- Fixed B046: preserve user-defined submodule execution order during progressive save
+- Added pause_after_submodules to auto-executor for mid-step triage
+- Fixed paused status UI: add blue dot in ProjectsList, distinguish submodule vs step pauses in RunView
+
+**Commits:** 10 commits (May 5-6)
+
+**Updated by:** CTO audit catchup (2026-05-21)
+
+### Session: 2026-05-07 — Auto-resume fallback fix
+**Accomplished:**
+- Fixed auto-resume for template-less projects: fall back to run_submodule_config when no template execution_plan exists
+
+**Commits:** 1 commit (May 7)
+
+**Updated by:** CTO audit catchup (2026-05-21)
+
+### Session: 2026-05-20 — Phase 3: Multi-card routing, escalation gates, template UI
+**Accomplished:**
+- Phase 3 commit: multi-card routing, escalation gates, and template UI enhancements (cards, routing rules, escalation rules sections in TemplateEditor)
+- QA threshold tuning log with Phase 2 failure data analysis (docs/phase3-threshold-tuning-log.md)
+
+**Commits:** 2 commits (May 20)
+
+**Updated by:** CTO audit catchup (2026-05-21)
+
 ### Session: 2026-04-22 — Pronetgaming scraping fixes + proxy 407 fallback
 **Accomplished:**
 - Investigated pronetgaming.com scraping issues: broken sitemap (missing `/blog/` path segment → 404s), `word_count = NaN` in pass-through paths, no built-in URL exclusion patterns, browser-crawler missing `waitForSelector` for RSC/SPA pages
