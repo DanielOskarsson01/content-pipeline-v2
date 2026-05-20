@@ -464,8 +464,23 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
         },
       });
 
+      // Load template execution_plan for card-based routing resolution (Phase 3).
+      // Only runs when routing_pending=true, not on every step approval.
+      let executionPlan = {};
+      const { data: runForRouting } = await db.from('pipeline_runs')
+        .select('project_id').eq('id', runId).single();
+      if (runForRouting) {
+        const { data: projForRouting } = await db.from('projects')
+          .select('template_id').eq('id', runForRouting.project_id).single();
+        if (projForRouting?.template_id) {
+          const { data: tpl } = await db.from('templates')
+            .select('execution_plan').eq('id', projForRouting.template_id).single();
+          executionPlan = tpl?.execution_plan || {};
+        }
+      }
+
       // Apply routing — throws on failure (never silently completes)
-      const routingSummary = await applyRouting(db, runId, stepIndex);
+      const routingSummary = await applyRouting(db, runId, stepIndex, executionPlan);
 
       // ALL entities terminal — forward entire batch to next step
       if (routingSummary.all_terminal && stepIndex < 10) {
@@ -1136,6 +1151,7 @@ router.post('/:runId/auto-execute', async (req, res, next) => {
       pauseAfterSubmodules: executionPlan.pause_after_submodules || [],
       submodulesPerStep,
       failure_thresholds: { ...(executionPlan.failure_thresholds || {}), ...(req.body?.failure_thresholds || {}) },
+      escalationRules: executionPlan.escalation_rules || {},
     };
 
     // Fire-and-forget
@@ -1209,6 +1225,7 @@ router.post('/:runId/auto-execute/resume', async (req, res, next) => {
       pauseAfterSubmodules: executionPlan.pause_after_submodules || [],
       submodulesPerStep: executionPlan.submodules_per_step || {},
       failure_thresholds: mergedThresholds,
+      escalationRules: executionPlan.escalation_rules || {},
     };
 
     executeRun(runId, config, state);

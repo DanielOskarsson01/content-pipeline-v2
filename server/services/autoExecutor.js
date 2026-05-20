@@ -311,6 +311,25 @@ export async function executeRun(runId, config, previousState = null) {
 
       if (signal.aborted) break;
 
+      // Escalation gate check (Phase 3): evaluate entity-level thresholds
+      // before step approval. Marks entities below fail floor as terminal.
+      const gateRule = config.escalationRules?.[String(stepIndex)];
+      if (gateRule) {
+        const gate = await evaluateEscalationGate(runId, stepIndex, gateRule);
+        if (gate.belowFail.length > 0) {
+          for (const name of gate.belowFail) {
+            await db.from('entity_run_meta').upsert({
+              run_id: runId, entity_name: name,
+              terminal_state: 'failed', failure_reason: 'escalation_floor',
+            }, { onConflict: 'run_id,entity_name' });
+          }
+          console.log(`[auto-execute] Gate ${stepIndex}: ${gate.belowFail.length} entities failed (below floor), ${gate.belowThreshold.length} below threshold`);
+        }
+        // Escalation submodule triggering: deferred until google-pse-curated-search exists (Phase 5)
+      }
+
+      if (signal.aborted) break;
+
       // Auto-approve step (submodules already approved individually above)
       console.log(`[auto-execute] Step ${stepIndex}: approving step`);
       const approveResult = await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/approve`);
@@ -627,6 +646,43 @@ async function getEntityCounts(batchId) {
     failed: rows.filter(r => r.status === 'failed').length,
     total: rows.length,
   };
+}
+
+/**
+ * Evaluate escalation gate thresholds for a step (Phase 3).
+ * Checks entity-level volume (item count) or quality (word count) against
+ * per-template thresholds. Returns entities below threshold and below fail floor.
+ */
+async function evaluateEscalationGate(runId, stepIndex, rule) {
+  const { data: pools } = await db.from('entity_stage_pool')
+    .select('entity_name, pool_items')
+    .eq('run_id', runId).eq('step_index', stepIndex);
+
+  const belowThreshold = [];
+  const belowFail = [];
+
+  for (const pool of (pools || [])) {
+    const items = pool.pool_items || [];
+
+    // Volume gate (Step 2): count items
+    if (rule.volume_threshold !== undefined) {
+      const count = items.length;
+      if (count < rule.volume_threshold) belowThreshold.push(pool.entity_name);
+      if (rule.fail_threshold !== undefined && count < rule.fail_threshold) {
+        belowFail.push(pool.entity_name);
+      }
+    }
+
+    // Quality gate (Step 4): sum word counts
+    if (rule.quality_threshold_words !== undefined) {
+      const totalWords = items.reduce((s, i) => s + (i.word_count ?? 0), 0);
+      if (totalWords < rule.quality_threshold_words) belowThreshold.push(pool.entity_name);
+      if (rule.quality_fail_threshold !== undefined && totalWords < rule.quality_fail_threshold) {
+        belowFail.push(pool.entity_name);
+      }
+    }
+  }
+  return { belowThreshold, belowFail };
 }
 
 async function evaluateStepResult(runId, stepIndex) {

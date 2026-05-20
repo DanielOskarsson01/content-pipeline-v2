@@ -199,12 +199,35 @@ export interface TemplatePresetMapEntry {
 }
 export type TemplatePresetMap = Record<string, TemplatePresetMapEntry>;
 
+export interface CardDefinition {
+  submodule_id: string;
+  step: number;
+  options_overrides: Record<string, unknown>;
+  description?: string;
+}
+
+export interface RoutingRule {
+  target_cards: string[];
+  description?: string;
+}
+
+export interface EscalationRule {
+  volume_threshold?: number;
+  fail_threshold?: number;
+  quality_threshold_words?: number;
+  quality_fail_threshold?: number;
+  escalation_submodules: string[];
+}
+
 export interface TemplateExecutionPlan {
   submodules_per_step?: Record<string, string[]>;
   skip_steps?: number[];
   pause_before_steps?: number[];
   pause_after_submodules?: string[];
   failure_thresholds?: Record<string, number>;
+  cards?: Record<string, CardDefinition>;
+  routing_rules?: Record<string, RoutingRule>;
+  escalation_rules?: Record<string, EscalationRule>;
 }
 
 export interface TemplateSeedConfig {

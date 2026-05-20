@@ -287,6 +287,22 @@ executeRouter.post('/run', async (req, res) => {
       .single();
     const isLoopPass = stageRow?.is_loop_pass === true;
 
+    // Load template card definitions on loop passes (once per batch, not per entity)
+    let templateCards = {};
+    if (isLoopPass) {
+      const { data: runRow } = await db.from('pipeline_runs')
+        .select('project_id').eq('id', runId).single();
+      if (runRow) {
+        const { data: proj } = await db.from('projects')
+          .select('template_id').eq('id', runRow.project_id).single();
+        if (proj?.template_id) {
+          const { data: tpl } = await db.from('templates')
+            .select('execution_plan').eq('id', proj.template_id).single();
+          templateCards = tpl?.execution_plan?.cards || {};
+        }
+      }
+    }
+
     // On loop passes: reset 'completed' pools back to 'pending' before loading.
     // stageWorker sets pool status to 'completed' after each submodule run, but
     // subsequent submodules at the same step still need to process these entities.
@@ -441,10 +457,27 @@ executeRouter.post('/run', async (req, res) => {
         entity.loop_count = loopMeta.loop_count || 0;
       }
 
-      // Merge loop_config overrides into options per-entity
-      const entityOptions = (isLoopPass && loopMeta?.loop_config)
-        ? { ...options, ...loopMeta.loop_config }
-        : options;
+      // Merge loop_config overrides into options per-entity (Phase 3: card-aware)
+      let entityOptions = options;
+      if (isLoopPass && loopMeta?.loop_config) {
+        const lc = loopMeta.loop_config;
+        if (lc.active_cards) {
+          // New format: active_cards is { step: [cardName, ...] }
+          const stepCards = lc.active_cards[String(stepIdx)] || [];
+          // Find the card targeting THIS submodule
+          for (const cardName of stepCards) {
+            const card = templateCards[cardName];
+            if (card && card.submodule_id === submoduleId) {
+              entityOptions = { ...options, ...card.options_overrides };
+              console.log(`[submoduleRuns] ${ep.entity_name} using card "${cardName}" at step ${stepIdx}`);
+              break; // First matching card wins
+            }
+          }
+        } else {
+          // Old format: flat options merge (backward compat)
+          entityOptions = { ...options, ...lc };
+        }
+      }
 
       return {
         stage_id: stage.id,

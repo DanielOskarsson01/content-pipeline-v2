@@ -137,6 +137,21 @@ export function TemplateEditor() {
             onSave={(execution_plan) => updateMutation.mutate({ execution_plan })}
             isPending={updateMutation.isPending}
           />
+          <CardsSection
+            template={template}
+            onSave={(execution_plan) => updateMutation.mutate({ execution_plan })}
+            isPending={updateMutation.isPending}
+          />
+          <RoutingRulesSection
+            template={template}
+            onSave={(execution_plan) => updateMutation.mutate({ execution_plan })}
+            isPending={updateMutation.isPending}
+          />
+          <EscalationRulesSection
+            template={template}
+            onSave={(execution_plan) => updateMutation.mutate({ execution_plan })}
+            isPending={updateMutation.isPending}
+          />
           <ReferenceDocsSection template={template} />
         </>
       )}
@@ -514,6 +529,214 @@ function ExecutionPlanSection({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Cards Section ─────────────────────────────────────────────
+
+function CardsSection({
+  template,
+  onSave,
+  isPending,
+}: {
+  template: TemplateDetail;
+  onSave: (plan: TemplateExecutionPlan) => void;
+  isPending: boolean;
+}) {
+  const plan = template.execution_plan || {};
+  const cards = plan.cards || {};
+  const cardCount = Object.keys(cards).length;
+
+  const [json, setJson] = useState(() => JSON.stringify(cards, null, 2));
+  const [error, setError] = useState('');
+  const [warnings, setWarnings] = useState<string[]>([]);
+
+  const dirty = json !== JSON.stringify(cards, null, 2);
+
+  const handleSave = () => {
+    try {
+      const parsed = JSON.parse(json);
+      // Basic validation
+      const warns: string[] = [];
+      for (const [name, card] of Object.entries(parsed) as [string, Record<string, unknown>][]) {
+        if (!card.submodule_id) warns.push(`Card "${name}": missing submodule_id`);
+        if (card.step === undefined) warns.push(`Card "${name}": missing step`);
+      }
+      setWarnings(warns);
+      setError('');
+      onSave({ ...plan, cards: parsed });
+    } catch (e) {
+      setError(`Invalid JSON: ${(e as Error).message}`);
+    }
+  };
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+      <h3 className="text-sm font-semibold text-gray-900 mb-1">
+        Cards
+        <span className="text-gray-400 font-normal ml-1 text-xs">({cardCount} card{cardCount !== 1 ? 's' : ''})</span>
+      </h3>
+      <p className="text-[10px] text-gray-400 mb-2">
+        Named option overrides activated on routing loops. Each card targets a submodule at a specific step.
+      </p>
+      <textarea
+        value={json}
+        onChange={(e) => { setJson(e.target.value); setError(''); }}
+        rows={Math.min(20, Math.max(6, json.split('\n').length + 1))}
+        spellCheck={false}
+        className="w-full bg-gray-50 border border-gray-200 rounded px-3 py-2 text-[11px] font-mono text-gray-700 focus:outline-none focus:ring-2 focus:ring-sky-500"
+      />
+      {error && <p className="text-[10px] text-red-500 mt-1">{error}</p>}
+      {warnings.map((w, i) => <p key={i} className="text-[10px] text-amber-600 mt-0.5">{w}</p>)}
+      {dirty && (
+        <button
+          onClick={handleSave}
+          disabled={isPending}
+          className="mt-2 px-3 py-1.5 text-xs bg-sky-600 text-white rounded hover:bg-sky-700 disabled:bg-gray-300"
+        >
+          Save Cards
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Routing Rules Section ─────────────────────────────────────
+
+function RoutingRulesSection({
+  template,
+  onSave,
+  isPending,
+}: {
+  template: TemplateDetail;
+  onSave: (plan: TemplateExecutionPlan) => void;
+  isPending: boolean;
+}) {
+  const plan = template.execution_plan || {};
+  const rules = plan.routing_rules || {};
+  const ruleCount = Object.keys(rules).length;
+  const cardNames = Object.keys(plan.cards || {});
+
+  const [json, setJson] = useState(() => JSON.stringify(rules, null, 2));
+  const [error, setError] = useState('');
+  const [warnings, setWarnings] = useState<string[]>([]);
+
+  const dirty = json !== JSON.stringify(rules, null, 2);
+
+  const handleSave = () => {
+    try {
+      const parsed = JSON.parse(json);
+      const warns: string[] = [];
+      for (const [ruleKey, rule] of Object.entries(parsed) as [string, { target_cards?: string[] }][]) {
+        for (const cardName of rule.target_cards || []) {
+          if (!cardNames.includes(cardName)) {
+            warns.push(`Rule "${ruleKey}": targets unknown card "${cardName}"`);
+          }
+        }
+      }
+      setWarnings(warns);
+      setError('');
+      onSave({ ...plan, routing_rules: parsed });
+    } catch (e) {
+      setError(`Invalid JSON: ${(e as Error).message}`);
+    }
+  };
+
+  const FAILURE_TYPES = ['hallucination:fail', 'citation:fail', 'keyword:fail', 'meta:fail', 'structural:fail'];
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+      <h3 className="text-sm font-semibold text-gray-900 mb-1">
+        Routing Rules
+        <span className="text-gray-400 font-normal ml-1 text-xs">({ruleCount} rule{ruleCount !== 1 ? 's' : ''})</span>
+      </h3>
+      <p className="text-[10px] text-gray-400 mb-1">
+        Map QA failure types to target cards. Available failure types:
+      </p>
+      <div className="flex flex-wrap gap-1 mb-2">
+        {FAILURE_TYPES.map(ft => (
+          <span key={ft} className="text-[10px] bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5 text-gray-500 font-mono">{ft}</span>
+        ))}
+      </div>
+      <textarea
+        value={json}
+        onChange={(e) => { setJson(e.target.value); setError(''); }}
+        rows={Math.min(15, Math.max(4, json.split('\n').length + 1))}
+        spellCheck={false}
+        className="w-full bg-gray-50 border border-gray-200 rounded px-3 py-2 text-[11px] font-mono text-gray-700 focus:outline-none focus:ring-2 focus:ring-sky-500"
+      />
+      {error && <p className="text-[10px] text-red-500 mt-1">{error}</p>}
+      {warnings.map((w, i) => <p key={i} className="text-[10px] text-amber-600 mt-0.5">{w}</p>)}
+      {dirty && (
+        <button
+          onClick={handleSave}
+          disabled={isPending}
+          className="mt-2 px-3 py-1.5 text-xs bg-sky-600 text-white rounded hover:bg-sky-700 disabled:bg-gray-300"
+        >
+          Save Routing Rules
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Escalation Rules Section ──────────────────────────────────
+
+function EscalationRulesSection({
+  template,
+  onSave,
+  isPending,
+}: {
+  template: TemplateDetail;
+  onSave: (plan: TemplateExecutionPlan) => void;
+  isPending: boolean;
+}) {
+  const plan = template.execution_plan || {};
+  const rules = plan.escalation_rules || {};
+
+  const [json, setJson] = useState(() => JSON.stringify(rules, null, 2));
+  const [error, setError] = useState('');
+
+  const dirty = json !== JSON.stringify(rules, null, 2);
+  const ruleCount = Object.keys(rules).length;
+
+  const handleSave = () => {
+    try {
+      const parsed = JSON.parse(json);
+      setError('');
+      onSave({ ...plan, escalation_rules: parsed });
+    } catch (e) {
+      setError(`Invalid JSON: ${(e as Error).message}`);
+    }
+  };
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+      <h3 className="text-sm font-semibold text-gray-900 mb-1">
+        Escalation Rules
+        <span className="text-gray-400 font-normal ml-1 text-xs">({ruleCount} rule{ruleCount !== 1 ? 's' : ''})</span>
+      </h3>
+      <p className="text-[10px] text-gray-400 mb-2">
+        Threshold gates after specific steps. Step 2: volume (URL count). Step 4: quality (word count). Entities below fail_threshold are marked as failed.
+      </p>
+      <textarea
+        value={json}
+        onChange={(e) => { setJson(e.target.value); setError(''); }}
+        rows={Math.min(12, Math.max(4, json.split('\n').length + 1))}
+        spellCheck={false}
+        className="w-full bg-gray-50 border border-gray-200 rounded px-3 py-2 text-[11px] font-mono text-gray-700 focus:outline-none focus:ring-2 focus:ring-sky-500"
+      />
+      {error && <p className="text-[10px] text-red-500 mt-1">{error}</p>}
+      {dirty && (
+        <button
+          onClick={handleSave}
+          disabled={isPending}
+          className="mt-2 px-3 py-1.5 text-xs bg-sky-600 text-white rounded hover:bg-sky-700 disabled:bg-gray-300"
+        >
+          Save Escalation Rules
+        </button>
+      )}
     </div>
   );
 }
