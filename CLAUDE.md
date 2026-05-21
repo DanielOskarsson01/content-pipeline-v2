@@ -611,3 +611,25 @@ Entry types: decision | progress | blocker | idea
 
 **Updated by:** session-closer agent
 
+### Session: 2026-05-21 12:30 — Pipeline run 2931e702 post-mortem + data extraction
+**Accomplished:**
+- Investigated autorun 2931e702 (project "test2", 10 entities, 2026-05-20 14:41–16:16 UTC)
+- Diagnosed result pane bug: auto-execute completes steps but doesn't populate batch-level submodule_runs.output_data — UI reads from that table, finds NULL
+- Diagnosed Traffillions step 2 timeout: 3,634 discovered URLs, url-relevance timed out at 300s, 527 URLs validated before kill — pipeline continued with partial set
+- Diagnosed WeltBet (website unreachable: 30s timeout + Wayback HTTP 451) and Tipico (22 URLs found, 0 after filtering) having zero source material
+- Found 4 entities missing entity_submodule_runs for steps 1-7 entirely (ThriveFantasy, Tipsport, Traffillions, VL Partners); 2 more missing steps 5-7 (Thrill Partners, Wanejo Bets)
+- Extracted step 8 bundle JSONs for all 10 entities → ~/Downloads/run-2931e702-bundles/ (1.5 MB total)
+- Extracted step 5 content markdown for 8 entities → ~/Downloads/run-2931e702-step5-markdown/ (Tipico + WeltBet had no content)
+- Traffillions produced only 2.6 KB of markdown despite 527 validated URLs — content-writer underutilized source material
+
+**Decisions:**
+- Result pane emptiness is a skeleton bug in auto-execute path, not a data loss — per-entity data exists in entity_submodule_runs
+- Steps 9 (Distribution) and 10 (Review) being skipped is expected auto-execute behavior (listed in steps_skipped)
+
+**Blockers/Questions:**
+- BUG: Auto-execute doesn't write batch-level output_data to submodule_runs table — result pane empty for all submodules in auto-executed runs
+- BUG: entity_submodule_runs not created for all entities at all steps during auto-execute (only 4-6 of 10 entities have records for steps 1-7)
+- Traffillions content underutilization: 527 scraped pages produced only 2.6 KB markdown — content-writer may not be consuming all pool items
+
+**Updated by:** session-closer agent
+
