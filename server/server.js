@@ -124,13 +124,17 @@ loadModules();
       console.log(`[startup] Cleaned ${keys.length} stale auto-execute lock(s)`);
     }
 
-    const { data: orphaned } = await db
+    const { data: orphaned, error: orphanedErr } = await db
       .from('pipeline_runs')
       .select('id, auto_execute_state, project_id')
       .eq('status', 'auto_executing')
       .not('auto_execute_state', 'is', null);
 
-    if (!orphaned?.length) return;
+    if (orphanedErr) throw orphanedErr;
+    if (!orphaned?.length) {
+      console.log('[startup] No orphaned auto-executing runs found');
+      return;
+    }
 
     const { executeRun } = await import('./services/autoExecutor.js');
 
