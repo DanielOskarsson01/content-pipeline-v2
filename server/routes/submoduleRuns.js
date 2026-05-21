@@ -1050,23 +1050,29 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
               return true;
             });
           } else if (dataOperation === 'transform') {
-            // Transform replaces items with matching keys — remove ALL existing
-            // items that share a key with the approved items (regardless of source).
-            // Build removal set from BOTH output keys AND original_url fields
-            // so items that were transformed (URL changed) get properly replaced.
+            // Transform replaces items with matching keys — but only items that are
+            // currently in the pool. Items removed by a prior 'remove' operation in
+            // the same step must NOT be re-added (that would undo the filtering).
+            // Build the existing-key set from the current pool first, then only push
+            // items whose key (or original_url) already exists in that set.
+            const existingKeys = new Set(entityPool.map(item => String(item[itemKey] ?? '')));
             const removalSet = new Set();
+            const toAdd = [];
             for (const item of approvedItems) {
-              removalSet.add(String(item[itemKey] ?? ''));
-              if (item.original_url != null && String(item.original_url) !== String(item[itemKey] ?? '')) {
-                removalSet.add(String(item.original_url));
-                console.log(`[transform] Canonicalized: ${item.original_url} → ${item[itemKey]}`);
+              const key = String(item[itemKey] ?? '');
+              const origKey = item.original_url != null && String(item.original_url) !== key
+                ? String(item.original_url) : null;
+              if (existingKeys.has(key) || (origKey && existingKeys.has(origKey))) {
+                removalSet.add(key);
+                if (origKey) {
+                  removalSet.add(origKey);
+                  console.log(`[transform] Canonicalized: ${item.original_url} → ${key}`);
+                }
+                toAdd.push(item);
               }
             }
-            entityPool = entityPool.filter(item => {
-              const key = String(item[itemKey] ?? '');
-              return !removalSet.has(key);
-            });
-            entityPool.push(...approvedItems);
+            entityPool = entityPool.filter(item => !removalSet.has(String(item[itemKey] ?? '')));
+            entityPool.push(...toAdd);
           }
 
           poolMap.set(entityName, entityPool);
