@@ -156,11 +156,15 @@ export function SubmoduleOptions({
                 <label className="block text-xs text-gray-600 mb-1">
                   {option.label}
                 </label>
-                <ReferenceDocSelector
-                  projectId={projectId}
-                  value={Array.isArray(value) ? value as string[] : []}
-                  onChange={(docIds) => onChange(option.name, docIds)}
-                />
+                {projectId ? (
+                  <ReferenceDocSelector
+                    projectId={projectId}
+                    value={Array.isArray(value) ? value as string[] : []}
+                    onChange={(docIds) => onChange(option.name, docIds)}
+                  />
+                ) : (
+                  <p className="text-[10px] text-gray-400 italic">Available when editing from a project run</p>
+                )}
                 {option.description && (
                   <p className="text-[10px] text-gray-400 mt-1">{option.description}</p>
                 )}
@@ -173,11 +177,15 @@ export function SubmoduleOptions({
                 <label className="block text-xs text-gray-600 mb-1">
                   {option.label}
                 </label>
-                <CsvDiscoveryUpload
-                  projectId={projectId}
-                  accept={option.accept}
-                  onChange={(uploadDir) => onChange(option.name, uploadDir)}
-                />
+                {projectId ? (
+                  <CsvDiscoveryUpload
+                    projectId={projectId}
+                    accept={option.accept}
+                    onChange={(uploadDir) => onChange(option.name, uploadDir)}
+                  />
+                ) : (
+                  <p className="text-[10px] text-gray-400 italic">Available when editing from a project run</p>
+                )}
                 {option.description && (
                   <p className="text-[10px] text-gray-400 mt-1">{option.description}</p>
                 )}

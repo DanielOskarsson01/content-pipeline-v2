@@ -109,6 +109,7 @@ export interface SubmoduleManifest {
   id: string;
   name: string;
   description: string;
+  step: number;
   category: string;
   cost: 'cheap' | 'medium' | 'expensive';
   data_operation_default: 'add' | 'remove' | 'transform';

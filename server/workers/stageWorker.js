@@ -35,6 +35,9 @@ const MODEL_MAP = {
   // OpenAI
   'gpt-4o-mini': 'gpt-4o-mini',
   'gpt-4o': 'gpt-4o',
+  // Perplexity
+  sonar: 'sonar',
+  'sonar-pro': 'sonar-pro',
 };
 
 /**
@@ -234,8 +237,50 @@ function buildTools(runId, submoduleId) {
           logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms`);
           return result;
 
+        } else if (provider === 'perplexity') {
+          const apiKey = process.env.PERPLEXITY_API_KEY;
+          if (!apiKey) throw new Error('PERPLEXITY_API_KEY not set in environment');
+
+          const { status, body } = await withTimeout(async (signal) => {
+            const res = await fetch('https://api.perplexity.ai/v1/chat/completions', {
+              method: 'POST',
+              signal,
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+              },
+              body: JSON.stringify({
+                model: modelId,
+                messages: [{ role: 'user', content: prompt }],
+                ...(max_tokens && { max_tokens }),
+                ...(temperature != null && { temperature }),
+              }),
+            });
+            return { status: res.status, body: await res.text() };
+          }, AI_REQUEST_TIMEOUT_MS);
+
+          if (status !== 200) {
+            const err = new Error(`Perplexity API error ${status}: ${body.slice(0, 500)}`);
+            err.statusCode = status;
+            throw err;
+          }
+
+          const data = JSON.parse(body);
+          const duration_ms = Date.now() - startTime;
+          const result = {
+            text: data.choices?.[0]?.message?.content || '',
+            tokens_in: data.usage?.prompt_tokens || 0,
+            tokens_out: data.usage?.completion_tokens || 0,
+            model: modelId,
+            provider: 'perplexity',
+            citations: data.citations || [],
+            duration_ms,
+          };
+          logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms, ${result.citations.length} citations`);
+          return result;
+
         } else {
-          throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai`);
+          throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity`);
         }
       }
 

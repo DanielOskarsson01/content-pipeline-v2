@@ -102,6 +102,14 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
             <AutoExecuteButton runId={runId} />
           )}
           <SaveAsTemplateButton runId={runId} />
+          {project?.template_id && (
+            <Link
+              to={`/templates/${project.template_id}`}
+              className="text-sm text-gray-500 hover:text-gray-700"
+            >
+              Edit Template
+            </Link>
+          )}
           <Link
             to={`/projects/${projectId}/runs/${runId}/report`}
             className="text-sm text-brand-600 hover:text-brand-700"

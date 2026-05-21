@@ -1,8 +1,10 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useMemo, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import { useAppStore } from '../../stores/appStore';
+import { STEP_CONFIG } from '../../config/stepConfig';
+import { SubmoduleOptions } from '../primitives/SubmoduleOptions';
 import type {
   TemplateDetail, SubmoduleManifest,
   TemplatePresetMap, TemplatePresetMapEntry, TemplateExecutionPlan, TemplateSeedConfig,
@@ -134,7 +136,16 @@ export function TemplateEditor() {
           <PresetMapSection template={template} />
           <ExecutionPlanSection
             template={template}
-            onSave={(execution_plan) => updateMutation.mutate({ execution_plan })}
+            onSave={(execution_plan, addedSubmoduleId) => {
+              const update: Record<string, unknown> = { execution_plan };
+              if (addedSubmoduleId) {
+                const pm = template.preset_map || {};
+                if (!pm[addedSubmoduleId]) {
+                  update.preset_map = { ...pm, [addedSubmoduleId]: { fallback_values: {} } };
+                }
+              }
+              updateMutation.mutate(update);
+            }}
             isPending={updateMutation.isPending}
           />
           <CardsSection
@@ -317,31 +328,47 @@ function PresetMapEntry({
   isPending: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  // Local state for editing — only saves on explicit button click
-  const [localValues, setLocalValues] = useState<Record<string, string>>(() => {
-    const vals: Record<string, string> = {};
-    for (const [k, v] of Object.entries(entry.fallback_values || {})) {
-      vals[k] = typeof v === 'string' ? v : JSON.stringify(v);
+  const manifestOptions = useMemo(() => {
+    return allSubmodules.find(s => s.id === submoduleId)?.options || [];
+  }, [allSubmodules, submoduleId]);
+
+  // Merge manifest defaults with saved fallback_values — shows ALL options
+  const initialValues = useMemo(() => {
+    const vals: Record<string, unknown> = {};
+    for (const opt of manifestOptions) {
+      vals[opt.name] = entry.fallback_values?.[opt.name] ?? opt.default;
     }
     return vals;
-  });
+  }, [manifestOptions, entry.fallback_values]);
 
-  const manifest = allSubmodules.find(s => s.id === submoduleId);
-  const optionCount = Object.keys(entry.fallback_values || {}).length;
+  const [localValues, setLocalValues] = useState<Record<string, unknown>>(initialValues);
 
-  // Check if local values differ from saved entry
-  const dirty = Object.entries(localValues).some(([k, v]) => {
-    const saved = entry.fallback_values?.[k];
-    const savedStr = typeof saved === 'string' ? saved : JSON.stringify(saved);
-    return v !== savedStr;
-  });
+  // Sync local state when saved values change (e.g. after save round-trip)
+  useEffect(() => {
+    setLocalValues(initialValues);
+  }, [initialValues]);
+
+  const optionCount = manifestOptions.length;
+
+  // Check if local values differ from initial (saved + defaults)
+  const dirty = useMemo(() => {
+    return JSON.stringify(localValues) !== JSON.stringify(initialValues);
+  }, [localValues, initialValues]);
 
   const handleSave = () => {
-    const parsed: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(localValues)) {
-      parsed[k] = tryParseJson(v);
+    // Only persist values that differ from manifest defaults (keep fallback_values lean)
+    const nonDefault: Record<string, unknown> = {};
+    for (const opt of manifestOptions) {
+      const val = localValues[opt.name];
+      if (JSON.stringify(val) !== JSON.stringify(opt.default)) {
+        nonDefault[opt.name] = val;
+      }
     }
-    onUpdate({ ...entry, fallback_values: parsed });
+    onUpdate({ ...entry, fallback_values: nonDefault });
+  };
+
+  const handleOptionChange = (name: string, value: unknown) => {
+    setLocalValues(prev => ({ ...prev, [name]: value }));
   };
 
   return (
@@ -371,24 +398,17 @@ function PresetMapEntry({
 
       {expanded && (
         <div className="border-t border-gray-200 px-3 py-2 space-y-2">
-          {Object.entries(localValues).map(([optName, value]) => {
-            const optDef = manifest?.options?.find(o => o.name === optName);
-            return (
-              <div key={optName} className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-600 w-32 shrink-0 truncate" title={optName}>
-                  {optDef?.label || optName}
-                </span>
-                <input
-                  type="text"
-                  value={value}
-                  onChange={(e) => {
-                    setLocalValues(prev => ({ ...prev, [optName]: e.target.value }));
-                  }}
-                  className="flex-1 bg-white border border-gray-200 rounded px-2 py-1 text-[10px] text-gray-700 font-mono"
-                />
-              </div>
-            );
-          })}
+          {manifestOptions.length > 0 ? (
+            <SubmoduleOptions
+              options={manifestOptions}
+              values={localValues}
+              onChange={handleOptionChange}
+              projectId=""
+              submoduleId={submoduleId}
+            />
+          ) : (
+            <p className="text-[10px] text-gray-400">No options defined in manifest</p>
+          )}
           {dirty && (
             <button
               onClick={handleSave}
@@ -404,15 +424,6 @@ function PresetMapEntry({
   );
 }
 
-function tryParseJson(value: string): unknown {
-  try {
-    const parsed = JSON.parse(value);
-    return parsed;
-  } catch {
-    return value;
-  }
-}
-
 // ── Execution Plan Section ───────────────────────────────────
 
 function ExecutionPlanSection({
@@ -421,14 +432,13 @@ function ExecutionPlanSection({
   isPending,
 }: {
   template: TemplateDetail;
-  onSave: (plan: TemplateExecutionPlan) => void;
+  onSave: (plan: TemplateExecutionPlan, addedSubmoduleId?: string) => void;
   isPending: boolean;
 }) {
   const plan = template.execution_plan || {};
   const submodulesPerStep = plan.submodules_per_step || {};
-  const entries = Object.entries(submodulesPerStep).sort(([a], [b]) => Number(a) - Number(b));
 
-  // Fetch submodule names
+  // Fetch all registered submodules (with full manifest incl. step field)
   const { data: allSubmodules } = useQuery({
     queryKey: ['submodules-full'],
     queryFn: api.getSubmodulesFull,
@@ -439,22 +449,34 @@ function ExecutionPlanSection({
     return sub?.name || id;
   };
 
-  // Must be before early return (React Hooks rules)
+  // Local state for dropdowns
   const [selectedPause, setSelectedPause] = useState('');
+  const [selectedAdd, setSelectedAdd] = useState<Record<number, string>>({});
 
-  if (entries.length === 0) {
-    return (
-      <div className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
-        <h3 className="text-sm font-semibold text-gray-900 mb-2">Execution Plan</h3>
-        <p className="text-xs text-gray-400">No execution plan. Will be populated when template is saved from a run.</p>
-      </div>
-    );
-  }
+  // ── Submodule add/remove per step ──
 
-  // Pause after submodules state
+  const addToStep = (stepIndex: number, subId: string) => {
+    if (!subId) return;
+    const current = submodulesPerStep[String(stepIndex)] || [];
+    if (current.includes(subId)) return;
+    const updated = { ...submodulesPerStep, [String(stepIndex)]: [...current, subId] };
+    onSave({ ...plan, submodules_per_step: updated }, subId);
+    setSelectedAdd(prev => ({ ...prev, [stepIndex]: '' }));
+  };
+
+  const removeFromStep = (stepIndex: number, subId: string) => {
+    const current = (submodulesPerStep[String(stepIndex)] || []).filter((id: string) => id !== subId);
+    const updated = { ...submodulesPerStep };
+    if (current.length === 0) delete updated[String(stepIndex)];
+    else updated[String(stepIndex)] = current;
+    onSave({ ...plan, submodules_per_step: updated });
+  };
+
+  // ── Pause after submodules ──
+
+  const allConfiguredIds = [...new Set(Object.values(submodulesPerStep).flat() as string[])];
   const pauseAfter = plan.pause_after_submodules || [];
-  const allSubmoduleIds = [...new Set(entries.flatMap(([, subs]) => subs as string[]))];
-  const availableForPause = allSubmoduleIds.filter(id => !pauseAfter.includes(id));
+  const availableForPause = allConfiguredIds.filter(id => !pauseAfter.includes(id));
 
   const addPause = (subId: string) => {
     if (!subId) return;
@@ -466,27 +488,109 @@ function ExecutionPlanSection({
     onSave({ ...plan, pause_after_submodules: pauseAfter.filter(id => id !== subId) });
   };
 
+  // ── Skip steps ──
+
+  const skipSteps = plan.skip_steps || [];
+  const toggleSkip = (step: number) => {
+    const updated = skipSteps.includes(step)
+      ? skipSteps.filter(s => s !== step)
+      : [...skipSteps, step].sort((a, b) => a - b);
+    onSave({ ...plan, skip_steps: updated });
+  };
+
+  // ── Pause before steps ──
+
+  const pauseBefore = plan.pause_before_steps || [];
+  const togglePauseBefore = (step: number) => {
+    const updated = pauseBefore.includes(step)
+      ? pauseBefore.filter(s => s !== step)
+      : [...pauseBefore, step].sort((a, b) => a - b);
+    onSave({ ...plan, pause_before_steps: updated });
+  };
+
+  // ── Failure thresholds ──
+
+  const thresholds = plan.failure_thresholds || {};
+  const updateThreshold = (stepIdx: string, value: string) => {
+    const updated = { ...thresholds };
+    if (value === '' || value === undefined) {
+      delete updated[stepIdx];
+    } else {
+      updated[stepIdx] = parseFloat(value);
+    }
+    onSave({ ...plan, failure_thresholds: updated });
+  };
+
+  // Steps that have submodules configured (for skip/pause/threshold controls)
+  const configuredSteps = STEP_CONFIG
+    .filter(s => (submodulesPerStep[String(s.index)] || []).length > 0)
+    .map(s => s.index);
+
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-4 mb-4">
       <h3 className="text-sm font-semibold text-gray-900 mb-3">Execution Plan</h3>
-      <p className="text-[10px] text-gray-400 mb-2">Submodules used per step during auto-execute</p>
-      <div className="space-y-1">
-        {entries.map(([stepIdx, subs]) => (
-          <div key={stepIdx} className="flex items-start gap-2 bg-gray-50 rounded px-3 py-1.5">
-            <span className="text-[10px] text-gray-500 font-medium w-16 shrink-0">Step {stepIdx}</span>
-            <div className="flex flex-wrap gap-1">
-              {(subs as string[]).map(subId => (
-                <span key={subId} className="text-[10px] bg-white border border-gray-200 rounded px-1.5 py-0.5 text-gray-600">
-                  {submoduleName(subId)}
-                </span>
-              ))}
+
+      {/* ── Submodules per step ── */}
+      <p className="text-[10px] text-gray-400 mb-2">Select which submodules run at each step</p>
+      <div className="space-y-1 mb-4">
+        {STEP_CONFIG.map((stepCfg) => {
+          const configured = (submodulesPerStep[String(stepCfg.index)] || []) as string[];
+          const available = (allSubmodules || [])
+            .filter(s => s.step === stepCfg.index && !configured.includes(s.id));
+          const addValue = selectedAdd[stepCfg.index] || '';
+
+          return (
+            <div key={stepCfg.index} className="flex items-start gap-2 bg-gray-50 rounded px-3 py-1.5">
+              <span className="text-[10px] text-gray-500 font-medium w-28 shrink-0 pt-0.5">
+                {stepCfg.index}. {stepCfg.name}
+              </span>
+              <div className="flex flex-wrap items-center gap-1 flex-1 min-w-0">
+                {configured.map(subId => (
+                  <span key={subId} className="inline-flex items-center gap-0.5 text-[10px] bg-white border border-gray-200 rounded px-1.5 py-0.5 text-gray-600">
+                    {submoduleName(subId)}
+                    <button
+                      onClick={() => removeFromStep(stepCfg.index, subId)}
+                      disabled={isPending}
+                      className="text-gray-400 hover:text-red-500 ml-0.5"
+                    >
+                      &times;
+                    </button>
+                  </span>
+                ))}
+                {available.length > 0 && (
+                  <span className="inline-flex items-center gap-1">
+                    <select
+                      value={addValue}
+                      onChange={e => setSelectedAdd(prev => ({ ...prev, [stepCfg.index]: e.target.value }))}
+                      className="text-[10px] border border-gray-200 rounded px-1 py-0.5 text-gray-500 bg-white"
+                    >
+                      <option value="">+ add...</option>
+                      {available.map(s => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </select>
+                    {addValue && (
+                      <button
+                        onClick={() => addToStep(stepCfg.index, addValue)}
+                        disabled={isPending}
+                        className="text-[10px] px-1.5 py-0.5 bg-sky-600 text-white rounded hover:bg-sky-700 disabled:opacity-50"
+                      >
+                        Add
+                      </button>
+                    )}
+                  </span>
+                )}
+                {configured.length === 0 && available.length === 0 && (
+                  <span className="text-[10px] text-gray-300 italic">no modules registered</span>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      {/* Pause after submodule */}
-      <div className="mt-4 pt-3 border-t border-gray-100">
+      {/* ── Pause after submodule ── */}
+      <div className="pt-3 border-t border-gray-100">
         <h4 className="text-xs font-medium text-gray-700 mb-2">Pause after submodule</h4>
         <p className="text-[10px] text-gray-400 mb-2">Auto-executor pauses after these submodules so you can review and approve results before continuing.</p>
 
@@ -529,11 +633,112 @@ function ExecutionPlanSection({
           </div>
         )}
       </div>
+
+      {/* ── Skip steps ── */}
+      {configuredSteps.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-gray-100">
+          <h4 className="text-xs font-medium text-gray-700 mb-2">Skip steps</h4>
+          <p className="text-[10px] text-gray-400 mb-2">Checked steps will be skipped during auto-execute.</p>
+          <div className="flex flex-wrap gap-3">
+            {configuredSteps.map(step => (
+              <label key={step} className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={skipSteps.includes(step)}
+                  onChange={() => toggleSkip(step)}
+                  disabled={isPending}
+                  className="accent-sky-600"
+                />
+                <span className="text-[10px] text-gray-600">Step {step}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Pause before steps ── */}
+      {configuredSteps.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-gray-100">
+          <h4 className="text-xs font-medium text-gray-700 mb-2">Pause before steps</h4>
+          <p className="text-[10px] text-gray-400 mb-2">Auto-executor pauses before entering these steps for manual review.</p>
+          <div className="flex flex-wrap gap-3">
+            {configuredSteps.map(step => (
+              <label key={step} className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={pauseBefore.includes(step)}
+                  onChange={() => togglePauseBefore(step)}
+                  disabled={isPending}
+                  className="accent-blue-600"
+                />
+                <span className="text-[10px] text-gray-600">Step {step}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Failure thresholds ── */}
+      {configuredSteps.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-gray-100">
+          <h4 className="text-xs font-medium text-gray-700 mb-2">Failure thresholds</h4>
+          <p className="text-[10px] text-gray-400 mb-2">Max failure rate (0.0–1.0) before auto-execute halts. Leave blank for default.</p>
+          <div className="space-y-1">
+            {configuredSteps.map(step => (
+              <ThresholdInput
+                key={step}
+                step={step}
+                value={thresholds[String(step)]}
+                onCommit={(value) => updateThreshold(String(step), value)}
+                isPending={isPending}
+              />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ── Cards Section ─────────────────────────────────────────────
+
+/** Number input that only saves on blur, avoiding API call per keystroke */
+function ThresholdInput({ step, value, onCommit, isPending }: {
+  step: number;
+  value: number | undefined;
+  onCommit: (value: string) => void;
+  isPending: boolean;
+}) {
+  const [local, setLocal] = useState(value != null ? String(value) : '');
+
+  useEffect(() => {
+    setLocal(value != null ? String(value) : '');
+  }, [value]);
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] text-gray-500 w-16 shrink-0">Step {step}</span>
+      <input
+        type="number"
+        min="0"
+        max="1"
+        step="0.05"
+        value={local}
+        onChange={e => setLocal(e.target.value)}
+        onBlur={() => {
+          const saved = value != null ? String(value) : '';
+          if (local !== saved) onCommit(local);
+        }}
+        onKeyDown={e => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+        }}
+        disabled={isPending}
+        placeholder="default"
+        className="w-24 bg-white border border-gray-200 rounded px-2 py-1 text-[10px] text-gray-700 focus:outline-none focus:ring-1 focus:ring-sky-500"
+      />
+    </div>
+  );
+}
 
 function CardsSection({
   template,

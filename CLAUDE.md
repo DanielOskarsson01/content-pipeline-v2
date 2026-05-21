@@ -591,3 +591,23 @@ Entry types: decision | progress | blocker | idea
 
 **Updated by:** session-closer agent
 
+### Session: 2026-05-21 11:46 — Perplexity keyword research + template editor UI
+**Accomplished:**
+- Added Perplexity as AI provider in stageWorker.js (MODEL_MAP: sonar/sonar-pro, callProvider branch with citations support, retry/timeout)
+- Added PERPLEXITY_API_KEY placeholder to .env
+- Template editor overhaul: SubmoduleOptions reused in preset map (replaces raw text inputs), execution plan gets add/remove submodules per step, skip steps, pause before steps, failure thresholds UI
+- RunView: added "Edit Template" link when project has template_id
+- PresetField: auto-global save when no projectId, guard doc_selector/file_upload when no projectId
+- step.ts: added `step` field to SubmoduleManifest interface
+
+**Decisions:**
+- Perplexity provider follows same pattern as anthropic/openai in stageWorker.js — gets retry logic, timeout, logging for free
+- `citations` field added to AI response object (only populated for perplexity provider)
+- Template preset map now uses full SubmoduleOptions component instead of raw key/value text inputs
+
+**Blockers/Questions:**
+- PERPLEXITY_API_KEY empty — needs API key from perplexity.ai before keyword research can be tested
+- Skeleton + modules repos both ahead of origin (1 and 2 commits respectively) — need push
+
+**Updated by:** session-closer agent
+

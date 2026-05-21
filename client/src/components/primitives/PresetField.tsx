@@ -28,7 +28,7 @@ export function PresetField({
 
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
-  const [saveGlobal, setSaveGlobal] = useState(false);
+  const [saveGlobal, setSaveGlobal] = useState(!projectId);
 
   const activePreset = presets?.find(
     (p) => JSON.stringify(p.preset_value) === JSON.stringify(currentValue)
@@ -128,15 +128,19 @@ export function PresetField({
               autoFocus
               onKeyDown={(e) => e.key === 'Enter' && handleSave()}
             />
-            <label className="flex items-center gap-2 text-xs text-gray-600 mb-3">
-              <input
-                type="checkbox"
-                checked={saveGlobal}
-                onChange={(e) => setSaveGlobal(e.target.checked)}
-                className="rounded border-gray-300 text-[#0891B2]"
-              />
-              Global preset (available in all projects)
-            </label>
+            {projectId ? (
+              <label className="flex items-center gap-2 text-xs text-gray-600 mb-3">
+                <input
+                  type="checkbox"
+                  checked={saveGlobal}
+                  onChange={(e) => setSaveGlobal(e.target.checked)}
+                  className="rounded border-gray-300 text-[#0891B2]"
+                />
+                Global preset (available in all projects)
+              </label>
+            ) : (
+              <p className="text-[10px] text-gray-400 mb-3">Preset will be saved globally</p>
+            )}
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setShowSaveDialog(false)}
