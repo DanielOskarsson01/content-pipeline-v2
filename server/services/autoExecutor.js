@@ -618,6 +618,20 @@ async function pollBatchCompletion(batchId, timeoutSec, signal) {
   while (Date.now() < deadline) {
     if (signal.aborted) return 'aborted';
 
+    // Check batch-level completion first. batchWorker fires when BullMQ finalizes the
+    // parent flow job — which happens even when stalled child jobs are killed internally
+    // without updating entity_submodule_runs. If the batch record is already done, exit
+    // immediately rather than waiting the full 6h for zombie entity rows.
+    const { data: batchRecord } = await db
+      .from('submodule_runs')
+      .select('status')
+      .eq('batch_id', batchId)
+      .maybeSingle();
+
+    if (batchRecord && (batchRecord.status === 'completed' || batchRecord.status === 'failed')) {
+      return 'done';
+    }
+
     const { count } = await db
       .from('entity_submodule_runs')
       .select('id', { count: 'exact', head: true })

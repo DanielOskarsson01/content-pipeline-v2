@@ -36,8 +36,21 @@ const batchWorker = new Worker(
     const failed = entityRuns.filter(r => r.status === 'failed').length;
     const total = entityRuns.length;
 
+    // Clean up zombie entities stuck in running/pending due to stalled BullMQ jobs.
+    // These never got a chance to write their final status — mark them failed so
+    // pollBatchCompletion (which checks entity rows) can exit cleanly on resume.
+    const zombies = entityRuns.filter(r => r.status === 'running' || r.status === 'pending');
+    if (zombies.length > 0) {
+      const zombieIds = zombies.map(r => r.id);
+      await db
+        .from('entity_submodule_runs')
+        .update({ status: 'failed', error: 'Job stalled — killed by BullMQ before completion', completed_at: new Date().toISOString() })
+        .in('id', zombieIds);
+      console.log(`[batch] Cleaned up ${zombies.length} zombie entity run(s) for batch ${batch_id}`);
+    }
+
     // Determine batch status: all success = completed, any fail = completed (partial failures are normal)
-    const batchStatus = total === failed ? 'failed' : 'completed';
+    const batchStatus = total === failed + zombies.length ? 'failed' : 'completed';
 
     // 2. Update submodule_runs batch record
     const { error: updateErr } = await db
@@ -46,7 +59,7 @@ const batchWorker = new Worker(
         status: batchStatus,
         completed_count: completed,
         completed_at: new Date().toISOString(),
-        progress: { current: total, total, message: `${completed} succeeded, ${failed} failed` },
+        progress: { current: total, total, message: `${completed} succeeded, ${failed + zombies.length} failed` },
       })
       .eq('id', submodule_run_id);
 
@@ -94,7 +107,7 @@ const batchWorker = new Worker(
       }
     }
 
-    console.log(`[batch] Finalized: ${submodule_id} — ${completed}/${total} succeeded, ${failed} failed`);
+    console.log(`[batch] Finalized: ${submodule_id} — ${completed}/${total} succeeded, ${failed + zombies.length} failed`);
 
     if (batchStatus === 'failed') {
       notifyFailure({ submoduleId: submodule_id, submoduleRunId: submodule_run_id, error: `All ${total} entities failed` });
