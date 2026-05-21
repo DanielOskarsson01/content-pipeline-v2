@@ -58,6 +58,7 @@ const batchWorker = new Worker(
       .update({
         status: batchStatus,
         completed_count: completed,
+        failed_count: failed + zombies.length,
         completed_at: new Date().toISOString(),
         progress: { current: total, total, message: `${completed} succeeded, ${failed + zombies.length} failed` },
       })

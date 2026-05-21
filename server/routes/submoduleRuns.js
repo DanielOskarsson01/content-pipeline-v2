@@ -362,6 +362,44 @@ executeRouter.post('/run', async (req, res) => {
     let originalEntities = null; // Keep full entity objects for input_data
     if (filteredPools.length > 0) {
       entities = filteredPools;
+
+      // Defensive merge: if inputData has entities not in the pool (e.g. stale pool from a
+      // previous partial run where fewer entities were processed), add the missing ones.
+      // This prevents valid entities from being silently dropped when auto-execute re-runs
+      // a step that was partially initialized by a previous manual or partial run.
+      // Only applies on non-loop passes — loop passes intentionally filter to 'pending' subset.
+      if (!isLoopPass && inputData?.entities?.length > filteredPools.length) {
+        const existingNames = new Set(filteredPools.map(p => p.entity_name));
+        const missingEntities = inputData.entities.filter(e => {
+          const name = e.name || e.entity_name || 'unknown';
+          return !existingNames.has(name);
+        });
+
+        if (missingEntities.length > 0) {
+          const newPoolRows = missingEntities.map(e => ({
+            run_id: runId,
+            step_index: stepIdx,
+            entity_name: e.name || e.entity_name || 'unknown',
+            pool_items: e.items || [],
+            status: 'pending',
+          }));
+
+          const { error: mergeErr } = await db
+            .from('entity_stage_pool')
+            .upsert(newPoolRows, { onConflict: 'run_id,step_index,entity_name', ignoreDuplicates: true });
+
+          if (!mergeErr) {
+            entities = [...filteredPools, ...newPoolRows.map(r => ({ entity_name: r.entity_name, pool_items: r.pool_items, status: r.status }))];
+            console.log(`[submoduleRuns] Merged ${missingEntities.length} missing entities into pool at step ${stepIdx} (was ${filteredPools.length}, now ${entities.length})`);
+
+            // Update stage entity_count to reflect actual count
+            await db
+              .from('pipeline_stages')
+              .update({ entity_count: entities.length })
+              .eq('id', stage.id);
+          }
+        }
+      }
     } else if (inputData?.entities?.length > 0) {
       // First submodule at this step — initialize entity_stage_pool from input entities
       originalEntities = inputData.entities;
