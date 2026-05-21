@@ -611,6 +611,25 @@ Entry types: decision | progress | blocker | idea
 
 **Updated by:** session-closer agent
 
+### Session: 2026-05-22 — Phase 3 planning + RPC bug fix
+**Accomplished:**
+- Ran full Phase 3 planning via Plan agent — discovered most multi-card infrastructure already built in previous sessions
+- Confirmed Bug 2 (escalationRules passthrough) was a false alarm — already correctly wired in runs.js lines 1154 + 1228
+- Fixed critical Bug 1: apply_entity_routing RPC only accepted 2 params but routingHandler.js calls with 3 (p_routing_step) — every auto-execute routing call was silently failing
+- Created sql/migration_routing_phase3_rpc_fix.sql with DEFAULT 10, pipeline-ceiling comments, and source_step fix in entity_routing_log INSERT
+- Applied migration to production Supabase (fevxvwqjhndetktujeuu), verified signature: `p_run_id uuid, p_routing_decisions jsonb, p_routing_step integer DEFAULT 10`
+- Pre-commit code review found DEFAULT 7 should be DEFAULT 10 — fixed before committing
+- Committed (d881612) and pushed to origin/main
+
+**Decisions:**
+- DEFAULT 10 (not 7) for p_routing_step — matches legacy hardcoded value and JS-side default in routingHandler.js; all callers supply explicitly so default is safety-net only
+- Two remaining hardcoded 10s in RPC body (step_index = 10, step_index <= 10) are intentional pipeline-ceiling constants, not routing step references — documented with inline comments
+
+**Blockers/Questions:**
+- Phase 3 remaining: Batch 1 (model_select on 4 QA manifests), Batch 2 (belowThreshold escalation warning), Batch 3 (loop_generation decision map fix), Batch 4 (phase3-cards-routing-rules.sql production run), Batch 5 (server-side card validation route), Batch 6 (visual card builder UI, optional), then 50-entity E2E test
+
+**Updated by:** session-closer agent
+
 ### Session: 2026-05-21 12:30 — Pipeline run 2931e702 post-mortem + data extraction
 **Accomplished:**
 - Investigated autorun 2931e702 (project "test2", 10 entities, 2026-05-20 14:41–16:16 UTC)
