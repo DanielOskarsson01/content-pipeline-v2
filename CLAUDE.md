@@ -652,3 +652,32 @@ Entry types: decision | progress | blocker | idea
 
 **Updated by:** session-closer agent
 
+### Session: 2026-05-22 — Supabase performance diagnostic + compute upgrade + zombie cleanup
+**Accomplished:**
+- Full CTO audit of git state, deploy state, and prod DB. Confirmed Hetzner is on `f9c1e55` (latest skeleton commit) and modules repo synced (seo-planner v2 keyword research present). PM2 stable (`unstable_restarts=0` on all workers).
+- Diagnosed recent `canceling statement due to statement timeout` errors (May 5, May 21) in api-error.log. Root cause was NOT statement_timeout config — `authenticator` already at 120s on prod (not the 8s default another chat assumed). Real cause: NANO compute (`t4g.nano`, 0.5 GB RAM, burstable 10% baseline CPU) exhausting burst credits under 50-entity workloads.
+- Verified entity_stage_pool plumbing is healthy: index `idx_entity_stage_pool_run_step` on `(run_id, step_index)` exists, JSONB `pool_items` payloads are tiny (avg 712 bytes max 722 at step 5). No structural perf bug — just compute starvation.
+- Found 9 zombie `pipeline_runs` stuck in `status='running'` since May 5-13 — orphans from before the May startup-recovery fixes (`f13fc64`, `c90ae64`). Cleaned them up via transactional DELETE across all FK children (decision_log, entity_routing_log, entity_run_meta, entity_stage_pool, entity_submodule_runs, pipeline_metrics, pipeline_stages, run_submodule_config, step_context, submodule_runs, submodule_run_item_data) + their polymorphic submodule_run_item_data rows. 15 runs → 6 runs (5 completed + 1 paused).
+- Ran `VACUUM (ANALYZE)` on all 6 bloated tables. Table sizes unchanged on disk as expected (VACUUM ANALYZE marks freed pages reusable; doesn't shrink files). Future inserts reuse the space.
+- **Upgraded Supabase compute from NANO → Small** (`t4g.small`, 2 GB RAM, 2x CPU baseline). Memory chart confirms cache + buffers jumped from ~300 MB to ~1.4 GB after restart. This is the actual fix for the timeout symptoms.
+- Discovered stale claim in `Content-Pipeline/PROJECT_STATUS.md`: says "Git repo initialized on Hetzner (`/opt/content-pipeline-v2/`), deploys via `git pull` + PM2 restart" — false. Neither skeleton nor modules dirs on Hetzner have `.git`. Actual deploy is rsync via `deploy.sh`. Needs correction (not done this session).
+- Discovered earlier-session bug: modules-repo session log `528e685` claims `failed_count` was added to batchWorker, but skeleton commit `2117765` reverted that line 34 minutes later (column doesn't exist on `submodule_runs`). Session log entry still uncorrected.
+- Wrote memory file at `~/.claude/projects/.../memory/supabase-plan.md` so future sessions don't reach for "free tier" framing — DB is on paid Pro with NANO compute add-on (now Small).
+- Saved diagnostic SQL bundle at `sql/diagnostic_statement_timeout.sql` for future reference.
+
+**Decisions:**
+- Reject the "ALTER ROLE authenticator SET statement_timeout = '300s'" suggestion from another chat — 120s was already in place, and the symptom was compute starvation not query slowness. 300s would mask, not fix.
+- Compute upgrade Small ($15/mo add-on) over Micro ($10/mo): $4 more for 2x RAM and 2x CPU baseline credits accrual. Right tier for 50-entity Phase 3 E2E test.
+- `VACUUM (ANALYZE)` not `VACUUM FULL` — reusable space inside files is enough; FULL would lock tables exclusively during the rewrite (risky on prod).
+- Targeted zombie cleanup by `status='running'` rather than time-based retention — 30-day cutoff returned 0 rows because the DB only has 15 total runs. Issue was stuck state, not accumulation.
+- Don't `VACUUM FULL` the 175 MB on `entity_submodule_runs` — most of it is legitimate output_data from completed May 20 test2 runs, not bloat. Live within the data volume; reclaim only if real bloat shows up.
+
+**Blockers/Questions:**
+- Phase 3 validation run cleared to proceed: fresh 5-entity project, auto-execute Step 1-7 on the Small instance. Watch for entity_submodule_runs population (entity-merge fix `52540ae`), result pane content per entity, and absence of timeouts/500s.
+- `PROJECT_STATUS.md` still claims git-pull deploy on Hetzner — should be corrected to reflect rsync deploy.
+- `Content-Pipeline/PROJECT_STATUS.md` is also marked "Last Updated: 2026-04-28" — currently outdated by ~4 weeks of work.
+- 4 RLS Disabled critical advisor warnings on `pipeline_metrics`, `option_presets`, `template_preset_mappings`, `submodule_run_item_data`. Low actual risk (server uses service_role, no anon access exposed), but should be enabled or explicitly opted out.
+- modules-repo session log `528e685` `failed_count` claim still wrong — should be amended with reference to `2117765` revert.
+
+**Updated by:** CTO agent (manual session entry)
+
