@@ -56,7 +56,7 @@ async function cleanOldRuns() {
     .from('pipeline_runs')
     .select('id')
     .in('status', ['completed', 'halted', 'abandoned'])
-    .lt('created_at', cutoff);
+    .lt('started_at', cutoff);
 
   if (fetchErr) {
     console.error('[retention] Failed to query old runs:', fetchErr.message);
