@@ -53,6 +53,70 @@ The spec ALWAYS wins. Rewrite the code to match the spec. Do not adapt the spec 
 
 ---
 
+## 🔁 Workflow Patterns
+
+### 1. Subagent-driven vs inline execution
+
+Apply silently for clear cases. Only ask when genuinely ambiguous.
+
+**Use subagent-driven** when ALL of these hold:
+- Plan document exists with discrete tasks
+- More than 4-5 tasks
+- Explicit sequencing or dependencies between tasks
+- Estimated work spans >2 hours
+- Natural checkpoints exist for human review
+
+**Use inline** when ANY of these hold:
+- Investigation/debugging without clear endpoint
+- Single coherent change (<1 hour)
+- Architectural discussion needing back-and-forth
+- Continuous reasoning where context accumulation helps
+- User asks a question rather than requesting execution
+
+**Ask the user** when a plan exists but the execution style is ambiguous, or the work could reasonably go either way. Don't ask for clear-cut cases — apply the rule and proceed.
+
+### 2. Review cycles for architectural changes
+
+Architectural changes require `brutal-critic` and CTO review BEFORE implementation:
+- Data model changes (schema, manifest fields, contract definitions)
+- Cross-module interfaces (how submodules interact, how skeleton interprets module declarations)
+- Execution semantics (`data_operation`, pool handling, routing logic)
+- Multi-phase plans (Phase 3, Phase 4, etc.)
+
+Skip review for: single-function bug fixes, manifest field *value* changes (not new fields), UI tweaks, documentation updates.
+
+When uncertain whether a change is architectural, default to review.
+
+### 3. Multi-task execution checkpoints
+
+Plans with >5 tasks require explicit human review checkpoints every 3-5 tasks. Don't batch through silently. Surface results at each checkpoint, wait for review, proceed only when confirmed.
+
+Natural checkpoint moments:
+- After a test suite completes
+- After an audit/inspection task produces output for review
+- After deployment, before validation
+- Before any irreversible action (commits, deploys, schema changes)
+
+### 4. Strategic vs tactical boundary
+
+Agents handle tactical execution. The user holds strategic alignment.
+
+**Tactical (agent decides):**
+- How to implement a specified change
+- Which library to use for a defined task
+- Code organization within a module
+- Test cases for known requirements
+
+**Strategic (surface to user):**
+- What to build vs defer
+- How architectural pieces connect
+- Whether a change affects future work directions
+- Trade-offs that have product implications
+
+When uncertain whether a decision is strategic or tactical, surface to the user rather than improvising. The cost of asking is low; the cost of unilateral strategic decisions is high.
+
+---
+
 ## 📚 Required Reading (in order)
 
 | Document | Location | What it tells you |
