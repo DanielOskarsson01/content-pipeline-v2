@@ -620,6 +620,7 @@ submoduleRunRouter.get('/:id', async (req, res) => {
 
       const completed = entities.filter(e => e.status === 'completed' || e.status === 'approved').length;
       const failed = entities.filter(e => e.status === 'failed').length;
+      const skipped = entities.filter(e => e.status === 'skipped_no_input').length;
 
       return res.json({
         id: data.id,
@@ -629,6 +630,7 @@ submoduleRunRouter.get('/:id', async (req, res) => {
         entity_count: data.entity_count || entities.length,
         completed_count: completed,
         failed_count: failed,
+        skipped_count: skipped,
         progress: null,
         output_render_schema: data.output_render_schema,
         approved_items: data.approved_items,

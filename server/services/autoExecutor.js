@@ -716,20 +716,27 @@ async function evaluateStepResult(runId, stepIndex) {
   const allRuns = runs || [];
 
   // Group by entity — entity is "failed" if ANY submodule failed for it [#6]
+  // Entity is "skipped_no_input" if ALL submodules were skipped (precondition not met) — not a failure.
   const entityStatuses = new Map();
   for (const run of allRuns) {
     const current = entityStatuses.get(run.entity_name) || 'completed';
     if (run.status === 'failed') {
       entityStatuses.set(run.entity_name, 'failed');
-    } else if (current !== 'failed') {
+    } else if (run.status === 'skipped_no_input' && current !== 'failed') {
+      entityStatuses.set(run.entity_name, 'skipped_no_input');
+    } else if (current !== 'failed' && current !== 'skipped_no_input') {
       entityStatuses.set(run.entity_name, run.status);
     }
   }
 
   const totalCount = entityStatuses.size;
   const failedCount = [...entityStatuses.values()].filter(s => s === 'failed').length;
-  const completedCount = totalCount - failedCount;
-  const failureRate = totalCount > 0 ? failedCount / totalCount : 0;
+  const skippedCount = [...entityStatuses.values()].filter(s => s === 'skipped_no_input').length;
+  const completedCount = totalCount - failedCount - skippedCount;
+  // Composition errors (precondition not met) are excluded from the failure rate denominator —
+  // they are not execution failures and must not trigger the halt threshold.
+  const effectiveTotal = totalCount - skippedCount;
+  const failureRate = effectiveTotal > 0 ? failedCount / effectiveTotal : 0;
 
   // Build error_summary — group by error string (first 50 chars, normalized)
   const errorSummary = {};
@@ -740,7 +747,7 @@ async function evaluateStepResult(runId, stepIndex) {
     }
   }
 
-  return { completed: completedCount, failed: failedCount, total: totalCount, failureRate, errorSummary };
+  return { completed: completedCount, failed: failedCount, skipped: skippedCount, total: totalCount, effectiveTotal, failureRate, errorSummary };
 }
 
 /**

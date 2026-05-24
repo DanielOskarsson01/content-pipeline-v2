@@ -34,6 +34,7 @@ const batchWorker = new Worker(
 
     const completed = entityRuns.filter(r => r.status === 'completed').length;
     const failed = entityRuns.filter(r => r.status === 'failed').length;
+    const skipped = entityRuns.filter(r => r.status === 'skipped_no_input').length;
     const total = entityRuns.length;
 
     // Clean up zombie entities stuck in running/pending due to stalled BullMQ jobs.
@@ -59,7 +60,7 @@ const batchWorker = new Worker(
         status: batchStatus,
         completed_count: completed,
         completed_at: new Date().toISOString(),
-        progress: { current: total, total, message: `${completed} succeeded, ${failed + zombies.length} failed` },
+        progress: { current: total, total, message: `${completed} succeeded, ${failed + zombies.length} failed${skipped > 0 ? `, ${skipped} skipped (no input)` : ''}` },
       })
       .eq('id', submodule_run_id);
 
@@ -107,7 +108,7 @@ const batchWorker = new Worker(
       }
     }
 
-    console.log(`[batch] Finalized: ${submodule_id} — ${completed}/${total} succeeded, ${failed + zombies.length} failed`);
+    console.log(`[batch] Finalized: ${submodule_id} — ${completed}/${total} succeeded, ${failed + zombies.length} failed${skipped > 0 ? `, ${skipped} skipped (no input)` : ''}`);
 
     if (batchStatus === 'failed') {
       notifyFailure({ submoduleId: submodule_id, submoduleRunId: submodule_run_id, error: `All ${total} entities failed` });
