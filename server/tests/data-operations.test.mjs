@@ -109,5 +109,17 @@ function assert(condition, label) {
   assert(threw, 'unknown op → throws with descriptive error');
 })();
 
+// --- runtime precondition check (pure-function representation) ---
+
+(function precondition_requires_items_emptyPool_skips() {
+  function shouldSkip(precondition, poolLength) {
+    return precondition === 'requires_items' && poolLength === 0;
+  }
+  assert(shouldSkip('requires_items', 0) === true,   'requires_items + empty → skip');
+  assert(shouldSkip('requires_items', 5) === false,  'requires_items + non-empty → execute');
+  assert(shouldSkip('empty_ok', 0) === false,        'empty_ok + empty → execute');
+  assert(shouldSkip('empty_ok', 5) === false,        'empty_ok + non-empty → execute');
+})();
+
 console.log(`\n  ${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

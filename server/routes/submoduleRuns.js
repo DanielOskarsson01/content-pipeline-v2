@@ -454,8 +454,99 @@ executeRouter.post('/run', async (req, res) => {
       originalEntityMap.set(name, e);
     }
 
+    // ── PRECONDITION CHECK ─────────────────────────────────────────────────
+    // Before fanning out per-entity work, evaluate each entity's pool against
+    // the module's pool_precondition. Entities that don't meet the precondition
+    // are marked skipped_no_input directly (no BullMQ job). This catches the
+    // empty-pool bug class at runtime instead of silently dropping output later.
+    const precondition = manifest?.pool_precondition;
+    if (!precondition) {
+      // Defensive — moduleLoader validation (Task 8) should already reject
+      // manifests without this field. Never trust past one layer.
+      return res.status(500).json({
+        error: `Module ${submoduleId} has no pool_precondition declared. Cannot evaluate execution readiness.`,
+      });
+    }
+
+    const executableEntities = [];
+    const skippedEntities = [];
+    for (const entity of entities) {
+      const poolItems = Array.isArray(entity.pool_items) ? entity.pool_items : [];
+      if (precondition === 'requires_items' && poolItems.length === 0) {
+        skippedEntities.push(entity);
+      } else {
+        executableEntities.push(entity);
+      }
+    }
+
+    if (skippedEntities.length > 0) {
+      console.warn(`[execute] ${submoduleId}: ${skippedEntities.length}/${entities.length} entities skipped — pool empty, module pool_precondition=requires_items`);
+    }
+    // ── END PRECONDITION CHECK ─────────────────────────────────────────────
+
     // 7. Create batch record in submodule_runs
     const batchId = randomUUID();
+
+    // All-skipped fast path: create completed submodule_run, insert skipped rows, return early.
+    if (executableEntities.length === 0) {
+      const { data: skippedBatchRun, error: skippedBatchErr } = await db
+        .from('submodule_runs')
+        .insert({
+          stage_id: stage.id,
+          run_id: runId,
+          submodule_id: submoduleId,
+          status: 'completed',
+          options,
+          batch_id: batchId,
+          entity_count: entities.length,
+          completed_count: 0,
+          completed_at: new Date().toISOString(),
+          input_data: { step_index: stepIdx, submodule_id: submoduleId },
+          output_render_schema: manifest.output_schema || null,
+          progress: {
+            current: 0,
+            total: 0,
+            message: `Skipped — 0 of ${entities.length} entities had pool items (precondition: ${precondition})`,
+          },
+        })
+        .select()
+        .single();
+
+      if (skippedBatchErr) {
+        if (skippedBatchErr.code === '23505') {
+          return res.status(409).json({ error: 'Submodule already has an active run (concurrent request)' });
+        }
+        throw skippedBatchErr;
+      }
+
+      const skippedRows = skippedEntities.map(e => ({
+        stage_id: stage.id,
+        run_id: runId,
+        batch_id: batchId,
+        entity_name: e.entity_name,
+        submodule_id: submoduleId,
+        step_index: stepIdx,
+        status: 'skipped_no_input',
+        error: `Submodule ${submoduleId} requires items in pool; pool is empty for this entity. Check pipeline composition — a prior step may have removed all items, or no discovery module ran upstream.`,
+        started_at: new Date().toISOString(),
+        completed_at: new Date().toISOString(),
+        output_render_schema: manifest.output_schema || null,
+      }));
+
+      if (skippedRows.length > 0) {
+        const { error: skipInsertErr } = await db.from('entity_submodule_runs').insert(skippedRows);
+        if (skipInsertErr) throw skipInsertErr;
+      }
+
+      return res.json({
+        submodule_run_id: skippedBatchRun.id,
+        batch_id: batchId,
+        entity_count: entities.length,
+        skipped_count: skippedEntities.length,
+        status: 'completed',
+      });
+    }
+
     const { data: batchRun, error: batchErr } = await db
       .from('submodule_runs')
       .insert({
@@ -481,7 +572,8 @@ executeRouter.post('/run', async (req, res) => {
     }
 
     // 8. Bulk-insert entity_submodule_runs (MANDATORY: 1 insert, not N)
-    const entityRunRows = entities.map(ep => {
+    // Build executable rows, then skipped rows (if any mixed scenario — partial skips), concat and insert.
+    const entityRunRows = executableEntities.map(ep => {
       // Merge full entity properties (website, linkedin, etc.) with pool items
       const orig = originalEntityMap.get(ep.entity_name) || {};
       const loopMeta = metaMap.get(ep.entity_name);
@@ -538,12 +630,30 @@ executeRouter.post('/run', async (req, res) => {
       };
     });
 
+    // Build skipped rows for partial-skip scenario (some entities execute, some skip)
+    const partialSkippedRows = skippedEntities.map(e => ({
+      stage_id: stage.id,
+      run_id: runId,
+      batch_id: batchId,
+      entity_name: e.entity_name,
+      submodule_id: submoduleId,
+      step_index: stepIdx,
+      status: 'skipped_no_input',
+      error: `Submodule ${submoduleId} requires items in pool; pool is empty for this entity. Check pipeline composition — a prior step may have removed all items, or no discovery module ran upstream.`,
+      started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+      output_render_schema: manifest.output_schema || null,
+    }));
+
     const { data: insertedRuns, error: entityInsertErr } = await db
       .from('entity_submodule_runs')
-      .insert(entityRunRows)
-      .select('id, entity_name');
+      .insert([...entityRunRows, ...partialSkippedRows])
+      .select('id, entity_name, status');
 
     if (entityInsertErr) throw entityInsertErr;
+
+    // Only enqueue BullMQ jobs for executable (non-skipped) entities
+    const executableInserted = insertedRuns.filter(r => r.status === 'pending');
 
     // 9. Enqueue via FlowProducer (MANDATORY: 1 Redis call, not N)
     try {
@@ -553,7 +663,7 @@ executeRouter.post('/run', async (req, res) => {
         submoduleId,
         stepIndex: stepIdx,
         cost: manifest.cost || 'medium',
-        entityRuns: insertedRuns.map(r => ({
+        entityRuns: executableInserted.map(r => ({
           entitySubmoduleRunId: r.id,
           entityName: r.entity_name,
         })),
@@ -572,6 +682,7 @@ executeRouter.post('/run', async (req, res) => {
       submodule_run_id: batchRun.id,
       batch_id: batchId,
       entity_count: entities.length,
+      skipped_count: skippedEntities.length,
       status: 'running',
     });
   } catch (err) {
