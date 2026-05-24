@@ -13,6 +13,7 @@ import { randomUUID } from 'crypto';
 import db from '../services/db.js';
 import { getSubmoduleById, getSubmodules } from '../services/moduleLoader.js';
 import { enqueueEntityBatch, redis } from '../services/queue.js';
+import { applyDataOperation } from '../lib/applyDataOperation.js';
 
 // --- Execute router (mounted at /api/runs/:runId/steps/:stepIndex/submodules/:submoduleId) ---
 export const executeRouter = Router({ mergeParams: true });
@@ -1061,59 +1062,9 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
           // Update entity pool based on data_operation
           let entityPool = poolMap.get(entityName) || [];
 
-          if (dataOperation === 'add') {
-            // Upsert by composite key (itemKey + source_submodule): replace existing
-            // items from the same submodule, add new ones. This makes re-runs work —
-            // re-approving a submodule replaces its previous output in the pool.
-            const compositeKey = (item) => `${String(item[itemKey] ?? '')}::${item.source_submodule || ''}`;
-            const approvedKeys = new Set(approvedItems.map(compositeKey));
-            entityPool = entityPool.filter(item => !approvedKeys.has(compositeKey(item)));
-            entityPool.push(...approvedItems);
-          } else if (dataOperation === 'remove') {
-            // Filter to keep only approved items, AND merge any enriched fields
-            // from the submodule output (e.g. url-relevance adds "relevance" field).
-            const approvedItemMap = new Map(
-              approvedItems.map(item => [String(item[itemKey] ?? ''), item])
-            );
-            entityPool = entityPool.filter(item => {
-              const keyVal = String(item[itemKey] ?? '');
-              if (!approvedKeySet.has(keyVal)) return false;
-              // Merge enriched fields from the approved output into the pool item
-              const enriched = approvedItemMap.get(keyVal);
-              if (enriched) {
-                for (const [k, v] of Object.entries(enriched)) {
-                  if (k !== itemKey && k !== 'source_submodule' && !(k in item)) {
-                    item[k] = v;
-                  }
-                }
-              }
-              return true;
-            });
-          } else if (dataOperation === 'transform') {
-            // Transform replaces items with matching keys — but only items that are
-            // currently in the pool. Items removed by a prior 'remove' operation in
-            // the same step must NOT be re-added (that would undo the filtering).
-            // Build the existing-key set from the current pool first, then only push
-            // items whose key (or original_url) already exists in that set.
-            const existingKeys = new Set(entityPool.map(item => String(item[itemKey] ?? '')));
-            const removalSet = new Set();
-            const toAdd = [];
-            for (const item of approvedItems) {
-              const key = String(item[itemKey] ?? '');
-              const origKey = item.original_url != null && String(item.original_url) !== key
-                ? String(item.original_url) : null;
-              if (existingKeys.has(key) || (origKey && existingKeys.has(origKey))) {
-                removalSet.add(key);
-                if (origKey) {
-                  removalSet.add(origKey);
-                  console.log(`[transform] Canonicalized: ${item.original_url} → ${key}`);
-                }
-                toAdd.push(item);
-              }
-            }
-            entityPool = entityPool.filter(item => !removalSet.has(String(item[itemKey] ?? '')));
-            entityPool.push(...toAdd);
-          }
+          const { pool: newPool, ops } = applyDataOperation(entityPool, approvedItems, dataOperation, itemKey, approvedKeySet);
+          entityPool = newPool;
+          console.log(`[${dataOperation}] ${entityName}: added=${ops.added} kept=${ops.kept} removed=${ops.removed} replaced=${ops.replaced}`);
 
           poolMap.set(entityName, entityPool);
         }
