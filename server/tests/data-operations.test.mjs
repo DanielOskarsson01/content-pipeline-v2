@@ -1,11 +1,12 @@
 /**
- * Unit tests for applyDataOperation.
+ * Unit tests for applyDataOperation and validateManifest.
  *
  * No API, no DB, no fixtures. Pure function in, pure value out.
  *
  * Run: node server/tests/data-operations.test.mjs
  */
 import { applyDataOperation } from '../lib/applyDataOperation.js';
+import { validateManifest } from '../services/moduleLoader.js';
 
 let passed = 0, failed = 0;
 
@@ -119,6 +120,54 @@ function assert(condition, label) {
   assert(shouldSkip('requires_items', 5) === false,  'requires_items + non-empty → execute');
   assert(shouldSkip('empty_ok', 0) === false,        'empty_ok + empty → execute');
   assert(shouldSkip('empty_ok', 5) === false,        'empty_ok + non-empty → execute');
+})();
+
+// --- manifest validation (Task 8) ---
+
+(function validation_missingPoolPrecondition_throws() {
+  let threw = false;
+  try {
+    validateManifest({
+      id: 'foo', name: 'Foo', description: 'Foo', version: '1.0.0',
+      step: 1, category: 'discovery', cost: 'cheap',
+      data_operation_default: 'add', requires_columns: [], item_key: 'url',
+      output_schema: {},
+      // pool_precondition intentionally omitted
+    }, '/fake/path/manifest.json');
+  } catch (e) {
+    threw = e.message.includes('missing required field') && e.message.includes('pool_precondition');
+  }
+  assert(threw, 'missing pool_precondition → throws');
+})();
+
+(function validation_invalidPoolPrecondition_throws() {
+  let threw = false;
+  try {
+    validateManifest({
+      id: 'foo', name: 'Foo', description: 'Foo', version: '1.0.0',
+      step: 1, category: 'discovery', cost: 'cheap',
+      data_operation_default: 'add', requires_columns: [], item_key: 'url',
+      output_schema: {}, pool_precondition: 'bogus',
+    }, '/fake/path/manifest.json');
+  } catch (e) {
+    threw = e.message.includes('invalid pool_precondition');
+  }
+  assert(threw, 'invalid pool_precondition → throws');
+})();
+
+(function validation_invalidDataOperation_throws() {
+  let threw = false;
+  try {
+    validateManifest({
+      id: 'foo', name: 'Foo', description: 'Foo', version: '1.0.0',
+      step: 1, category: 'discovery', cost: 'cheap',
+      data_operation_default: 'wat', requires_columns: [], item_key: 'url',
+      output_schema: {}, pool_precondition: 'empty_ok',
+    }, '/fake/path/manifest.json');
+  } catch (e) {
+    threw = e.message.includes('invalid data_operation_default');
+  }
+  assert(threw, 'invalid data_operation_default → throws');
 })();
 
 console.log(`\n  ${passed} passed, ${failed} failed`);

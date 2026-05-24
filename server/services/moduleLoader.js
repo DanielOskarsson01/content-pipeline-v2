@@ -5,45 +5,77 @@ const REQUIRED_FIELDS = ['id', 'name', 'description', 'version', 'step', 'catego
 const VALID_STEPS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 const VALID_COSTS = ['cheap', 'medium', 'expensive'];
 const VALID_OPERATIONS = ['add', 'remove', 'transform'];
+const VALID_POOL_PRECONDITIONS = ['empty_ok', 'requires_items'];
 
 // In-memory registry: Map<submoduleId, manifest>
 const registry = new Map();
 
 /**
- * Validate a manifest has all required fields and valid values.
- * Returns null if valid, or an error message string if invalid.
+ * Validate a manifest before registering it. Throws on any violation —
+ * intentionally fail-closed so audit gaps cause immediate startup failure
+ * rather than silent runtime drops. See modules/CLAUDE.md rule 12 for the
+ * declarative contract.
  */
-function validateManifest(manifest, filePath) {
+export function validateManifest(manifest, manifestPath) {
   const missing = REQUIRED_FIELDS.filter(f => manifest[f] === undefined);
   if (missing.length > 0) {
-    return `missing fields: ${missing.join(', ')}`;
+    throw new Error(
+      `Manifest ${manifestPath} missing fields: ${missing.join(', ')}`
+    );
   }
 
   if (!VALID_STEPS.includes(manifest.step)) {
-    return `invalid step: ${manifest.step}`;
+    throw new Error(
+      `Manifest ${manifestPath} has invalid step: ${manifest.step}`
+    );
   }
 
   if (!VALID_COSTS.includes(manifest.cost)) {
-    return `invalid cost: ${manifest.cost}`;
+    throw new Error(
+      `Manifest ${manifestPath} has invalid cost: ${manifest.cost}`
+    );
   }
 
+  // data_operation_default check (explicit throw with recognised message)
   if (!VALID_OPERATIONS.includes(manifest.data_operation_default)) {
-    return `invalid data_operation_default: ${manifest.data_operation_default}`;
+    throw new Error(
+      `Manifest ${manifestPath} has invalid data_operation_default ` +
+      `"${manifest.data_operation_default}". Allowed: add, transform, remove.`
+    );
   }
 
   if (!Array.isArray(manifest.requires_columns)) {
-    return 'requires_columns must be an array';
+    throw new Error(
+      `Manifest ${manifestPath} requires_columns must be an array`
+    );
   }
 
   if (typeof manifest.output_schema !== 'object' || manifest.output_schema === null) {
-    return 'output_schema must be an object';
+    throw new Error(
+      `Manifest ${manifestPath} output_schema must be an object`
+    );
+  }
+
+  // pool_precondition must be declared (no default) — fail-closed
+  if (!manifest.pool_precondition) {
+    throw new Error(
+      `Manifest ${manifestPath} missing required field 'pool_precondition'. ` +
+      `Set to "empty_ok" or "requires_items". See modules/CLAUDE.md rule 12.`
+    );
+  }
+
+  if (!VALID_POOL_PRECONDITIONS.includes(manifest.pool_precondition)) {
+    throw new Error(
+      `Manifest ${manifestPath} has invalid pool_precondition ` +
+      `"${manifest.pool_precondition}". Allowed: empty_ok, requires_items.`
+    );
   }
 
   if (registry.has(manifest.id)) {
-    return `duplicate id "${manifest.id}" (already registered)`;
+    throw new Error(
+      `Manifest ${manifestPath} has duplicate id "${manifest.id}" (already registered)`
+    );
   }
-
-  return null;
 }
 
 /**
@@ -81,23 +113,16 @@ export function loadModules() {
         continue;
       }
 
-      try {
-        const raw = fs.readFileSync(manifestPath, 'utf-8');
-        const manifest = JSON.parse(raw);
+      const raw = fs.readFileSync(manifestPath, 'utf-8');
+      const manifest = JSON.parse(raw);
 
-        const error = validateManifest(manifest, manifestPath);
-        if (error) {
-          console.warn(`[moduleLoader] Invalid manifest ${stepDir.name}/${subDir.name}: ${error} — skipped`);
-          continue;
-        }
+      // Throws on any violation — fail-closed (no try/catch, invalid manifest = startup failure)
+      validateManifest(manifest, manifestPath);
 
-        // Store manifest with its filesystem path for later execute.js loading
-        manifest._path = path.join(stepPath, subDir.name);
-        registry.set(manifest.id, manifest);
-        console.log(`[moduleLoader] Registered: ${manifest.id} (step ${manifest.step}, ${manifest.category})`);
-      } catch (err) {
-        console.warn(`[moduleLoader] Failed to parse ${stepDir.name}/${subDir.name}/manifest.json: ${err.message} — skipped`);
-      }
+      // Store manifest with its filesystem path for later execute.js loading
+      manifest._path = path.join(stepPath, subDir.name);
+      registry.set(manifest.id, manifest);
+      console.log(`[moduleLoader] Registered: ${manifest.id} (step ${manifest.step}, ${manifest.category})`);
     }
   }
 
