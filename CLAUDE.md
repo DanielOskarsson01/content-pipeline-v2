@@ -156,6 +156,111 @@ Validation and contract rules should be position-agnostic — based on what a mo
 
 ---
 
+## 🛡 Process discipline — failure modes we've hit
+
+These rules exist because each one has already failed in this codebase. They are not theoretical hygiene. Each item is tagged **HARD** (must do, prevents a specific failure) or **GUIDE** (should do, improves quality but skippable under judgment).
+
+**TL;DR — if you do only two things:** read affected code in full before planning (A.2), and trace the actual call path during review (B.1). These two would have caught most of what went wrong.
+
+### How to read this document
+
+Not all rules below carry equal weight, and not all hold equally well under pressure. Read going in:
+
+- **A.1, A.4, D.1** are checkable in seconds (`ls`, a grep for a phrase). Likely to hold.
+- **A.2 (read code end-to-end)** is the most-skipped rule under pressure and also the highest-leverage. No automated enforcement; depends on implementer discipline and reviewer challenge ("did you actually read all of `routingHandler.js`?"). When time is tight, this is the rule that quietly slips first.
+- **B.1 (code path trace)** is the highest-leverage reviewer rule. Reviewers should refuse to approve plans without it.
+- **B.5 (independent diagnosis verification)** codifies a habit the user already practices (bringing in Gemini fresh for a second opinion). Codifying it makes it the norm rather than the exception.
+- **C.1–C.4 (validation)** is the hardest cluster to enforce because validation is the step where time pressure peaks. C.2 (specify evidence in the plan before deploy) is the strongest defense — once committed in writing, skipping it is visible.
+- **E.1, E.2** are guidelines, not hard rules, because the actual fix to spec-implementation drift is process external to Claude Code (owners, quarterly review). CLAUDE.md can mitigate, not solve.
+- **F** is the only pattern without a direct technical failure mode. It's here because overclaiming progress corrupts the session log, which corrupts future pre-flights.
+
+### Relationship to other rules
+
+This section is process-level (planning, review, validation, communication). It is separate from the module-authoring **Rules 1–12** in the modules repo CLAUDE.md (`content-pipeline-modules-v2/CLAUDE.md`). The two sets are complementary:
+
+- Rules 1–12 govern *what a submodule must look like* (manifest fields, README discipline, partial-items resilience, `data_operation` / `pool_precondition` declarations).
+- Patterns A–F govern *how planning, review, and validation are conducted* across both repos.
+
+When a planning task touches a submodule, both apply.
+
+---
+
+### A. Pre-flight for architectural work
+
+Before drafting any plan that changes pool semantics, routing, schema, manifest contracts, multi-step coordination, or cross-module interfaces:
+
+1. **HARD — Search `Content-Pipeline/specs/` for governing specs.** Run `ls Content-Pipeline/specs/` and read filenames. If any file's name plausibly relates to the area you're changing, read it end-to-end before anything else.
+   - *Prevents #1 (discoverability gap) and #5 (drift).* The PHASE_3B spec sat unread for 26 days while the buggy code it was designed to replace stayed in production. Filename scan is ~5 seconds; full read of one spec is ~10 minutes. The 4th re-design attempt was about to happen when the user intervened.
+
+2. **HARD — Read the currently-affected code files end-to-end before proposing changes.** Not greps, not excerpt reads — full files. At minimum: every file the plan will modify, plus the immediate callers and the immediate callees.
+   - *Prevents #2 (code path assumption gap) and #3 (wrong diagnosis).* The cascade-delete bug review missed that the plan's central assumption was untraced — three reviewers approved an architecturally correct fix without confirming it sat on the path where the bug fired.
+
+3. **HARD — Before plan drafting, write a "current state vs intended state" gap summary.** One paragraph. What exists now in code, what the spec (or your design) says should exist, what the delta is. Surface it explicitly.
+   - *Prevents #1, #2, #5.* Forces the implementer to articulate the gap rather than discover it mid-plan. If you can't write the gap summary, you don't understand the area well enough to plan changes to it.
+
+4. **HARD — If no governing spec exists, state that explicitly before designing fresh.** Exact phrasing: *"No governing spec found in `Content-Pipeline/specs/` for [area]. Designing from scratch."*
+   - *Prevents #1.* The user must have the chance to say "wait, check X" before you commit to designing. The PHASE_3B incident: user intervention came late because the implementer never surfaced "no spec found" — they just started designing.
+
+### B. Plan review criteria (beyond architectural soundness)
+
+Reviewers (brutal-critic, CTO, human, AI second-opinion) MUST check these before approving. Architectural correctness is necessary but not sufficient.
+
+1. **HARD — Code path trace.** The plan must explicitly identify the call chain from the trigger event (HTTP request, BullMQ enqueue, etc.) to the line being changed. Reviewer must confirm: *"Yes, this path actually executes when the bug occurs."* Without this, the fix may be correct in isolation but unreachable in production.
+   - *Prevents #2.* Three reviewers approved the empty-pool fix without anyone tracing the `autoExecutor` → `executeRouter` → `batchWorker` chain. The fix happened to land correctly. Next time it won't.
+
+2. **GUIDE — Compatibility check.** What happens to the normal pipeline run that doesn't exercise the new feature? Specifically: does the change have any effect on entities/runs that never trigger the condition the change handles?
+   - *Cross-cutting quality.* Catches "this only affects the new code path" assumptions that turn out wrong because the change touched shared validation, shared state initialization, etc.
+
+3. **GUIDE — Openness check.** Does this over-fit to the current immediate use case, or stay general? If a config option, prompt, or check is hardcoded to today's content type / template / step, flag it.
+   - *Reinforces the "small generic modules" architectural commitment.* Plans that bake in "for company profiles" or "for casino-platforms pillars" should justify why they can't stay generic.
+
+4. **HARD — Fit with Architectural Commitments.** Plan must not violate the rules in the "Architectural Commitments" section above (small generic modules, step boundary discipline, ID-based composition, position-agnostic validation). If it does, the plan must explicitly call out the exception and justify it.
+
+5. **HARD — Diagnosis verification when remediation depends on it.** If the plan is a bug fix, the diagnosis must be verified by a source **independent of the one that produced the original diagnosis** before remediation design starts. Reading the same code that produced the wrong diagnosis does NOT count — the second read inherits the first read's blind spot. Acceptable independent sources:
+   - A different model (Gemini, GPT) reviewing the trace fresh, given the symptom but NOT the proposed diagnosis
+   - A database query that proves or disproves the proposed mechanism (e.g., `SELECT status FROM entity_submodule_runs WHERE ...`)
+   - A log inspection that proves the new code fired (or did not)
+   - A human reading the path independently, without seeing the diagnosis first
+   - *Prevents #3.* The "auto-executor uses a different code path" diagnosis was wrong. Claude Code could not catch its own wrong diagnosis by re-reading the same code that produced it — independent Gemini did. Independence is what makes the second source valuable; without independence, the verification is theatre.
+
+### C. Validation criteria that actually validate
+
+A change is not validated until ALL of these are true for the specific case the change addresses.
+
+1. **HARD — "Outputs produced" is NEVER sufficient proof.** Outputs can be produced by pre-existing code paths, by partial execution, by happy-path fallbacks. Output presence proves nothing about whether the new mechanism fired.
+   - *Prevents #4.* The empty-pool smoke test "passed" for Pronet Gaming (outputs produced) but the new precondition-check code path never fired because Pronet's pool was never empty. The test validated nothing about the change.
+
+2. **HARD — Evidence the new code actually ran.** One of: a database row written by the new code (e.g., `skipped_no_input` status), a log line emitted by the new code, a metric incremented by the new code. The plan must specify which evidence will be inspected, and validation must include reading that evidence.
+
+3. **HARD — Correct behavior under the designed conditions.** Construct a test case that triggers the condition the change handles. Empty-pool fix → run with an entity whose pool will be empty. Routing fix → run with QA failures that trigger routing. Without this, the change is unvalidated even if it deployed cleanly.
+
+4. **HARD — Failure-visibility check.** If the change failed silently, would you know? Specifically: are there error logs, status fields, or DB rows that would surface a malfunction? If the answer is "no" or "I don't know," the change is not safely deployed.
+   - *Prevents #4.* The cascade-delete bug destroyed the very tracking rows that would have revealed the failure. Outputs were produced for the entity that worked; the entity that failed left no auditable evidence trail.
+
+### D. Spec discoverability
+
+1. **HARD — Before implementing in an area, check `Content-Pipeline/specs/` for governing specs.** Restated from A.1 as a process rule (not just a pre-flight step) so it applies to small changes too, not only architectural ones.
+
+2. **GUIDE — Reference governing spec by filename in plans, commits, and PRs.** Format: *"Implements §X.Y of `PHASE_3B_PER_ENTITY_INSTRUCTIONS_SPEC.md`."* Without this reference, future sessions can't trace the implementation back to the spec, and the discoverability problem repeats.
+
+### E. Pending-spec tracking
+
+1. **GUIDE — Specs marked "pending sign-off" / "REVIEWED v4 — pending final sign-off" / similar require an explicit owner and decision date.** Indefinite pending state is a flag, not a neutral state. A spec that has been pending for >30 days should be reviewed for adoption, rejection, or extension with a new date.
+
+2. **GUIDE — When you encounter a pending spec during pre-flight, surface its status to the user.** Phrasing: *"Spec `X.md` is in pending-signoff state, last reviewed [date]. Adopt now, defer, or design around?"* Don't silently implement against a pending spec without confirmation.
+
+### F. Time and progress honesty
+
+1. **GUIDE — When summarizing accomplishments, distinguish current-session work from prior-session work.** Sentences like *"we accomplished X"* implicitly claim X was done in the current session. If most of "we accomplished" was actually finding work other sessions did, say so.
+   - The 2026-05-26 PHASE_3B session is the canonical case: the real outcome was *recovering an existing spec*, not new design. Framing it as "we did major architectural work today" would have been an overclaim.
+
+2. **GUIDE — Distinguish problem-progress from context-recovery.** Both are useful, but they are not the same thing.
+   - *Problem-progress:* code changed, bug fixed, test passed, capability added, decision made and acted on.
+   - *Context-recovery:* spec found, history reconstructed, prior state understood, gap surfaced.
+   - Context-recovery is necessary, often the right thing to do, and frequently undervalued. But it's not problem-progress. Conflating them inflates session summaries and creates a misleading picture of where the project stands. Future sessions then pre-flight against a project state that isn't real.
+
+---
+
 ## 📚 Required Reading (in order)
 
 | Document | Location | What it tells you |
@@ -783,4 +888,27 @@ Entry types: decision | progress | blocker | idea
 - modules-repo session log `528e685` `failed_count` claim still wrong — should be amended with reference to `2117765` revert.
 
 **Updated by:** CTO agent (manual session entry)
+
+### Session: 2026-05-24 — Empty-pool fix validated + routing cascade-delete bug surfaced
+
+**Accomplished:**
+- Empty-pool fix validated end-to-end on Pronet Gaming smoke test. Pool flowed correctly through all 11 steps; output produced in every format (markdown, HTML, JSON, schema.org). Precondition check, `skipped_no_input` entity status, and failure threshold logic all functioning on the intended code path.
+- Routing cascade-delete bug surfaced during Wazdan investigation — pre-existing Phase 3 bug, NOT introduced by the empty-pool fix. Three stacked issues identified: (1) incorrect target_step calculation, (2) cross-entity scoping inconsistency, (3) no atomic transaction wrapping the cascade-delete + re-enqueue.
+- Routing bug filed as a separate backlog item and deferred to next session.
+
+**Decisions:**
+- Routing bug filed and deferred, not patched in this session — three stacked issues need their own investigation pass, not a hot-fix during validation.
+- Empty-pool fix unblocks single-pass success paths. Phase 3 multi-card validation remains blocked on the routing fix (retry paths don't work).
+- Batch 8a (threshold tuning) and 8b (50-entity validation) both deferred until routing works for multi-failure entities.
+
+**Blockers/Questions:**
+- Routing cascade-delete bug — must be fixed before Phase 3 multi-card validation can proceed. Next session picks up here.
+- Batch 8a and 8b remain blocked on the routing fix.
+
+**Architectural findings:**
+- **Verification value.** Three review rounds missed the routing bug's existence. Gemini verification corrected the initial diagnosis. The "verify before declare success" pattern caught real situations at every checkpoint and is what surfaced the bug at all.
+- **Process gap.** Plans verify architectural correctness but not code path assumptions. Future plans should include code path tracing as an explicit verification step.
+- **Parallel session coordination.** Multiple Claude Code sessions ran simultaneously today (this validation session + a CLAUDE.md update session that landed Workflow Patterns + Architectural Commitments + the rule 12 `pool_precondition` / `data_operation_default` rewrite). Worked OK because docs and code didn't conflict, but future parallel sessions should have explicit scope boundaries.
+
+**Updated by:** manual entry (session conclusion notes from user)
 
