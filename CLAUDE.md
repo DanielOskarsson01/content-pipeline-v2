@@ -162,6 +162,8 @@ These rules exist because each one has already failed in this codebase. They are
 
 **TL;DR — if you do only two things:** read affected code in full before planning (A.2), and trace the actual call path during review (B.1). These two would have caught most of what went wrong.
 
+**Patterns G and H prevent drift in planning sessions.** Without them, A–F catch failures inside individual tasks but miss strategic-level drift — pivots based on stale uploaded files, scope changes made without reviewer engagement, multi-hour sessions that quietly drift from the original direction.
+
 ### How to read this document
 
 Not all rules below carry equal weight, and not all hold equally well under pressure. Read going in:
@@ -173,13 +175,15 @@ Not all rules below carry equal weight, and not all hold equally well under pres
 - **C.1–C.4 (validation)** is the hardest cluster to enforce because validation is the step where time pressure peaks. C.2 (specify evidence in the plan before deploy) is the strongest defense — once committed in writing, skipping it is visible.
 - **E.1, E.2** are guidelines, not hard rules, because the actual fix to spec-implementation drift is process external to Claude Code (owners, quarterly review). CLAUDE.md can mitigate, not solve.
 - **F** is the only pattern without a direct technical failure mode. It's here because overclaiming progress corrupts the session log, which corrupts future pre-flights.
+- **G (reviewer engagement at scope moments)** is checkable but requires discipline. Easy to skip when momentum is high — that's exactly when it matters most. The trigger list is the discipline; without it, "I'll bring in a reviewer when I'm done" becomes "I'll bring in a reviewer never."
+- **H (current-state verification)** is checkable in seconds (`ls -la`, `git log -1`) and is likely to hold once the habit is established. The discipline is doing it BEFORE citing the file, not after the recommendation has already gone out.
 
 ### Relationship to other rules
 
 This section is process-level (planning, review, validation, communication). It is separate from the module-authoring **Rules 1–12** in the modules repo CLAUDE.md (`content-pipeline-modules-v2/CLAUDE.md`). The two sets are complementary:
 
 - Rules 1–12 govern *what a submodule must look like* (manifest fields, README discipline, partial-items resilience, `data_operation` / `pool_precondition` declarations).
-- Patterns A–F govern *how planning, review, and validation are conducted* across both repos.
+- Patterns A–H govern *how planning, review, and validation are conducted* across both repos.
 
 When a planning task touches a submodule, both apply.
 
@@ -258,6 +262,33 @@ A change is not validated until ALL of these are true for the specific case the 
    - *Problem-progress:* code changed, bug fixed, test passed, capability added, decision made and acted on.
    - *Context-recovery:* spec found, history reconstructed, prior state understood, gap surfaced.
    - Context-recovery is necessary, often the right thing to do, and frequently undervalued. But it's not problem-progress. Conflating them inflates session summaries and creates a misleading picture of where the project stands. Future sessions then pre-flight against a project state that isn't real.
+
+### G. Reviewer engagement timing (HARD)
+
+Reviewers (CTO, brutal-critic, Gemini, AI second-opinion) engage at SCOPE moments, not just plan-complete moments:
+
+- **Strategic pivots** — Before any "let's change direction" call. CTO verifies the pivot aligns with current plan state.
+- **Scope definition** — Before "this work covers X, defers Y." CTO verifies the deferral aligns with planned sequencing.
+- **Trade-off decisions** — Before "Option A vs Option B." Brutal critic torches the weaker option. Gemini verifies the stronger one's assumptions.
+- **Multi-day planning structure** — Before deciding "single plan vs multiple plans." CTO weighs architectural implications.
+- **Long session drift** — When a session exceeds 20 exchanges or 2 hours, CTO checkpoint verifies current direction still aligns with the plan.
+- **User pushback on direction** — When the user challenges a direction ("are you sure about X"), that's a reviewer trigger, not just "let me check again." The pushback itself signals reviewer engagement is needed.
+
+*Prevents:* drift in planning sessions before plans are drafted. Catches stale-info pivots. Catches scope creep before it locks in. Session 2026-05-28 demonstrated multiple pivots that CTO would have caught at scope-definition moments.
+
+### H. Current-state verification (HARD)
+
+Before strategic recommendations referencing planning documents:
+
+- **Verify the document is current** before citing it:
+  - `ls -la specs/[plan_file]` (modification date)
+  - `git log -1 specs/[plan_file]` (last commit)
+- **Files older than 14 days** or with recent commits the current context might not reflect: re-read before recommending based on them.
+- **Cite specific line numbers** when referencing plan content. "V5 puts X in Phase Y" without line reference is a flag to verify before acting.
+- **Uploaded files in session context are snapshots**, not authoritative. Treat them as historical until verified current.
+- **When user provides plan content via upload**, ask if it represents current state or is a snapshot from a specific date.
+
+*Prevents:* recommendations based on stale plan state. Session 2026-05-28 demonstrated April 28 V5 snapshot being treated as authoritative when May 6 ROADMAP had restructured Phase 3.
 
 ---
 
