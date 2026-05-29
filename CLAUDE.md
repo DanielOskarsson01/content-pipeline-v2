@@ -290,6 +290,23 @@ Before strategic recommendations referencing planning documents:
 
 *Prevents:* recommendations based on stale plan state. Session 2026-05-28 demonstrated April 28 V5 snapshot being treated as authoritative when May 6 ROADMAP had restructured Phase 3.
 
+**Extension (2026-05-29) — Capability verification, not just config/file existence.**
+
+When a pre-flight finding claims "X exists" or "X is built," verify all three before accepting the claim:
+
+1. **Code exists** — not just config / JSONB / comments. A template entry referencing a card name is not the card.
+2. **Code does what its name implies** — not just exists with that name. A function named `validateInput` that returns `true` unconditionally is not validation.
+3. **Production runs have exercised it end-to-end** — not just shipped untested. Code that exists but has never executed is not "shipped."
+
+Without all three, the correct framing is **"X is partially present"** — not "X is built."
+
+Specifically dangerous:
+- **Template JSONB entries** — naming a card in template config is not the card existing in code.
+- **BACKLOG items marked "designed" / "specified" / similar** — these are NOT "built."
+- **Code that exists but has never executed** — NOT "shipped."
+
+*Prevents:* overclaim of "built" or "shipped" capabilities. Inflates project state, drives future sessions to pre-flight against capabilities that don't actually exist (compounds A.2 failure — the implementer reads partial code thinking it's complete). Closely related to F.2 (problem-progress vs context-recovery): naming something is not building it.
+
 ---
 
 ## 📚 Required Reading (in order)
