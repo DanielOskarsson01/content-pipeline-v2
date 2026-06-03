@@ -6,6 +6,11 @@
  *              CTO Round 1 Fix #1 (2026-06-01): loop_iteration explicit on targets at write time
  *              Brutal-critic Round 2 (2026-06-02): Fixes #3 (FIFO align), #4 (defensive guards),
  *                                                  #5 (read/write split), #6 (batch helper)
+ *              Section C pre-flight (2026-06-03): card_round required on pending targets at write
+ *                                                 time (C↔B.5 seam — submoduleRuns.js:663-664 defaults
+ *                                                 to "1" when card_round is missing, silently running
+ *                                                 Round 1 overrides on every retry; loud-fail at
+ *                                                 write catches every future caller)
  *
  * Responsibility (Daniel decision 2 — KEEP SEPARATE from executionPlanUtils.js):
  *   This file owns the INSTRUCTION LIFECYCLE: creation, consumption, skipping,
@@ -43,7 +48,8 @@ export const SKIP_REASONS = Object.freeze({
  * Validate that a card_instructions JSONB value matches the expected shape.
  * Throws with descriptive context on malformed data — fail loud, not silent.
  *
- * Pending targets MUST have card_id (string), step (number), loop_iteration (number).
+ * Pending targets MUST have card_id (string), step (number), loop_iteration (number),
+ * card_round (number).
  * Consumed/skipped targets are NOT re-validated for those fields — they represent
  * historical state and may have been written before stricter validation.
  *
@@ -82,6 +88,13 @@ export function validateCardInstructions(instructions, contextMsg) {
         }
         if (typeof target.loop_iteration !== 'number') {
           throw new Error(`Malformed pending target[${i}][${j}] for ${contextMsg}: missing or non-number loop_iteration (CTO Finding 1 requires explicit field)`);
+        }
+        // Section C pre-flight (2026-06-03): card_round must be explicit on pending targets.
+        // Without this, submoduleRuns.js:663-664 silently defaults cardRound to "1" and runs
+        // Round 1 overrides on every retry — the "same settings that just failed" silent no-op
+        // that B.5 was designed to eliminate. Fail loud at write time, catch every future caller.
+        if (typeof target.card_round !== 'number') {
+          throw new Error(`Malformed pending target[${i}][${j}] for ${contextMsg}: missing or non-number card_round (Section C pre-flight requires explicit field for B.5 rounds[N] merge)`);
         }
       }
     }
