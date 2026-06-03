@@ -188,9 +188,37 @@ console.log('\n--- validateCardInstructions ---');
 
 (function val_pending_missingLoopIteration_throws() {
   assertThrows(
-    () => validateCardInstructions([{ targets: [{ status: 'pending', card_id: 'uuid', step: 1 }] }], 'entityA'),
+    () => validateCardInstructions([{ targets: [{ status: 'pending', card_id: 'uuid', step: 1, card_round: 1 }] }], 'entityA'),
     'CTO Finding 1',
     'pending target without loop_iteration throws with CTO Finding 1 reference',
+  );
+})();
+
+// Section C pre-flight (2026-06-03) — card_round required on pending targets.
+// C↔B.5 seam: routingHandler MUST emit card_round so the rounds[N] merge in
+// submoduleRuns.js:663-664 picks the escalation round's overrides, not the
+// default "1" silent-no-op. Loud-fail at write catches every future caller.
+(function val_pending_missingCardRound_throws() {
+  assertThrows(
+    () => validateCardInstructions([{ targets: [{ status: 'pending', card_id: 'uuid', step: 1, loop_iteration: 2 }] }], 'entityA'),
+    'Section C pre-flight',
+    'pending target without card_round throws with Section C pre-flight reference',
+  );
+})();
+
+(function val_pending_nonNumberCardRound_throws() {
+  assertThrows(
+    () => validateCardInstructions([{ targets: [{ status: 'pending', card_id: 'uuid', step: 1, loop_iteration: 2, card_round: '2' }] }], 'entityA'),
+    'non-number card_round',
+    'pending target with string card_round throws (must be number, not string)',
+  );
+})();
+
+(function val_pending_nullCardRound_throws() {
+  assertThrows(
+    () => validateCardInstructions([{ targets: [{ status: 'pending', card_id: 'uuid', step: 1, loop_iteration: 2, card_round: null }] }], 'entityA'),
+    'non-number card_round',
+    'pending target with null card_round throws',
   );
 })();
 
@@ -199,15 +227,34 @@ console.log('\n--- validateCardInstructions ---');
   assert(Array.isArray(r) && r.length === 1, 'consumed target with missing fields does NOT throw (historical state)');
 })();
 
+(function val_consumed_missingCardRound_doesNotThrow() {
+  // Historical-state safety: consumed targets predate stricter validation; do not retroactively block reads.
+  const r = validateCardInstructions([{ targets: [{ status: 'consumed', card_id: 'uuid', step: 1, loop_iteration: 1 }] }], 'entityA');
+  assert(Array.isArray(r) && r.length === 1, 'consumed target without card_round does NOT throw (historical state)');
+})();
+
 (function val_skipped_missingFields_doesNotThrow() {
   const r = validateCardInstructions([{ targets: [{ status: 'skipped', card_id: 'uuid' }] }], 'entityA');
   assert(Array.isArray(r) && r.length === 1, 'skipped target with missing fields does NOT throw (historical state)');
 })();
 
 (function val_valid_returnsAsIs() {
-  const input = [{ targets: [{ status: 'pending', card_id: 'uuid', step: 1, loop_iteration: 0 }] }];
+  const input = [{ targets: [{ status: 'pending', card_id: 'uuid', step: 1, loop_iteration: 0, card_round: 1 }] }];
   const r = validateCardInstructions(input, 'entityA');
-  assert(r === input, 'valid array returns the same reference');
+  assert(r === input, 'valid array (including card_round) returns the same reference');
+})();
+
+(function val_valid_pendingWithCardRound_passes() {
+  // Happy-path counterpart to the three loud-fail tests above — confirms a well-formed
+  // routingHandler write (the post-Section-C contract) passes validation cleanly.
+  const r = validateCardInstructions(
+    [{ routing_round: 2, targets: [
+      { status: 'pending', card_id: 'card-A-uuid', step: 5, loop_iteration: 2, card_round: 2 },
+      { status: 'pending', card_id: 'card-B-uuid', step: 5, loop_iteration: 2, card_round: 2 },
+    ]}],
+    'WazdanGroup',
+  );
+  assert(Array.isArray(r) && r[0].targets.length === 2, 'well-formed multi-target pending instruction with card_round passes validation');
 })();
 
 (function val_errorIncludesContext() {
@@ -267,8 +314,8 @@ const cardDefs = {
   const rows = {
     card_instructions: [
       { routing_round: 2, targets: [
-        { step: 1, card_id: 'card-A-uuid', status: 'pending', loop_iteration: 1 },
-        { step: 2, card_id: 'card-B-uuid', status: 'pending', loop_iteration: 1 },
+        { step: 1, card_id: 'card-A-uuid', status: 'pending', loop_iteration: 1, card_round: 2 },
+        { step: 2, card_id: 'card-B-uuid', status: 'pending', loop_iteration: 1, card_round: 2 },
       ]},
     ],
   };
@@ -282,7 +329,7 @@ const cardDefs = {
     card_instructions: [
       { routing_round: 2, targets: [
         { step: 1, card_id: 'card-A-uuid', status: 'consumed', loop_iteration: 1 },
-        { step: 1, card_id: 'card-A-uuid', status: 'pending', loop_iteration: 2 },
+        { step: 1, card_id: 'card-A-uuid', status: 'pending', loop_iteration: 2, card_round: 2 },
       ]},
     ],
   };
@@ -310,7 +357,7 @@ const cardDefs = {
   const rows = {
     card_instructions: [
       { routing_round: 2, targets: [
-        { step: 1, card_id: 'deleted-card-uuid', status: 'pending', loop_iteration: 1 },
+        { step: 1, card_id: 'deleted-card-uuid', status: 'pending', loop_iteration: 1, card_round: 2 },
       ]},
     ],
   };
@@ -373,7 +420,7 @@ console.log('\n--- findPendingInstructionsForRun (batch helper) ---');
 (async function batch_orphansInBatchToo() {
   const entityRows = [
     { entity_name: 'Wazdan', card_instructions: [{ routing_round: 2, targets: [
-      { step: 1, card_id: 'deleted-card', status: 'pending', loop_iteration: 1 },
+      { step: 1, card_id: 'deleted-card', status: 'pending', loop_iteration: 1, card_round: 2 },
     ]}]},
   ];
   const { db } = buildMockDb({ entityRows });
