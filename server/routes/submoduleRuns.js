@@ -300,18 +300,22 @@ executeRouter.post('/run', async (req, res) => {
       .single();
     const isLoopPass = stageRow?.is_loop_pass === true;
 
-    // Load template card definitions on loop passes (once per batch, not per entity)
-    let templateCards = {};
-    if (isLoopPass) {
+    // Prefer execution_plan_snapshot so mid-run template edits cannot poison
+    // routing decisions; fall back to live template for runs created before
+    // the snapshot column was wired.
+    let cardDefinitions = {};
+    if (isLoopPass || cardId) {
       const { data: runRow } = await db.from('pipeline_runs')
-        .select('project_id').eq('id', runId).single();
-      if (runRow) {
+        .select('project_id, execution_plan_snapshot').eq('id', runId).single();
+      if (runRow?.execution_plan_snapshot?.card_definitions) {
+        cardDefinitions = runRow.execution_plan_snapshot.card_definitions;
+      } else if (runRow) {
         const { data: proj } = await db.from('projects')
           .select('template_id').eq('id', runRow.project_id).single();
         if (proj?.template_id) {
           const { data: tpl } = await db.from('templates')
             .select('execution_plan').eq('id', proj.template_id).single();
-          templateCards = tpl?.execution_plan?.cards || {};
+          cardDefinitions = tpl?.execution_plan?.card_definitions || {};
         }
       }
     }
@@ -367,7 +371,7 @@ executeRouter.post('/run', async (req, res) => {
     if (isLoopPass || cardId) {
       const { data: entityMeta } = await db
         .from('entity_run_meta')
-        .select('entity_name, loop_count, loop_config')
+        .select('entity_name, loop_count, loop_config, card_instructions')
         .eq('run_id', runId);
       metaMap = new Map((entityMeta || []).map(m => [m.entity_name, m]));
     }
@@ -640,25 +644,31 @@ executeRouter.post('/run', async (req, res) => {
         entity.loop_count = loopMeta.loop_count || 0;
       }
 
-      // Merge loop_config overrides into options per-entity (Phase 3: card-aware)
+      // Merge card.rounds[N] overrides on top of base options when this batch
+      // is scoped to a card. Without this merge, a routed Round 2 retry runs
+      // BASE options identical to Round 1 — silent no-op (spec §1.2).
       let entityOptions = options;
-      if (isLoopPass && loopMeta?.loop_config) {
-        const lc = loopMeta.loop_config;
-        if (lc.active_cards) {
-          // New format: active_cards is { step: [cardName, ...] }
-          const stepCards = lc.active_cards[String(stepIdx)] || [];
-          // Find the card targeting THIS submodule
-          for (const cardName of stepCards) {
-            const card = templateCards[cardName];
-            if (card && card.submodule_id === submoduleId) {
-              entityOptions = { ...options, ...card.options_overrides };
-              console.log(`[submoduleRuns] ${ep.entity_name} using card "${cardName}" at step ${stepIdx}`);
-              break; // First matching card wins
-            }
+      if (cardId && cardDefinitions[cardId]) {
+        const card = cardDefinitions[cardId];
+        // Default: Round 1 horizontal card → rounds["1"]. Override with the
+        // matching pending instruction's card_round when present (retry path).
+        let cardRound = '1';
+        for (const record of loopMeta?.card_instructions || []) {
+          const match = (record.targets || []).find(t =>
+            t.step === stepIdx &&
+            t.card_id === cardId &&
+            t.loop_iteration === batchLoopIteration &&
+            t.status === 'pending'
+          );
+          if (match?.card_round) {
+            cardRound = String(match.card_round);
+            break;
           }
-        } else {
-          // Old format: flat options merge (backward compat)
-          entityOptions = { ...options, ...lc };
+        }
+        const roundOverrides = card.rounds?.[cardRound] || {};
+        entityOptions = { ...options, ...roundOverrides };
+        if (Object.keys(roundOverrides).length > 0) {
+          console.log(`[submoduleRuns] ${ep.entity_name} card=${cardId} round=${cardRound} merging ${Object.keys(roundOverrides).length} overrides`);
         }
       }
 

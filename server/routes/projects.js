@@ -133,6 +133,20 @@ router.post('/', async (req, res, next) => {
       throw projErr;
     }
 
+    // Snapshot the template's execution_plan into the run at creation time
+    // (Multi-Card Pattern spec §3.5 + migration §5). Routing decisions read
+    // this snapshot — not the live template — so mid-run template edits
+    // cannot poison subsequent decisions. NULL when no template is attached.
+    let executionPlanSnapshot = null;
+    if (template_id) {
+      const { data: tpl } = await db
+        .from('templates')
+        .select('execution_plan')
+        .eq('id', template_id)
+        .single();
+      executionPlanSnapshot = tpl?.execution_plan || null;
+    }
+
     // 2. Create pipeline_run
     const { data: run, error: runErr } = await db
       .from('pipeline_runs')
@@ -140,6 +154,7 @@ router.post('/', async (req, res, next) => {
         project_id: project.id,
         status: 'running',
         current_step: 0,
+        execution_plan_snapshot: executionPlanSnapshot,
       })
       .select()
       .single();
@@ -238,10 +253,17 @@ router.post('/:id/runs', async (req, res, next) => {
       template = tpl;
     }
 
-    // 3. Create run (step 0 already done — user enters at step 1)
+    // 3. Create run (step 0 already done — user enters at step 1).
+    // Snapshot template.execution_plan (Multi-Card Pattern spec §3.5) so routing
+    // reads frozen state and mid-run template edits cannot poison decisions.
     const { data: run, error: runErr } = await db
       .from('pipeline_runs')
-      .insert({ project_id: projectId, status: 'running', current_step: 1 })
+      .insert({
+        project_id: projectId,
+        status: 'running',
+        current_step: 1,
+        execution_plan_snapshot: template?.execution_plan || null,
+      })
       .select()
       .single();
     if (runErr) throw runErr;
