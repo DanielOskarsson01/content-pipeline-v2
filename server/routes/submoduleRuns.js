@@ -367,11 +367,13 @@ executeRouter.post('/run', async (req, res) => {
     // Load entity_run_meta for loop metadata. Also load on card-routed
     // batches — they need loop_count to derive loop_iteration for the
     // resume-safety check in autoExecutor.checkExistingSubmoduleRun.
+    // Section C pre-flight (2026-06-03): dropped loop_config from select
+    // — verified unused in this file (grep loopMeta.loop_config returns 0).
     let metaMap = new Map();
     if (isLoopPass || cardId) {
       const { data: entityMeta } = await db
         .from('entity_run_meta')
-        .select('entity_name, loop_count, loop_config, card_instructions')
+        .select('entity_name, loop_count, card_instructions')
         .eq('run_id', runId);
       metaMap = new Map((entityMeta || []).map(m => [m.entity_name, m]));
     }
@@ -629,6 +631,9 @@ executeRouter.post('/run', async (req, res) => {
 
     // 8. Bulk-insert entity_submodule_runs (MANDATORY: 1 insert, not N)
     // Build executable rows, then skipped rows (if any mixed scenario — partial skips), concat and insert.
+    // Section C pre-flight (2026-06-03): per-batch aggregate of card-round merges
+    // (downgraded from per-entity log to a single summary line below).
+    const cardMergeAggregate = [];
     const entityRunRows = executableEntities.map(ep => {
       // Merge full entity properties (website, linkedin, etc.) with pool items
       const orig = originalEntityMap.get(ep.entity_name) || {};
@@ -668,7 +673,7 @@ executeRouter.post('/run', async (req, res) => {
         const roundOverrides = card.rounds?.[cardRound] || {};
         entityOptions = { ...options, ...roundOverrides };
         if (Object.keys(roundOverrides).length > 0) {
-          console.log(`[submoduleRuns] ${ep.entity_name} card=${cardId} round=${cardRound} merging ${Object.keys(roundOverrides).length} overrides`);
+          cardMergeAggregate.push({ entity: ep.entity_name, round: cardRound, overrides: Object.keys(roundOverrides).length });
         }
       }
 
@@ -692,6 +697,18 @@ executeRouter.post('/run', async (req, res) => {
         output_render_schema: manifest.output_schema || null,
       };
     });
+
+    // Emit per-batch aggregate of card-round merges (downgraded from per-entity log).
+    // One line per batch instead of one per entity — survives multi-card runs without
+    // flooding stdout. Silent when no overrides applied (Round 1 horizontal cards).
+    if (cardMergeAggregate.length > 0) {
+      const byRound = cardMergeAggregate.reduce((acc, m) => {
+        acc[m.round] = (acc[m.round] || 0) + 1;
+        return acc;
+      }, {});
+      const summary = Object.entries(byRound).map(([r, n]) => `round=${r}×${n}`).join(' ');
+      console.log(`[submoduleRuns] batch=${batchId} card=${cardId} merges ${summary}`);
+    }
 
     // Build skipped rows for partial-skip scenario (some entities execute, some skip)
     const partialSkippedRows = skippedEntities.map(e => ({
