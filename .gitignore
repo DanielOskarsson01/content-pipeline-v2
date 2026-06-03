@@ -50,3 +50,7 @@ data/
 *.key
 credentials.json
 secrets.json
+
+# Diagnostic SQL notebooks — read-only investigation queries, not schema/migrations.
+# The diagnostic_* prefix marks them as untracked-by-design.
+sql/diagnostic_*.sql

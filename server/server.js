@@ -199,6 +199,7 @@ loadModules();
         steps: Array.from({ length: 11 }, (_, i) => i).filter(i => i >= haltedStep),
         skipSteps: [...(executionPlan.skip_steps || []).map(Number)],
         submodulesPerStep,
+        cardDefinitions: executionPlan.card_definitions || {},
         failure_thresholds: {
           ...(state.failure_thresholds || {}),
           ...(executionPlan.failure_thresholds || {}),

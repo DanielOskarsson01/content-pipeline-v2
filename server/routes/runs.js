@@ -1150,6 +1150,9 @@ router.post('/:runId/auto-execute', async (req, res, next) => {
       pauseBeforeSteps: (executionPlan.pause_before_steps || []).map(Number),
       pauseAfterSubmodules: executionPlan.pause_after_submodules || [],
       submodulesPerStep,
+      // Multi-Card Pattern: UUID-keyed card_definitions feed autoExecutor's
+      // expandCardGroups + the card.rounds[N] options merge in submoduleRuns.js.
+      cardDefinitions: executionPlan.card_definitions || {},
       failure_thresholds: { ...(executionPlan.failure_thresholds || {}), ...(req.body?.failure_thresholds || {}) },
       escalationRules: executionPlan.escalation_rules || {},
     };
@@ -1224,6 +1227,7 @@ router.post('/:runId/auto-execute/resume', async (req, res, next) => {
       pauseBeforeSteps: (executionPlan.pause_before_steps || []).map(Number),
       pauseAfterSubmodules: executionPlan.pause_after_submodules || [],
       submodulesPerStep: executionPlan.submodules_per_step || {},
+      cardDefinitions: executionPlan.card_definitions || {},
       failure_thresholds: mergedThresholds,
       escalationRules: executionPlan.escalation_rules || {},
     };
