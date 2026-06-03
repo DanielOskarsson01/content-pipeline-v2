@@ -26,6 +26,10 @@ executeRouter.post('/run', async (req, res) => {
   try {
     const { runId, stepIndex, submoduleId } = req.params;
     const stepIdx = parseInt(stepIndex, 10);
+    // Multi-Card Pattern: NULL = default Round 1; UUID scopes the batch to a
+    // retry card so different cards can run concurrently per the new partial
+    // unique index. PHASE_3B_SPEC §6.2.
+    const cardId = req.query.card_id || null;
 
     // 1. Validate manifest exists
     const manifest = getSubmoduleById(submoduleId);
@@ -45,13 +49,21 @@ executeRouter.post('/run', async (req, res) => {
       return res.status(404).json({ error: 'Pipeline stage not found' });
     }
 
-    // 3. Check no active run (409 if pending/running exists)
-    const { data: activeRuns } = await db
+    // 3. Check no active run (409 if pending/running exists for this card).
+    // Scoping by card_id mirrors the partial unique index so a Round 1 batch
+    // can coexist with retry batches on different cards.
+    let activeRunsQuery = db
       .from('submodule_runs')
       .select('id, status, started_at')
       .eq('run_id', runId)
       .eq('submodule_id', submoduleId)
       .in('status', ['pending', 'running']);
+    if (cardId === null) {
+      activeRunsQuery = activeRunsQuery.is('card_id', null);
+    } else {
+      activeRunsQuery = activeRunsQuery.eq('card_id', cardId);
+    }
+    const { data: activeRuns } = await activeRunsQuery;
 
     if (activeRuns && activeRuns.length > 0) {
       // Auto-clear runs stuck for >10 minutes (server restart, Redis blip, worker crash)
@@ -348,9 +360,11 @@ executeRouter.post('/run', async (req, res) => {
       }
     }
 
-    // Load entity_run_meta for loop metadata injection
+    // Load entity_run_meta for loop metadata. Also load on card-routed
+    // batches — they need loop_count to derive loop_iteration for the
+    // resume-safety check in autoExecutor.checkExistingSubmoduleRun.
     let metaMap = new Map();
-    if (isLoopPass) {
+    if (isLoopPass || cardId) {
       const { data: entityMeta } = await db
         .from('entity_run_meta')
         .select('entity_name, loop_count, loop_config')
@@ -364,12 +378,31 @@ executeRouter.post('/run', async (req, res) => {
     if (filteredPools.length > 0) {
       entities = filteredPools;
 
+      // Card-routed: scope to body entities only. Without this, a card group
+      // of [Wazdan] would batch every entity in the pool — violating the
+      // "one card_id per entity per submodule per batch" invariant.
+      if (cardId) {
+        if (!inputData?.entities?.length) {
+          return res.status(400).json({
+            error: `Card-routed run requires body.entities. card_id=${cardId} step=${stepIdx} submodule=${submoduleId}`,
+          });
+        }
+        const bodyNames = new Set(inputData.entities.map(e => e.name || e.entity_name).filter(Boolean));
+        entities = filteredPools.filter(p => bodyNames.has(p.entity_name));
+        if (entities.length === 0) {
+          return res.status(400).json({
+            error: `Card-routed run: no body entities ([${[...bodyNames].join(',')}]) found in pool at step ${stepIdx}/${submoduleId}. card_id=${cardId}`,
+          });
+        }
+      }
+
       // Defensive merge: if inputData has entities not in the pool (e.g. stale pool from a
       // previous partial run where fewer entities were processed), add the missing ones.
       // This prevents valid entities from being silently dropped when auto-execute re-runs
       // a step that was partially initialized by a previous manual or partial run.
       // Only applies on non-loop passes — loop passes intentionally filter to 'pending' subset.
-      if (!isLoopPass && inputData?.entities?.length > filteredPools.length) {
+      // Card-routed batches handled above with body-only scoping.
+      else if (!isLoopPass && inputData?.entities?.length > filteredPools.length) {
         const existingNames = new Set(filteredPools.map(p => p.entity_name));
         const missingEntities = inputData.entities.filter(e => {
           const name = e.name || e.entity_name || 'unknown';
@@ -484,6 +517,19 @@ executeRouter.post('/run', async (req, res) => {
     }
     // ── END PRECONDITION CHECK ─────────────────────────────────────────────
 
+    // Card-routed batches share one loop_iteration. Default groups after
+    // routing may legitimately mix per-entity loop_counts — warn and pick the
+    // first (matches autoExecutor.processStep:230-238).
+    const batchLoopIteration = (() => {
+      if (entities.length === 0) return 0;
+      const iters = entities.map(ep => metaMap.get(ep.entity_name)?.loop_count ?? 0);
+      const first = iters[0];
+      if (iters.some(i => i !== first)) {
+        console.warn(`[submoduleRuns] Step ${stepIdx}/${submoduleId} (card=${cardId || 'default'}): mixed entity loop_counts [${iters.join(',')}], using ${first} for batch loop_iteration`);
+      }
+      return first;
+    })();
+
     // 7. Create batch record in submodule_runs
     const batchId = randomUUID();
 
@@ -498,6 +544,8 @@ executeRouter.post('/run', async (req, res) => {
           status: 'completed',
           options,
           batch_id: batchId,
+          card_id: cardId,
+          loop_iteration: batchLoopIteration,
           entity_count: entities.length,
           completed_count: 0,
           completed_at: new Date().toISOString(),
@@ -527,6 +575,8 @@ executeRouter.post('/run', async (req, res) => {
         submodule_id: submoduleId,
         step_index: stepIdx,
         status: 'skipped_no_input',
+        card_id: cardId,
+        loop_iteration: batchLoopIteration,
         error: `Submodule ${submoduleId} requires items in pool; pool is empty for this entity. Check pipeline composition — a prior step may have removed all items, or no discovery module ran upstream.`,
         started_at: new Date().toISOString(),
         completed_at: new Date().toISOString(),
@@ -556,6 +606,8 @@ executeRouter.post('/run', async (req, res) => {
         status: 'pending',
         options,
         batch_id: batchId,
+        card_id: cardId,
+        loop_iteration: batchLoopIteration,
         entity_count: entities.length,
         completed_count: 0,
         input_data: { step_index: stepIdx, submodule_id: submoduleId },
@@ -619,6 +671,7 @@ executeRouter.post('/run', async (req, res) => {
         step_index: stepIdx,
         status: 'pending',
         options: entityOptions,
+        card_id: cardId,
         loop_iteration: loopMeta?.loop_count || 0,
         input_data: {
           entity,
@@ -639,6 +692,8 @@ executeRouter.post('/run', async (req, res) => {
       submodule_id: submoduleId,
       step_index: stepIdx,
       status: 'skipped_no_input',
+      card_id: cardId,
+      loop_iteration: batchLoopIteration,
       error: `Submodule ${submoduleId} requires items in pool; pool is empty for this entity. Check pipeline composition — a prior step may have removed all items, or no discovery module ran upstream.`,
       started_at: new Date().toISOString(),
       completed_at: new Date().toISOString(),
