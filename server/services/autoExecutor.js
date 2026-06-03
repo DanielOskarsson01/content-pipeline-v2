@@ -19,6 +19,8 @@ import {
   DEFAULT_FAILURE_THRESHOLDS,
   DEFAULT_THRESHOLD,
 } from '../config/timeouts.js';
+import { expandCardGroups } from './cardGroups.js';
+import { resolveStepEntries } from './executionPlanUtils.js';
 
 const PORT = process.env.PORT || 3001;
 const LOCK_TTL = 300;       // 5 min Redis lock TTL
@@ -100,6 +102,11 @@ export async function executeRun(runId, config, previousState = null) {
 
     const skipSteps = new Set(config.skipSteps || []);
     const submodulesPerStep = config.submodulesPerStep || {};
+    // Multi-Card Pattern (sub-plan 1): UUID-keyed card definitions from the
+    // execution_plan_snapshot. Legacy templates omit this → cardDefinitions = {}
+    // → resolveStepEntries treats every entry as a legacy submodule_id and
+    // expandCardGroups returns a single default group with all entities.
+    const cardDefinitions = config.cardDefinitions || {};
     state = { ...initialState };
 
     // 3. Orchestration loop (do-while for routing loop continuation)
@@ -170,113 +177,168 @@ export async function executeRun(runId, config, previousState = null) {
 
       console.log(`[auto-execute] Step ${stepIndex}: starting (${stepSubmodules.length} submodules, ${entityCount} entities)`);
 
-      // Run each submodule sequentially
-      for (const submoduleId of stepSubmodules) {
+      // -----------------------------------------------------------------
+      // Multi-Card Pattern (sub-plan 1) — per-step entry preparation
+      // -----------------------------------------------------------------
+      // Resolve each submodules_per_step entry to {submodule_id, card_id, ...}.
+      // Legacy templates (cardDefinitions == {}) all fall through to legacy
+      // submodule_id string entries → existing behavior preserved.
+      const resolvedEntries = resolveStepEntries(stepSubmodules, cardDefinitions);
+
+      // Corruption guard (executionPlanUtils._corrupt flag): a UUID-format
+      // entry that doesn't exist in card_definitions implies template editor
+      // deleted a card without scrubbing submodules_per_step. Halt with a
+      // clear reason rather than producing a confusing 404 at trigger time.
+      const corrupt = resolvedEntries.find(e => e._corrupt);
+      if (corrupt) {
+        await haltRun(runId, state,
+          `Corrupt card reference in submodules_per_step[${stepIndex}]: ${corrupt.card_id} not in card_definitions`,
+          cleanup);
+        return;
+      }
+
+      // Per-entity loop_count map (spec §3.2 — routing_round = loop_count at
+      // creation time). Used to derive currentIteration per group. Loaded once
+      // here because loop_count is stable within a single processStep invocation
+      // (it increments at routing time, AFTER step completion).
+      const { data: metaRows } = await db
+        .from('entity_run_meta')
+        .select('entity_name, loop_count')
+        .eq('run_id', runId);
+      const loopCountMap = new Map((metaRows || []).map(m => [m.entity_name, m.loop_count || 0]));
+      const allEntities = Array.from(loopCountMap.keys());
+
+      // Run each (submodule, card-group) sequentially
+      for (const entry of resolvedEntries) {
         if (signal.aborted) break;
+        const submoduleId = entry.submodule_id;
 
-        // Check if submodule already has a run (resume safety) [#12]
-        const existingRun = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId);
-        let batchId;
-        let expectedEntityCount;
+        // Expand to per-card_id groups. Legacy / Round-1 case → single default
+        // group with all entities. Routed case → one card group per UUID in
+        // entities' pending instructions, plus default group with the rest.
+        const groups = await expandCardGroups(db, runId, stepIndex, submoduleId, allEntities, cardDefinitions);
 
-        if (existingRun) {
-          if (existingRun.status === 'approved') {
-            console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: already approved, skipping`);
-            continue;
+        for (const group of groups) {
+          if (signal.aborted) break;
+          const cardId = group.card_id;
+
+          // currentIteration derivation per spec §3.2. All card-group entities
+          // share the same loop_iteration (per Brutal-critic Fix #1 atomic
+          // dedup invariant). Default-group entities may mix iterations after
+          // routing; the worst case is a redundant trigger that quickly
+          // resolves via checkExistingSubmoduleRun → 'approved' → skip.
+          const groupLoopCounts = group.entities.map(e => loopCountMap.get(e) ?? 0);
+          const currentIteration = groupLoopCounts[0] ?? 0;
+          if (groupLoopCounts.some(i => i !== currentIteration)) {
+            console.warn(
+              `[auto-execute] Step ${stepIndex}/${submoduleId} ` +
+              `(card=${cardId || 'default'}): mixed entity loop_counts ` +
+              `[${groupLoopCounts.join(',')}], using ${currentIteration}`
+            );
           }
-          if (existingRun.status === 'completed') {
-            // LOAD-BEARING for pause_after_submodules: when resuming after a submodule pause,
-            // this path fires if the user resumed WITHOUT manually approving — auto-approves all.
-            // If the user DID manually approve, status will be 'approved' and we skip above.
-            if (config.pauseAfterSubmodules?.includes(submoduleId)) {
-              console.warn(`[auto-execute] ${runId}: ${submoduleId} was in pause_after_submodules but resumed without manual approval — auto-approving all entities`);
+
+          // Check if this exact batch already has a run (resume safety) [#12]
+          const existingRun = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId, cardId, currentIteration);
+          let batchId;
+          let expectedEntityCount;
+
+          if (existingRun) {
+            if (existingRun.status === 'approved') {
+              console.log(`[auto-execute] Step ${stepIndex}/${submoduleId} (card=${cardId || 'default'}, iter=${currentIteration}): already approved, skipping`);
+              continue;
             }
-            console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: completed but not approved, approving now`);
-            await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
-            await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
-            continue;
-          }
-          if (existingRun.status === 'running') {
-            console.log(`[auto-execute] Step ${stepIndex}/${submoduleId}: already running, polling existing batch`);
-            batchId = existingRun.batch_id;
-            expectedEntityCount = existingRun.entity_count;
-          }
-          // If failed → re-trigger below
-        }
-
-        if (!batchId) {
-          // Trigger the submodule
-          const triggerResult = await triggerSubmodule(runId, stepIndex, submoduleId);
-          if (!triggerResult) {
-            // 409 handling [#14]
-            const resolved = await handle409(runId, stepIndex, submoduleId);
-            if (resolved === 'skip') continue;
-            if (resolved === 'halt') {
-              await haltRun(runId, state, `409 conflict: submodule ${submoduleId} at step ${stepIndex} stuck`, cleanup);
-              return;
+            if (existingRun.status === 'completed') {
+              if (config.pauseAfterSubmodules?.includes(submoduleId)) {
+                console.warn(`[auto-execute] ${runId}: ${submoduleId} was in pause_after_submodules but resumed without manual approval — auto-approving all entities`);
+              }
+              console.log(`[auto-execute] Step ${stepIndex}/${submoduleId} (card=${cardId || 'default'}, iter=${currentIteration}): completed but not approved, approving now`);
+              await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, cardId, currentIteration, 'completed', 120_000);
+              await autoApproveSingleSubmodule(runId, stepIndex, submoduleId, cardId, currentIteration);
+              continue;
             }
-            // resolved has batchId + entityCount from the existing run
-            batchId = resolved.batchId;
-            expectedEntityCount = resolved.entityCount;
-          } else {
-            batchId = triggerResult.batch_id;
-            expectedEntityCount = triggerResult.entity_count;
+            if (existingRun.status === 'running') {
+              console.log(`[auto-execute] Step ${stepIndex}/${submoduleId} (card=${cardId || 'default'}, iter=${currentIteration}): already running, polling existing batch`);
+              batchId = existingRun.batch_id;
+              expectedEntityCount = existingRun.entity_count;
+            }
+            // If failed → re-trigger below
+          }
 
-            // Verify enqueue count [#11]
-            const actualCount = await verifyEnqueueCount(batchId);
-            if (actualCount !== expectedEntityCount) {
-              autoExecuteEvents.emit('enqueue_mismatch', {
-                runId, stepIndex, expected: expectedEntityCount, actual: actualCount, batchId,
-              });
-              await haltRun(runId, state, `Enqueue failure at step ${stepIndex}/${submoduleId}: expected ${expectedEntityCount} entities, found ${actualCount}`, cleanup);
-              return;
+          if (!batchId) {
+            // Trigger the submodule for this card group
+            const triggerResult = await triggerSubmodule(runId, stepIndex, submoduleId, cardId, group.entities);
+            if (!triggerResult) {
+              // 409 handling [#14] — scoped to (cardId, currentIteration)
+              const resolved = await handle409(runId, stepIndex, submoduleId, cardId, currentIteration);
+              if (resolved === 'skip') continue;
+              if (resolved === 'halt') {
+                await haltRun(runId, state, `409 conflict: submodule ${submoduleId} (card=${cardId || 'default'}, iter=${currentIteration}) at step ${stepIndex} stuck`, cleanup);
+                return;
+              }
+              // resolved has batchId + entityCount from the existing run
+              batchId = resolved.batchId;
+              expectedEntityCount = resolved.entityCount;
+            } else {
+              batchId = triggerResult.batch_id;
+              expectedEntityCount = triggerResult.entity_count;
+
+              // Verify enqueue count [#11]
+              const actualCount = await verifyEnqueueCount(batchId);
+              if (actualCount !== expectedEntityCount) {
+                autoExecuteEvents.emit('enqueue_mismatch', {
+                  runId, stepIndex, expected: expectedEntityCount, actual: actualCount, batchId,
+                });
+                await haltRun(runId, state, `Enqueue failure at step ${stepIndex}/${submoduleId} (card=${cardId || 'default'}, iter=${currentIteration}): expected ${expectedEntityCount} entities, found ${actualCount}`, cleanup);
+                return;
+              }
             }
           }
+
+          // Poll for completion — job-level timeouts (COST_CONFIG) handle per-entity limits.
+          // MAX_BATCH_TIMEOUT is a safety net only (6 hours).
+          const pollResult = await pollBatchCompletion(batchId, MAX_BATCH_TIMEOUT, signal);
+
+          if (signal.aborted) break;
+
+          if (pollResult === 'timeout') {
+            // 6-hour safety net fired — something is catastrophically wrong
+            await haltRun(runId, state, `Submodule ${submoduleId} (card=${cardId || 'default'}, iter=${currentIteration}) at step ${stepIndex} exceeded maximum batch timeout (6 hours)`, cleanup);
+            return;
+          }
+
+          autoExecuteEvents.emit('submodule_completed', {
+            runId, stepIndex, submoduleId, cardId, loopIteration: currentIteration, batchId,
+            ...await getEntityCounts(batchId),
+          });
+
+          // Mid-step approve: approve this submodule batch immediately so downstream
+          // batches in the same step can see its output in the pool.
+          // Wait for batchWorker to finalize submodule_runs status first.
+          await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, cardId, currentIteration, 'completed', 120_000);
+
+          // Pause after this (submodule, card_id) group (template config — user
+          // reviews & approves manually). pauseKey scopes to (step, submodule,
+          // card_id) so different card groups pause independently — operators
+          // can review per-card output before continuing.
+          const pauseKey = `${stepIndex}:${submoduleId}:${cardId || 'default'}`;
+          if (config.pauseAfterSubmodules?.includes(submoduleId) &&
+              !state.paused_after_submodules?.includes(pauseKey)) {
+            console.log(`[auto-execute] ${runId}: pausing after ${submoduleId} (card=${cardId || 'default'}) at step ${stepIndex} — manual approval required`);
+            if (!state.paused_after_submodules) state.paused_after_submodules = [];
+            state.paused_after_submodules.push(pauseKey);
+            state.halt_reason = `Paused after ${submoduleId} (card=${cardId || 'default'}) — review results and approve before resuming`;
+            state.halted_at = new Date().toISOString();
+            state.halted_step = stepIndex;
+            await db
+              .from('pipeline_runs')
+              .update({ status: 'paused', auto_execute_state: state })
+              .eq('id', runId);
+            await cleanup();
+            return;
+          }
+
+          await autoApproveSingleSubmodule(runId, stepIndex, submoduleId, cardId, currentIteration);
         }
-
-        // Poll for completion — job-level timeouts (COST_CONFIG) handle per-entity limits.
-        // MAX_BATCH_TIMEOUT is a safety net only (6 hours).
-        const pollResult = await pollBatchCompletion(batchId, MAX_BATCH_TIMEOUT, signal);
-
-        if (signal.aborted) break;
-
-        if (pollResult === 'timeout') {
-          // 6-hour safety net fired — something is catastrophically wrong
-          await haltRun(runId, state, `Submodule ${submoduleId} at step ${stepIndex} exceeded maximum batch timeout (6 hours)`, cleanup);
-          return;
-        }
-
-        autoExecuteEvents.emit('submodule_completed', {
-          runId, stepIndex, submoduleId, batchId,
-          ...await getEntityCounts(batchId),
-        });
-
-        // Mid-step approve: approve this submodule immediately so downstream
-        // submodules in the same step can see its output in the pool.
-        // Wait for batchWorker to finalize submodule_runs status first (race condition fix).
-        await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
-
-        // Pause after submodule (template config — user reviews & approves manually)
-        // NOTE: pause_after_submodules matches on submoduleId globally across all steps.
-        // The pauseKey (stepIndex:submoduleId) ensures each step-instance only pauses once.
-        const pauseKey = `${stepIndex}:${submoduleId}`;
-        if (config.pauseAfterSubmodules?.includes(submoduleId) &&
-            !state.paused_after_submodules?.includes(pauseKey)) {
-          console.log(`[auto-execute] ${runId}: pausing after ${submoduleId} at step ${stepIndex} — manual approval required`);
-          if (!state.paused_after_submodules) state.paused_after_submodules = [];
-          state.paused_after_submodules.push(pauseKey);
-          state.halt_reason = `Paused after ${submoduleId} — review results and approve before resuming`;
-          state.halted_at = new Date().toISOString();
-          state.halted_step = stepIndex;
-          await db
-            .from('pipeline_runs')
-            .update({ status: 'paused', auto_execute_state: state })
-            .eq('id', runId);
-          await cleanup();
-          return;
-        }
-
-        await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
       }
 
       if (signal.aborted) break;
@@ -527,7 +589,17 @@ async function getEntityCount(runId, stepIndex) {
   return count || 0;
 }
 
-async function checkExistingSubmoduleRun(runId, stepIndex, submoduleId) {
+/**
+ * Resume-safety scoped lookup per Multi-Card Pattern spec §6.2 + Sub-plan 1
+ * resolved decision: cardId + loopIteration are LOAD-BEARING. A Round-2 query
+ * without loopIteration scoping returns Round-1 batches → autoExecutor
+ * incorrectly skips Round 2 entirely. card_id null vs UUID are distinct
+ * paths (default group vs card-routed) and must NOT collapse.
+ *
+ * Requires schema migration adding submodule_runs.card_id UUID NULL +
+ * loop_iteration INTEGER NOT NULL DEFAULT 0 (sub-plan 1 migration §2).
+ */
+async function checkExistingSubmoduleRun(runId, stepIndex, submoduleId, cardId, loopIteration) {
   const { data: stage } = await db
     .from('pipeline_stages')
     .select('id')
@@ -537,36 +609,64 @@ async function checkExistingSubmoduleRun(runId, stepIndex, submoduleId) {
 
   if (!stage) return null;
 
-  const { data } = await db
+  let query = db
     .from('submodule_runs')
     .select('id, status, batch_id, entity_count')
     .eq('stage_id', stage.id)
     .eq('submodule_id', submoduleId)
+    .eq('loop_iteration', loopIteration);
+
+  if (cardId === null || cardId === undefined) {
+    query = query.is('card_id', null);
+  } else {
+    query = query.eq('card_id', cardId);
+  }
+
+  const { data } = await query
     .order('completed_at', { ascending: false, nullsFirst: false })
     .limit(1);
 
   return data?.[0] || null;
 }
 
-async function triggerSubmodule(runId, stepIndex, submoduleId) {
+/**
+ * Trigger /run for a specific (submodule, card_id) group. The card_id query
+ * param drives card-aware options + prompt merge inside submoduleRuns.js
+ * (cardDefinitions[card_id]) and the entity_submodule_runs card_id stamp.
+ * The body's entities subset is the HIGHEST-priority input source on /run
+ * (server/routes/submoduleRuns.js line 96), so passing it explicitly scopes
+ * the batch to exactly the entities in this group.
+ *
+ * @param {string} runId
+ * @param {number} stepIndex
+ * @param {string} submoduleId
+ * @param {string|null} cardId   null for default group; UUID for card-routed
+ * @param {string[]} entities    entity names in this group
+ */
+async function triggerSubmodule(runId, stepIndex, submoduleId, cardId, entities) {
   try {
-    return await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/run`);
+    const path = `/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/run`
+               + (cardId ? `?card_id=${encodeURIComponent(cardId)}` : '');
+    const body = entities && entities.length > 0
+      ? { entities: entities.map(e => ({ entity_name: e })) }
+      : null;
+    return await callEndpoint('POST', path, body);
   } catch (err) {
     if (err.message.includes('409')) return null;
     throw err;
   }
 }
 
-async function handle409(runId, stepIndex, submoduleId) {
-  // Query existing run status
-  const existing = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId);
+async function handle409(runId, stepIndex, submoduleId, cardId, loopIteration) {
+  // Query existing run status, scoped to (card_id, loop_iteration) per Multi-Card spec.
+  const existing = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId, cardId, loopIteration);
   if (!existing) return 'halt';
 
   if (existing.status === 'approved') return 'skip';
   if (existing.status === 'completed') {
     // Completed but not approved — approve it (same fix as resume path)
-    await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
-    await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
+    await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, cardId, loopIteration, 'completed', 120_000);
+    await autoApproveSingleSubmodule(runId, stepIndex, submoduleId, cardId, loopIteration);
     return 'skip';
   }
   if (existing.status === 'failed') {
@@ -574,22 +674,24 @@ async function handle409(runId, stepIndex, submoduleId) {
     // Actually, the trigger endpoint auto-clears stuck runs >10min,
     // but a recently failed run can be re-triggered. Try once more.
     try {
-      return await callEndpoint('POST', `/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/run`);
+      const path = `/api/runs/${runId}/steps/${stepIndex}/submodules/${submoduleId}/run`
+                 + (cardId ? `?card_id=${encodeURIComponent(cardId)}` : '');
+      return await callEndpoint('POST', path);
     } catch {
       return 'halt';
     }
   }
 
   // Status is running — wait 60s and recheck
-  console.log(`[auto-execute] 409 at step ${stepIndex}/${submoduleId}: existing run is running, waiting 60s`);
+  console.log(`[auto-execute] 409 at step ${stepIndex}/${submoduleId} (card=${cardId || 'default'}, iter=${loopIteration}): existing run is running, waiting 60s`);
   await sleep(60_000);
 
-  const rechecked = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId);
+  const rechecked = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId, cardId, loopIteration);
   if (!rechecked) return 'halt';
   if (rechecked.status === 'approved') return 'skip';
   if (rechecked.status === 'completed') {
-    await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, 'completed', 120_000);
-    await autoApproveSingleSubmodule(runId, stepIndex, submoduleId);
+    await waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, cardId, loopIteration, 'completed', 120_000);
+    await autoApproveSingleSubmodule(runId, stepIndex, submoduleId, cardId, loopIteration);
     return 'skip';
   }
   if (rechecked.status === 'running') {
@@ -755,19 +857,19 @@ async function evaluateStepResult(runId, stepIndex) {
  * pollBatchCompletion checks entity_submodule_runs (child rows) which finish
  * before the batchWorker updates the parent submodule_runs record.
  */
-async function waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, targetStatus, timeoutMs) {
+async function waitForSubmoduleRunStatus(runId, stepIndex, submoduleId, cardId, loopIteration, targetStatus, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const existing = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId);
+    const existing = await checkExistingSubmoduleRun(runId, stepIndex, submoduleId, cardId, loopIteration);
     if (existing && existing.status === targetStatus) return;
     if (existing && existing.status === 'approved') return; // already approved, even better
     if (existing && existing.status === 'failed') return;   // failed = no point waiting
     await sleep(1000);
   }
-  throw new Error(`Timed out waiting for ${submoduleId} to reach status "${targetStatus}" after ${timeoutMs}ms — batchWorker may be down`);
+  throw new Error(`Timed out waiting for ${submoduleId} (card=${cardId || 'default'}, iter=${loopIteration}) to reach status "${targetStatus}" after ${timeoutMs}ms — batchWorker may be down`);
 }
 
-async function autoApproveSingleSubmodule(runId, stepIndex, submoduleId) {
+async function autoApproveSingleSubmodule(runId, stepIndex, submoduleId, cardId, loopIteration) {
   const { data: stage } = await db
     .from('pipeline_stages')
     .select('id')
@@ -777,13 +879,24 @@ async function autoApproveSingleSubmodule(runId, stepIndex, submoduleId) {
 
   if (!stage) return;
 
-  const { data: subRuns } = await db
+  // Scope to the specific (card_id, loop_iteration) batch — without this, a
+  // multi-card step would auto-approve the WRONG submodule_run (different
+  // group's batch), violating the per-card approval boundary.
+  let subRunsQuery = db
     .from('submodule_runs')
     .select('id, batch_id, status')
     .eq('stage_id', stage.id)
     .eq('submodule_id', submoduleId)
+    .eq('loop_iteration', loopIteration)
     .in('status', ['completed', 'failed']);
 
+  if (cardId === null || cardId === undefined) {
+    subRunsQuery = subRunsQuery.is('card_id', null);
+  } else {
+    subRunsQuery = subRunsQuery.eq('card_id', cardId);
+  }
+
+  const { data: subRuns } = await subRunsQuery;
   const subRun = subRuns?.[0];
   if (!subRun) return;
 
