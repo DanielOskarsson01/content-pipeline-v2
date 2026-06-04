@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS pipeline_stages (
   completed_count INTEGER DEFAULT 0, -- Per-entity: entities completed
   failed_count INTEGER DEFAULT 0,    -- Per-entity: entities permanently failed
   approved_count INTEGER DEFAULT 0,  -- Per-entity: entities approved to advance
-  is_loop_pass BOOLEAN NOT NULL DEFAULT FALSE, -- Set by apply_entity_routing RPC on reactivated stages
+  is_loop_pass BOOLEAN NOT NULL DEFAULT FALSE, -- DEPRECATED 2026-06-04 (Section C). No longer written or read. Routed-retry detection now uses request cardId in submoduleRuns.js. Column pending drop in follow-up migration after one production cycle.
   started_at TIMESTAMPTZ,
   completed_at TIMESTAMPTZ
 );

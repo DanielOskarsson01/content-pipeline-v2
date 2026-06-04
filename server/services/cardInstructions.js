@@ -114,7 +114,8 @@ export function validateCardInstructions(instructions, contextMsg) {
  * @param {object} db                   Supabase client
  * @param {string} runId                pipeline_runs.id
  * @param {string} entityName           entity identifier
- * @param {number} stepIndex            current step
+ * @param {number|null} stepIndex       current step, or null for ALL steps
+ *                                      (used by routingHandler QA-passed cleanup)
  * @param {object} cardDefinitions      execution_plan_snapshot.card_definitions (UUID-keyed)
  * @returns {Promise<{pending: Array, orphaned: Array<{step, card_id}>}>}
  */
@@ -132,10 +133,11 @@ export async function findPendingInstructions(db, runId, entityName, stepIndex, 
 
   for (const record of instructions) {
     for (const target of (record.targets || [])) {
-      if (target.step === stepIndex && target.status === 'pending') {
+      if ((stepIndex === null || target.step === stepIndex) && target.status === 'pending') {
         const card = cardDefinitions?.[target.card_id];
         if (card) {
           pending.push({
+            step: target.step,
             card_id: target.card_id,
             card_name: target.card_name,
             submodule_id: card.submodule_id,
@@ -184,7 +186,8 @@ export async function cleanupDeletedCardInstructions(db, runId, entityName, orph
  *
  * @param {object} db                   Supabase client
  * @param {string} runId                pipeline_runs.id
- * @param {number} stepIndex            current step
+ * @param {number|null} stepIndex       current step, or null for ALL steps
+ *                                      (used by routingHandler QA-passed cleanup)
  * @param {object} cardDefinitions      execution_plan_snapshot.card_definitions
  * @returns {Promise<Map<string, {pending: Array, orphaned: Array}>>}  keyed by entityName
  */
@@ -202,10 +205,11 @@ export async function findPendingInstructionsForRun(db, runId, stepIndex, cardDe
 
     for (const record of instructions) {
       for (const target of (record.targets || [])) {
-        if (target.step === stepIndex && target.status === 'pending') {
+        if ((stepIndex === null || target.step === stepIndex) && target.status === 'pending') {
           const card = cardDefinitions?.[target.card_id];
           if (card) {
             pending.push({
+              step: target.step,
               card_id: target.card_id,
               card_name: target.card_name,
               submodule_id: card.submodule_id,
@@ -242,11 +246,12 @@ export async function findPendingInstructionsForRun(db, runId, stepIndex, cardDe
  * @param {object} db                   Supabase client
  * @param {string} runId                pipeline_runs.id
  * @param {string} entityName           entity identifier
- * @param {object} options              { routingRound, createdBy, qaFailures, targets }
+ * @param {object} options              { routingRound, createdBy, qaFailures, targets, incrementLoopCount }
  * @returns {Promise<boolean>}          true if appended; false if dedup blocked
  */
 export async function writeInstructions(db, runId, entityName, {
   routingRound, createdBy, qaFailures, targets,
+  incrementLoopCount = false,
 }) {
   const newRecord = {
     routing_round: routingRound,
@@ -262,10 +267,14 @@ export async function writeInstructions(db, runId, entityName, {
     })),
   };
 
+  // Section C (2026-06-04): p_increment_loop_count opts into atomic
+  // entity_run_meta.loop_count bump inside the same UPDATE. routingHandler
+  // passes TRUE; other callers (sub-plan 2 gate writer) default to FALSE.
   const { data, error } = await db.rpc('append_card_instruction', {
     p_run_id: runId,
     p_entity_name: entityName,
     p_instruction: newRecord,
+    p_increment_loop_count: incrementLoopCount,
   });
 
   if (error) {

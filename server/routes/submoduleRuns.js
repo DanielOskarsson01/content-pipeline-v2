@@ -291,20 +291,18 @@ executeRouter.post('/run', async (req, res) => {
       }
     }
 
-    // 6. Check is_loop_pass flag (set by apply_entity_routing RPC)
-    const { data: stageRow } = await db
-      .from('pipeline_stages')
-      .select('is_loop_pass')
-      .eq('run_id', runId)
-      .eq('step_index', stepIdx)
-      .single();
-    const isLoopPass = stageRow?.is_loop_pass === true;
+    // Section C (2026-06-04): is_loop_pass flag retired. Request cardId is now
+    // the routed-retry signal. Section C dropped apply_entity_routing (the sole
+    // setter of is_loop_pass=TRUE), so a fresh read here would always return
+    // FALSE on new runs and become a misleading branch on legacy data. The
+    // cardId invariant is structural-plumbing through the writer chain:
+    // runs.js → autoExecutor → cardGroups.js → batchWorker → /run with cardId.
 
     // Prefer execution_plan_snapshot so mid-run template edits cannot poison
     // routing decisions; fall back to live template for runs created before
     // the snapshot column was wired.
     let cardDefinitions = {};
-    if (isLoopPass || cardId) {
+    if (cardId) {
       const { data: runRow } = await db.from('pipeline_runs')
         .select('project_id, execution_plan_snapshot').eq('id', runId).single();
       if (runRow?.execution_plan_snapshot?.card_definitions) {
@@ -320,11 +318,11 @@ executeRouter.post('/run', async (req, res) => {
       }
     }
 
-    // On loop passes: reset 'completed' pools back to 'pending' before loading.
-    // stageWorker sets pool status to 'completed' after each submodule run, but
-    // subsequent submodules at the same step still need to process these entities.
-    // Only 'failed' pools stay excluded.
-    if (isLoopPass) {
+    // On card-routed retries: reset 'completed' pools back to 'pending' before
+    // loading. stageWorker sets pool status to 'completed' after each submodule
+    // run, but subsequent submodules at the same step still need to process
+    // these entities. Only 'failed' pools stay excluded.
+    if (cardId) {
       await db
         .from('entity_stage_pool')
         .update({ status: 'pending', updated_at: new Date().toISOString() })
@@ -334,23 +332,23 @@ executeRouter.post('/run', async (req, res) => {
     }
 
     // Bulk-read entity pools for this step (MANDATORY: 1 query, not N)
-    // On loop passes: only process pending entities (routed entities)
+    // On card-routed retries: only process pending entities (routed entities)
     let poolQuery = db
       .from('entity_stage_pool')
       .select('entity_name, pool_items, status')
       .eq('run_id', runId)
       .eq('step_index', stepIdx);
-    if (isLoopPass) {
+    if (cardId) {
       poolQuery = poolQuery.eq('status', 'pending');
     }
     const { data: entityPools, error: poolErr } = await poolQuery;
 
     if (poolErr) throw poolErr;
 
-    // Filter out terminal entities on loop passes — they already passed QA
-    // and shouldn't re-process (saves ~9x LLM cost per loop-pass step)
+    // Filter out terminal entities on card-routed retries — they already
+    // passed QA and shouldn't re-process (saves ~9x LLM cost per retry step)
     let filteredPools = entityPools || [];
-    if (isLoopPass) {
+    if (cardId) {
       const { data: terminalEntities } = await db
         .from('entity_run_meta')
         .select('entity_name')
@@ -360,17 +358,17 @@ executeRouter.post('/run', async (req, res) => {
       const terminalSet = new Set((terminalEntities || []).map(e => e.entity_name));
       if (terminalSet.size > 0) {
         filteredPools = filteredPools.filter(p => !terminalSet.has(p.entity_name));
-        console.log(`[submoduleRuns] Loop pass: filtered out ${terminalSet.size} terminal entities, ${filteredPools.length} remaining`);
+        console.log(`[submoduleRuns] Card-routed retry: filtered out ${terminalSet.size} terminal entities, ${filteredPools.length} remaining`);
       }
     }
 
-    // Load entity_run_meta for loop metadata. Also load on card-routed
-    // batches — they need loop_count to derive loop_iteration for the
-    // resume-safety check in autoExecutor.checkExistingSubmoduleRun.
+    // Load entity_run_meta for loop metadata on card-routed batches — they
+    // need loop_count to derive loop_iteration for the resume-safety check in
+    // autoExecutor.checkExistingSubmoduleRun.
     // Section C pre-flight (2026-06-03): dropped loop_config from select
     // — verified unused in this file (grep loopMeta.loop_config returns 0).
     let metaMap = new Map();
-    if (isLoopPass || cardId) {
+    if (cardId) {
       const { data: entityMeta } = await db
         .from('entity_run_meta')
         .select('entity_name, loop_count, card_instructions')
@@ -406,9 +404,14 @@ executeRouter.post('/run', async (req, res) => {
       // previous partial run where fewer entities were processed), add the missing ones.
       // This prevents valid entities from being silently dropped when auto-execute re-runs
       // a step that was partially initialized by a previous manual or partial run.
-      // Only applies on non-loop passes — loop passes intentionally filter to 'pending' subset.
-      // Card-routed batches handled above with body-only scoping.
-      else if (!isLoopPass && inputData?.entities?.length > filteredPools.length) {
+      // Card-routed batches handled above with body-only scoping — execution only
+      // reaches this branch when cardId is falsy (if/else-if exclusivity).
+      // Section C (2026-06-04): dropped the `!isLoopPass &&` guard. Under the
+      // Multi-Card Pattern, routed retries always carry cardId; a non-card-routed
+      // step-rerun with widened entities is a legitimate re-execution that should
+      // respect the wider entity set (the OLD silently-drop behavior under
+      // isLoopPass=true was load-bearing only in the deprecated routing model).
+      else if (inputData?.entities?.length > filteredPools.length) {
         const existingNames = new Set(filteredPools.map(p => p.entity_name));
         const missingEntities = inputData.entities.filter(e => {
           const name = e.name || e.entity_name || 'unknown';
@@ -644,8 +647,11 @@ executeRouter.post('/run', async (req, res) => {
         items: ep.pool_items || [],
       };
 
-      // Inject loop_count into entity data for submodules that need it (e.g. loop-router)
-      if (isLoopPass && loopMeta) {
+      // Inject loop_count into entity data for submodules that need it (e.g. loop-router).
+      // Section C (2026-06-04): gated on cardId instead of the retired isLoopPass —
+      // routed retries always carry cardId; loopMeta was only loaded in the cardId
+      // branch above so this conjunction holds only on card-routed batches.
+      if (cardId && loopMeta) {
         entity.loop_count = loopMeta.loop_count || 0;
       }
 
@@ -1292,7 +1298,7 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
       // Bulk update entity_stage_pool in batches to avoid DB write storms on large runs.
       // Reset status to 'pending' so next submodule at this step can process
-      // these entities (critical for is_loop_pass steps where only 'pending' pools are loaded)
+      // these entities (critical for card-routed retry steps where only 'pending' pools are loaded)
       {
         const POOL_BATCH = 5;
         const poolEntries = [...poolMap];
