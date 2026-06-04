@@ -960,3 +960,37 @@ Entry types: decision | progress | blocker | idea
 
 **Updated by:** manual entry (session conclusion notes from user)
 
+### Session: 2026-06-03 → 2026-06-04 — Section C plan v3 (routingHandler rewrite contract)
+
+**Accomplished:**
+- Pre-flight commits landed: `b879c1d` (require `card_round` on pending targets in `validateCardInstructions`; 5 new tests including 3 loud-fail variants + multi-target happy path + historical-state preservation; 80/80 cardInstructions tests green) + `1eee648` (two LOW cleanups in submoduleRuns.js: dead `loop_config` removed from entity_run_meta select, per-entity card-merge console.log downgraded to per-batch aggregate). Both pushed to origin `sub-plan-1-multi-card`.
+- Drafted plan v1 (445 lines) → CTO plan review surfaced 7 findings (1 PASS, 6 NEEDS-REVISION).
+- Conducted `is_loop_pass` consumer audit: confirmed `apply_entity_routing` is sole setter; enumerated all 9 hits in `submoduleRuns.js`; recommended option (b)-via-cardId. Audit landed on the simpler architectural answer (cardId is already the routed-retry signal, present on every retry via the writer chain — `is_loop_pass` was a redundant pre-Multi-Card-Pattern side channel).
+- Revised to plan v2 (830 lines) folding all 7 v1 findings.
+- Dispatched parallel same-model agents (brutal-critic + Gemini-leg) — caught findings 1, 2/3, 5 correctly. **Mis-labeled the second agent as "Gemini" — actually a same-model general-purpose subagent, not real Pattern B.5.** Surfaced honestly to user.
+- User ran real Gemini independent verification on plan v2 + the 6 live files (sql/migration_multi_card_pattern.sql, server/services/{routingHandler,cardInstructions,cardGroups}.js, server/routes/{submoduleRuns,runs}.js). Real Gemini confirmed findings 1, 2/3, 4, 5 + caught **Finding 6 (CRITICAL)** the same-model "Gemini" leg missed entirely: plan v2 pseudocode passed `findPendingInstructionsForRun(stepIndex=null, ...)` for the QA-passed cleanup, but the helper at `cardInstructions.js:203` strictly filters `target.step === stepIndex`, so `target.step === null` evaluates false for every target → helper returns zero pending → cleanup silently does nothing. Exact silent-no-op class the whole sub-plan exists to kill. Same-model agents reasoned about it as a deferred design uncertainty (Open Question 1), not a code-execution bug.
+- Revised to plan v3 (932 lines, commit `71764d2`) folding all 4 real-Gemini load-bearing findings + Test Group 8 rewrite to reachable case + one-line `validateCards` cardId-step-uniqueness warning. User read-through cleared all 3 v3 spot-checks (finding 6 helper extension, Group 8 rewrite, no fictional SELECT FOR UPDATE in the SQL).
+- Branch pushed to origin: 3 commits ahead (`b879c1d` + `1eee648` + `71764d2`), durable on GitHub.
+
+**Decisions:**
+- **`is_loop_pass` retired via cardId-based derivation** (option (b), not the band-aid side-channel option (a)). cardId is already the routed-retry signal via the writer chain (`runs.js:1155` → autoExecutor → `cardGroups.js:99-106` → batchWorker → `submodule_runs.card_id`). The flag predated the Multi-Card Pattern contract; now structurally redundant. Single source of truth.
+- **`loop_count` atomic via RPC parameter, NOT separate UPDATE.** Add `p_increment_loop_count BOOLEAN DEFAULT FALSE` to `append_card_instruction` via one added SET clause (`loop_count = CASE WHEN p_increment_loop_count THEN COALESCE(loop_count, 0) + 1 ELSE loop_count END`) in the existing single UPDATE WHERE NOT EXISTS. Atomicity by Postgres single-statement UPDATE semantics — if dedup blocks (0 rows touched), loop_count naturally doesn't bump. No SELECT FOR UPDATE required (v2 pseudocode invented one; v3 fixed it against the live RPC body at `migration_multi_card_pattern.sql:133-163`).
+- **`findPendingInstructionsForRun` and `findPendingInstructions` extended to accept `stepIndex: number | null`** ("all steps" semantics when null). Gemini-verified all 4 callers pass specific integers → extension is purely additive, zero backward-compat risk.
+- **Test Group 8 rewritten to the reachable dangerous case** (`cardId=null`, non-card-routed step-rerun, `inputData.entities.length > pool.size`). v2 spec verified a vacuously-passing card-routed scenario that can never reach line 411 (Gemini-confirmed if/else exclusivity). Group 8 documents an intended **behavior change**: pre-v2 the defensive merge was blocked on `isLoopPass=true`, silently dropping the widened entities (the bug the merge exists to prevent). Post-v2 the merge fires, entities preserved. Confirmed by user as the desired correctness improvement.
+- **`is_loop_pass` column kept inert in schema for one production cycle**, dropped in follow-up migration. Schema comment updated to DEPRECATED with date + reason — never becomes mystery-cruft.
+- **AC 2 grep exclusion list** adds `migration_routing.sql` and `migration_multi_card_pattern.sql` (real-Gemini direct grep confirmed the v2 list was incomplete; without these, AC 2 would falsely block the commit).
+- **One-line belt-and-suspenders `validateCards` warning** added for cardId-reused-across-steps. `getConsumedRoundsForRun` keys by (entity, card_id), not (entity, card_id, step) — latent cross-step contamination if a future template reuses a cardId at multiple steps. Today's data model doesn't; the warning surfaces the latent shape.
+- **Three review rounds, not four.** Brutal-critic explicitly recommended the 2-round cap stand after v2 → real-Gemini on v3 if findings folded cleanly. v3 user read-through cleared all spot-checks. No more reviewer rounds; implementation runs against v3 in a fresh session.
+- **Plan v3 committed + pushed** (against initial "no push" close-out plan) — three rounds of review investment + load-bearing pre-flight contract should not be local-only on a single machine. Plan is the implementation contract; belongs in git history.
+
+**Cross-model verification process finding (NEW):**
+The v2 review round dispatched two parallel same-model general-purpose subagents, one labeled "Gemini" via brief. Both agents made real tool calls against real files (so their findings weren't fabricated), but they share the underlying model and its blind spots. **Finding 6 alone would have shipped if the simulated round had been trusted as Pattern B.5.** Going forward in this project, treat simulated cross-checks as same-model; weight only real cross-model checks (paste files to actual Gemini, or fetch via WebFetch) as Pattern B.5. Documented in plan v3 itself for posterity.
+
+**Blockers/Questions:**
+- Section C implementation pending — runs against v3 plan in a fresh session. Multi-hour single-file rewrite + 2 SQL files + helper extensions + 9 test groups + ship-gate. Needs fresh runway (no half-rewrite at session boundary).
+- Tripwire stub continues guarding production until Section C lands AND deploys. Do not push Step 7 traffic.
+- Deploy gate pre-condition 0 (HARD STOP) for the eventual deploy session: `ecosystem.config.cjs` must handle fork_mode cleanly (per 2026-06-02 PM2 cluster_mode incident). Separate 1-task micro-plan owns the fix; if not landed, `deploy.sh` MUST NOT run.
+- Out-of-scope candidate filed: runtime loud-fail check that `cardId` is present on step-execute calls to steps with pending instructions. cardId is currently structural-plumbing (Gemini-surfaced nuance), not runtime-enforced. Section C retires `is_loop_pass` on the structural-plumbing guarantee; a future check would convert it to a runtime guarantee.
+
+**Updated by:** session-closer (manual entry — Section C planning closeout)
+
