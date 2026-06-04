@@ -428,6 +428,40 @@ console.log('\n--- findPendingInstructionsForRun (batch helper) ---');
   assert(result.get('Wazdan').orphaned.length === 1, 'orphaned tracked per entity in batch result');
 })();
 
+// Section C (2026-06-04) — findPendingInstructionsForRun extended to accept
+// stepIndex=null meaning "all steps". routingHandler's QA-passed cleanup
+// depends on this; without the extension the predicate target.step === null
+// is always false and the cleanup silently does nothing (the real-Gemini v3
+// finding that the v2 same-model leg missed).
+(async function batch_stepIndexNull_returnsAllSteps() {
+  const entityRows = [
+    { entity_name: 'Wazdan', card_instructions: [{ routing_round: 2, targets: [
+      { step: 1, card_id: 'card-A-uuid', status: 'pending', loop_iteration: 1, card_round: 2 },
+      { step: 5, card_id: 'card-B-uuid', status: 'pending', loop_iteration: 1, card_round: 2 },
+    ]}]},
+  ];
+  const { db } = buildMockDb({ entityRows });
+  const result = await findPendingInstructionsForRun(db, 'run-1', null, cardDefs);
+  const pending = result.get('Wazdan').pending;
+  assert(pending.length === 2, 'stepIndex=null returns pending across ALL steps');
+  assert(pending.some(p => p.card_id === 'card-A-uuid'), 'includes step-1 pending');
+  assert(pending.some(p => p.card_id === 'card-B-uuid'), 'includes step-5 pending');
+})();
+
+(async function batch_stepIndexNumber_unchanged() {
+  const entityRows = [
+    { entity_name: 'Wazdan', card_instructions: [{ routing_round: 2, targets: [
+      { step: 1, card_id: 'card-A-uuid', status: 'pending', loop_iteration: 1, card_round: 2 },
+      { step: 5, card_id: 'card-B-uuid', status: 'pending', loop_iteration: 1, card_round: 2 },
+    ]}]},
+  ];
+  const { db } = buildMockDb({ entityRows });
+  const result = await findPendingInstructionsForRun(db, 'run-1', 1, cardDefs);
+  const pending = result.get('Wazdan').pending;
+  assert(pending.length === 1, 'stepIndex=1 still returns only step-1 pending (cardGroups.js path unchanged)');
+  assert(pending[0].card_id === 'card-A-uuid', 'step-1 pending is the right one');
+})();
+
 // ===========================================================================
 // writeInstructions — Fix #1 BOOLEAN return + CTO Finding 1 loop_iteration injection
 // ===========================================================================
@@ -495,6 +529,49 @@ console.log('\n--- writeInstructions (BOOLEAN return + loop_iteration injection)
   const { db, capturedRpc } = buildMockDb({ rpcReturn: { data: true, error: null } });
   await writeInstructions(db, 'run-1', 'Wazdan', { routingRound: 2, createdBy: 'router', targets: [] });
   assert(capturedRpc[0].args.p_instruction.targets.length === 0, 'empty targets → empty array sent to RPC');
+})();
+
+// Section C (2026-06-04) — incrementLoopCount opts the RPC into an atomic
+// entity_run_meta.loop_count bump inside the same UPDATE. Without the bump
+// folded into the RPC, a separate UPDATE could fail after the RPC succeeded,
+// leaving the instruction persisted with a stale loop_count — undercount on
+// the next routing pass would grant one extra retry past MAX_LOOPS.
+(async function write_passesIncrementLoopCount_default_false() {
+  const { db, capturedRpc } = buildMockDb({ rpcReturn: { data: true, error: null } });
+  await writeInstructions(db, 'run-1', 'Wazdan', {
+    routingRound: 2, createdBy: 'router',
+    targets: [{ step: 1, card_id: 'c', card_round: 2 }],
+  });
+  assert(
+    capturedRpc[0].args.p_increment_loop_count === false,
+    'caller omits the flag → RPC receives p_increment_loop_count: false (back-compat for sub-plan 2 gate writer)',
+  );
+})();
+
+(async function write_passesIncrementLoopCount_explicit_true() {
+  const { db, capturedRpc } = buildMockDb({ rpcReturn: { data: true, error: null } });
+  await writeInstructions(db, 'run-1', 'Wazdan', {
+    routingRound: 2, createdBy: 'routingHandler',
+    targets: [{ step: 1, card_id: 'c', card_round: 2 }],
+    incrementLoopCount: true,
+  });
+  assert(
+    capturedRpc[0].args.p_increment_loop_count === true,
+    'routingHandler path → RPC receives p_increment_loop_count: true (atomic loop_count bump)',
+  );
+})();
+
+(async function write_passesIncrementLoopCount_explicit_false() {
+  const { db, capturedRpc } = buildMockDb({ rpcReturn: { data: true, error: null } });
+  await writeInstructions(db, 'run-1', 'Wazdan', {
+    routingRound: 2, createdBy: 'router',
+    targets: [{ step: 1, card_id: 'c', card_round: 2 }],
+    incrementLoopCount: false,
+  });
+  assert(
+    capturedRpc[0].args.p_increment_loop_count === false,
+    'explicit false propagates as false (no silent truthy coercion)',
+  );
 })();
 
 // ===========================================================================

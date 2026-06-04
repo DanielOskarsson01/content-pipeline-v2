@@ -1,23 +1,33 @@
 /**
- * Routing Handler — Phase 3
+ * Routing Handler — Section C rewrite (2026-06-04)
  *
  * Reads loop-router decisions from entity_submodule_runs, resolves routing_rules
- * into card-based per-entity instructions, enforces max_loops backstop,
- * cascade-deletes stale intermediate data, and calls the apply_entity_routing
- * RPC in a single atomic transaction.
+ * into card-based per-entity instructions, enforces max_loops backstop, and
+ * writes pending card instructions to entity_run_meta.card_instructions via
+ * the Multi-Card Pattern (append_card_instruction RPC with atomic loop_count
+ * bump). Per-entity try/catch isolates failures.
  *
- * Phase 3 additions:
- * - resolveCards(): maps QA failures → routing_rules → card definitions
- * - flag_manual upgrade: when routing_rules resolve cards for a flag_manual
- *   entity (2+ QA failures), the decision is upgraded to loop_*
- * - validateCards(): template save-time validation for card/rule consistency
- * - DECISION_TARGET_MAP retained as fallback for templates without routing_rules
+ * Section C replaces the pre-2026-06-04 model:
+ * - Cascade-delete of entity_submodule_runs + submodule_runs → REMOVED
+ * - apply_entity_routing RPC call → REMOVED (stub dropped in
+ *   sql/drop_apply_entity_routing_tripwire.sql)
+ * - pipeline_stages.is_loop_pass side-channel → retired in submoduleRuns.js
+ *   (request cardId is now the routed-retry signal)
+ *
+ * Closes BACKLOG #7 (cascade-delete partial-state damage on RPC failure).
  *
  * Called by the approval handler in runs.js when routing is detected.
  */
 
+import {
+  SKIP_REASONS,
+  writeInstructions,
+  markSkipped,
+  getConsumedRoundsForRun,
+  findPendingInstructionsForRun,
+} from './cardInstructions.js';
+
 const MAX_LOOPS = 3;
-const LAST_STEP = 10; // Pipeline ceiling (from stepConfig)
 
 // Decision → target_step mapping — FALLBACK for templates without routing_rules.
 // Templates WITH routing_rules use card-based resolution (resolveCards) instead.
@@ -134,19 +144,48 @@ function validateCards(executionPlan, registeredSubmodules) {
     }
   }
 
+  // Belt-and-suspenders: warn if any cardId appears at multiple steps.
+  // getConsumedRoundsForRun keys consumed rounds by (entity, card_id) only, so a
+  // cardId reused across steps would silently cross-contaminate round derivation.
+  // Today's data model doesn't reuse cardIds across steps; this warning surfaces
+  // the latent shape if a future template ever does.
+  const cardIdStepMap = {};
+  for (const [name, card] of Object.entries(cards)) {
+    if (card.step === undefined) continue;
+    if (!cardIdStepMap[name]) cardIdStepMap[name] = new Set();
+    cardIdStepMap[name].add(card.step);
+  }
+  for (const [name, steps] of Object.entries(cardIdStepMap)) {
+    if (steps.size > 1) {
+      warnings.push(
+        `Card "${name}" is configured at multiple steps [${[...steps].join(', ')}]. ` +
+        `getConsumedRoundsForRun keys consumed rounds by (entity, card_id) only — ` +
+        `reusing a cardId across steps will cross-contaminate round derivation. ` +
+        `Use distinct cardIds per step.`
+      );
+    }
+  }
+
   return warnings;
 }
 
 /**
  * Apply routing for a run. Reads loop-router output, builds decisions for
- * ALL entities, enforces max_loops, cascade-deletes stale data, calls RPC.
+ * ALL entities, enforces max_loops, then writes per-entity pending card
+ * instructions to entity_run_meta.card_instructions via the Multi-Card
+ * Pattern (append_card_instruction RPC with atomic loop_count bump). Each
+ * entity is processed independently — a failure for one does not block
+ * the others.
+ *
+ * Section C (2026-06-04) replaced the pre-2026-06-04 cascade-delete +
+ * apply_entity_routing RPC flow. See module docstring above.
  *
  * @param {object} db - Supabase client
  * @param {string} runId - The run UUID
  * @param {number} routingStep - The step index where routing runs (default 10)
  * @param {object} [executionPlan={}] - Template execution_plan (cards + routing_rules)
- * @returns {object} Routing summary from the RPC
- * @throws {Error} If no router output found (always a bug) or RPC fails
+ * @returns {object} { decisions_sent, instructions_written, per_entity: [...] }
+ * @throws {Error} If no router output found (always a bug)
  */
 export async function applyRouting(db, runId, routingStep = 10, executionPlan = {}) {
   // ── a) Read loop-router output ──────────────────────────────────────
@@ -236,6 +275,10 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
     }
   }
 
+  // Bind once for the whole function — used by b2 (resolveCards) and by the
+  // per-entity instruction-write loop (e). Empty {} when no cards configured.
+  const cardDefinitions = executionPlan?.cards || {};
+
   // ── b2) Resolve routing_rules → cards for each decision ─────────────
   const hasRoutingRules = executionPlan?.routing_rules && Object.keys(executionPlan.routing_rules).length > 0;
   if (hasRoutingRules) {
@@ -294,71 +337,194 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
     }
   }
 
-  // ── e) Cascade-delete stale intermediate data for routed entities ───
-  const routedEntities = decisions.filter(d => d.target_step !== undefined);
-  for (const d of routedEntities) {
-    const { error: delErr } = await db
-      .from('entity_submodule_runs')
-      .delete()
-      .eq('run_id', runId)
-      .eq('entity_name', d.entity_name)
-      .gte('step_index', d.target_step)
-      .lte('step_index', LAST_STEP);
+  // ── e) Per-entity instruction-write (Section C — Multi-Card Pattern) ─
+  // Replaces the pre-2026-06-04 cascade-delete + apply_entity_routing RPC flow.
+  // Each entity is processed independently: a writeInstructions failure for one
+  // entity marks that entity terminal_state='failed' but does NOT block the
+  // others. The failure-isolation property is the whole point of this rewrite
+  // (closes BACKLOG #7 partial-state-on-RPC-failure damage class).
+  const writeResults = [];
+  const consumedRoundsByEntity = await getConsumedRoundsForRun(db, runId);
 
-    if (delErr) {
-      console.error(
-        `[routingHandler] Failed to delete stale runs for ${d.entity_name}: ${delErr.message}`
-      );
+  // Pre-load pending instructions for the QA-passed cleanup branch.
+  // stepIndex=null means "all steps" — Section C extension of the helper
+  // (cardInstructions.js findPendingInstructionsForRun). Real cardDefinitions
+  // MUST be passed; empty {} would silently classify everything as orphaned.
+  const pendingByEntity = await findPendingInstructionsForRun(
+    db, runId, null, cardDefinitions
+  );
+
+  for (const d of decisions) {
+    if (d.decision === 'completed') {
+      // QA-passed cleanup: mark any stale pending from prior rounds as skipped
+      // with reason QA_PASSED_ON_RECHECK. Non-fatal — a completed entity has
+      // already passed; cleanup failure is logged but doesn't warrant a
+      // terminal_state flip.
+      const entityPending = pendingByEntity.get(d.entity_name)?.pending || [];
+      for (const p of entityPending) {
+        try {
+          await markSkipped(
+            db, runId, d.entity_name, p.step, p.card_id,
+            SKIP_REASONS.QA_PASSED_ON_RECHECK
+          );
+        } catch (err) {
+          console.error(
+            `[routingHandler] markSkipped QA-passed cleanup failed for ` +
+            `${d.entity_name} step=${p.step} card=${p.card_id}: ${err.message}`
+          );
+        }
+      }
+      writeResults.push({
+        entity_name: d.entity_name,
+        decision: 'completed',
+        instructions_skipped: entityPending.length,
+      });
+      continue;
     }
-  }
 
-  // Also delete parent submodule_runs records for reactivated steps.
-  // Without this, checkExistingSubmoduleRun in autoExecutor finds old 'approved'
-  // records and skips every submodule on loop re-entry — silently breaking routing.
-  if (routedEntities.length > 0) {
-    const earliestTarget = Math.min(...routedEntities.map(d => d.target_step));
+    if (d.decision === 'flag_manual' || d.decision === 'failed') {
+      writeResults.push({
+        entity_name: d.entity_name,
+        decision: d.decision,
+        instructions_written: 0,
+      });
+      continue;
+    }
 
-    const { data: staleStages } = await db
-      .from('pipeline_stages')
-      .select('id')
-      .eq('run_id', runId)
-      .gte('step_index', earliestTarget)
-      .lte('step_index', LAST_STEP);
+    if (!d.target_step) {
+      await db.from('entity_run_meta').update({
+        terminal_state: 'failed',
+        failure_reason: 'routing_no_target_step',
+      }).eq('run_id', runId).eq('entity_name', d.entity_name);
+      writeResults.push({
+        entity_name: d.entity_name,
+        decision: d.decision,
+        error: 'no_target_step',
+      });
+      continue;
+    }
 
-    if (staleStages && staleStages.length > 0) {
-      const { error: smDelErr } = await db
-        .from('submodule_runs')
-        .delete()
-        .in('stage_id', staleStages.map(s => s.id));
+    // Build pending targets. For each active card, derive nextRound from
+    // consumed rounds, then BOUND-CHECK card.rounds[String(nextRound)] before
+    // emitting the target. Without the bound check, validateCardInstructions
+    // would accept the write but the B.5 merge in submoduleRuns.js would
+    // silently fall back to base options for the missing round.
+    const targets = [];
+    const activeCards = d.config_overrides?.active_cards || {};
+    const consumedRounds = consumedRoundsByEntity[d.entity_name] || {};
+    const exhaustedCards = []; // {step, card_id, reason} triples
 
-      if (smDelErr) {
-        console.error(`[routingHandler] Failed to delete stale submodule_runs: ${smDelErr.message}`);
-      } else {
-        console.log(`[routingHandler] Deleted submodule_runs for steps ${earliestTarget}-${LAST_STEP} (${staleStages.length} stages)`);
+    for (const [stepStr, cardIds] of Object.entries(activeCards)) {
+      const step = Number(stepStr);
+      for (const cardId of cardIds) {
+        const card = cardDefinitions[cardId];
+        if (!card) {
+          exhaustedCards.push({ step, card_id: cardId, reason: 'card_not_in_definitions' });
+          continue;
+        }
+        const alreadyConsumed = new Set((consumedRounds[cardId] || []).map(Number));
+        let nextRound = 2;
+        while (alreadyConsumed.has(nextRound)) nextRound++;
+
+        // Bound check — required for the B.5 merge contract. Without it,
+        // routedHandler would emit a target with card_round=N where
+        // card.rounds[String(N)] is undefined, and submoduleRuns.js would
+        // silently merge the base options (the "same settings that just
+        // failed" silent no-op the Multi-Card Pattern exists to eliminate).
+        if (!card.rounds || !card.rounds[String(nextRound)]) {
+          exhaustedCards.push({ step, card_id: cardId, reason: 'rounds_exhausted' });
+          continue;
+        }
+
+        targets.push({
+          step,
+          card_id: cardId,
+          card_round: nextRound,
+        });
       }
     }
+
+    // markSkipped each exhausted (step, card_id) pair with the appropriate
+    // reason. Loop on real (step, card_id) pairs — no placeholder iteration.
+    for (const { step, card_id, reason } of exhaustedCards) {
+      try {
+        const skipReason = reason === 'card_not_in_definitions'
+          ? SKIP_REASONS.CARD_DELETED
+          : SKIP_REASONS.ROUNDS_EXHAUSTED;
+        await markSkipped(db, runId, d.entity_name, step, card_id, skipReason);
+      } catch (err) {
+        console.error(
+          `[routingHandler] markSkipped exhausted failed for ${d.entity_name} ` +
+          `step=${step} card=${card_id}: ${err.message}`
+        );
+      }
+    }
+
+    // If NO viable targets remain after the bound check, the entity is
+    // exhausted at the cards level. Flip to terminal_state='failed' with the
+    // most informative failure_reason and skip the writeInstructions call.
+    if (targets.length === 0) {
+      await db.from('entity_run_meta').update({
+        terminal_state: 'failed',
+        failure_reason: exhaustedCards.some(e => e.reason === 'card_not_in_definitions')
+          ? 'card_not_in_definitions'
+          : 'rounds_exhausted',
+      }).eq('run_id', runId).eq('entity_name', d.entity_name);
+      writeResults.push({
+        entity_name: d.entity_name,
+        decision: d.decision,
+        instructions_written: 0,
+        exhausted_cards: exhaustedCards.length,
+      });
+      continue;
+    }
+
+    // Per-entity try/catch. loop_count bump is ATOMIC inside the RPC via the
+    // new p_increment_loop_count parameter — no separate UPDATE means no
+    // silent-orphan partial-state shape (a separate UPDATE that failed after
+    // the RPC succeeded would persist the instruction with a stale loop_count,
+    // letting the next routing pass undercount and grant one extra retry past
+    // MAX_LOOPS).
+    try {
+      const newLoopCount = (loopCounts.get(d.entity_name) || 0) + 1;
+      const written = await writeInstructions(db, runId, d.entity_name, {
+        routingRound: newLoopCount,
+        createdBy: 'routingHandler',
+        qaFailures: d.config_overrides?.triggered_by || [],
+        targets,
+        incrementLoopCount: true,
+      });
+      writeResults.push({
+        entity_name: d.entity_name,
+        decision: d.decision,
+        target_step: d.target_step,
+        instructions_written: targets.length,
+        dedup_blocked: !written,
+      });
+    } catch (err) {
+      console.error(
+        `[routingHandler] writeInstructions failed for ${d.entity_name}: ${err.message}`
+      );
+      await db.from('entity_run_meta').update({
+        terminal_state: 'failed',
+        failure_reason: 'instruction_write_failed',
+      }).eq('run_id', runId).eq('entity_name', d.entity_name);
+      writeResults.push({
+        entity_name: d.entity_name,
+        decision: d.decision,
+        instructions_written: 0,
+        error: err.message,
+      });
+    }
   }
 
-  // ── f) Call RPC ─────────────────────────────────────────────────────
-  const { data: rpcResult, error: rpcErr } = await db.rpc('apply_entity_routing', {
-    p_run_id: runId,
-    p_routing_decisions: decisions,
-    p_routing_step: routingStep,
-  }).single();
-
-  if (rpcErr) {
-    throw new Error(`apply_entity_routing RPC failed: ${rpcErr.message}`);
-  }
-
-  // ── g) Return summary ──────────────────────────────────────────────
+  // ── f) Return summary ──────────────────────────────────────────────
   return {
-    ...rpcResult,
     decisions_sent: decisions.length,
-    routed_entities: routedEntities.map(d => ({
-      entity_name: d.entity_name,
-      decision: d.decision,
-      target_step: d.target_step,
-    })),
+    instructions_written: writeResults.reduce(
+      (n, r) => n + (r.instructions_written || 0), 0
+    ),
+    per_entity: writeResults,
   };
 }
 
