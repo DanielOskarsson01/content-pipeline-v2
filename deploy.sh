@@ -45,8 +45,18 @@ echo "[5/6] Installing dependencies on server..."
 ssh "$SERVER" "cd $REMOTE_APP && npm install --omit=dev"
 
 # 6. Restart PM2
+# Deterministic restart: delete all PM2 processes, then start fresh from
+# ecosystem.config.cjs. Closes two failure modes:
+#   1. pm2 6.0.14 'pm2 start <config>' behavior against existing same-named
+#      processes is undocumented (may update-in-place, may duplicate, may
+#      error). Forcing 'pm2 delete all' first guarantees a known clean state.
+#   2. Recovers from the 2026-06-02 dump.pm2 silent truncation: the new
+#      'pm2 save' after the start writes a fresh dump matching reality.
+# Brief gap: ~5-30s while apps stop and restart (pathological cases can
+# run longer if a service is slow to shut down). profile-api's Chrome
+# respawns via its own 120s health check after profile-api itself comes up.
 echo "[6/6] Restarting application..."
-ssh "$SERVER" "cd $REMOTE_APP && pm2 delete content-pipeline-v2 2>/dev/null || true && pm2 start ecosystem.config.cjs && pm2 save"
+ssh "$SERVER" "cd $REMOTE_APP && pm2 delete all 2>/dev/null || true && pm2 start ecosystem.config.cjs && pm2 save"
 
 echo ""
 echo "=== Deploy complete ==="
