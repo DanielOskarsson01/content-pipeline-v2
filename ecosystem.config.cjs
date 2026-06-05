@@ -1,10 +1,16 @@
 // Server: Hetzner CX22 — 2 vCPU, 4 GB RAM
-// Memory budget: OS+nginx ~300MB, Redis ~100MB, apps ~3.5GB, buffer ~150MB
+// Memory budget: OS+nginx ~300MB, Redis ~100MB, apps ~3GB, buffer ~700MB
 //
-// Source of truth for every PM2 app on this host. Includes apps that live
-// outside the skeleton repo's tree (profile-api at /opt/profile-api, meal-api
-// at /var/www/meals-api) so a single `pm2 start ecosystem.config.cjs` from
-// /opt/content-pipeline-v2 reproduces full state.
+// Source of truth for the content-pipeline-v2 deployment surface: the 3
+// skeleton apps (pipeline-api, stage-worker, batch-worker) plus profile-api
+// (LinkedIn scraper at /opt/profile-api — runtime dependency of the
+// linkedin-profile-scraper and linkedin-post-scraper submodules in
+// modules-v2/step-3-scraping/, which hardcode localhost:3847).
+//
+// Unrelated apps on the same host (e.g. meal-api at /var/www/meals-api/)
+// are out of scope for content-pipeline deploys and live in their own
+// management. The Hetzner host may run other PM2 apps; this config
+// does not claim global source-of-truth.
 //
 // All apps use exec_mode: 'fork'. PM2 6.0.14 cluster_mode is broken on this
 // host (apps exit code 9 + SIGINT instantly). See docs/HETZNER_SERVICES.md.
@@ -103,24 +109,5 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
     },
 
-    // ── Meal API ────────────────────────────────────────────────
-    // Weekly meal planner ("Pantry API", port 3002). Lightweight express
-    // service. Non-standard location: /var/www/meals-api/ (legacy from a
-    // pre-/opt/ deployment).
-    {
-      name: 'meal-api',
-      script: 'index.js',
-      cwd: '/var/www/meals-api',
-      exec_mode: 'fork',
-      env: {
-        NODE_ENV: 'production',
-      },
-      instances: 1,
-      autorestart: true,
-      max_restarts: 10,
-      restart_delay: 5000,
-      max_memory_restart: '150M',
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-    },
   ],
 };
