@@ -4,7 +4,7 @@
 **SSH alias:** `ssh hetzner` (configured in `~/.ssh/config`, `IdentityFile ~/.ssh/hetzner_key`)
 **Last verified:** 2026-06-02
 
-This document captures the systemd services, boot chain, self-healing layers, and recovery procedures for the Hetzner host that runs the Content Pipeline backend (skeleton repo `content-pipeline-v2`) plus the LinkedIn `profile-api` and other side services.
+This document captures the systemd services, boot chain, self-healing layers, and recovery procedures for the Hetzner host that runs the Content Pipeline backend (skeleton repo `content-pipeline-v2`) plus the LinkedIn `profile-api` (a runtime dependency of the LinkedIn scraper submodules in modules-v2/step-3-scraping/). Unrelated apps on this host (e.g. meal-api) are not in scope for this document; see their own repos/sessions.
 
 ---
 
@@ -15,8 +15,7 @@ This document captures the systemd services, boot chain, self-healing layers, an
 | `pipeline-api` | fork | Skeleton API (port 3001) |
 | `stage-worker` | fork | BullMQ stage queue worker |
 | `batch-worker` | fork | BullMQ batch queue worker (entity-level execution) |
-| `profile-api` | fork | LinkedIn profile/job scraper (port 3847) — spawns Chrome on display `:1` |
-| `meal-api` | fork | Weekly meal planner API (port 3002, "Pantry API"). Lives in `/var/www/meals-api`, script `index.js`. |
+| `profile-api` | fork | LinkedIn profile/job scraper (port 3847) — spawns Chrome on display `:1`. Runtime dependency of linkedin-profile-scraper and linkedin-post-scraper submodules (hardcoded `localhost:3847`). |
 
 Display server + Chrome are NOT separate systemd services. `profile-api/server.js` spawns Chrome itself via `spawn()` with hardcoded:
 - `DISPLAY: ":1"`
@@ -96,9 +95,8 @@ boot
                     ├── pipeline-api
                     ├── stage-worker
                     ├── batch-worker
-                    ├── profile-api
-                    │     └── spawns Chrome on :1, CDP on :9222
-                    └── meal-api
+                    └── profile-api
+                          └── spawns Chrome on :1, CDP on :9222
 ```
 
 ---
@@ -130,11 +128,11 @@ The alignment surfaced two real issues, both fixed:
 
 **`ecosystem.config.cjs` not yet edited** — the file on disk still defaults to cluster (no explicit `exec_mode`). If the saved dump is ever lost and someone runs `pm2 start ecosystem.config.cjs`, they'll hit the same crash. The fix is to add `exec_mode: 'fork'` to each app block, or upgrade/downgrade PM2 once a working version is identified.
 
-### Issue 2: dump.pm2 silently lost 3 of 5 processes
+### Issue 2: dump.pm2 silently lost processes
 
-The original PM2 daemon was running 5 apps (pipeline-api, stage-worker, batch-worker, profile-api, meal-api) but `pm2 save` wrote a dump containing only 2 (pipeline-api, stage-worker). The dump's `.bak` from a prior save also contained only 2 — so the dump has been incomplete for a while, possibly since the apps were last manually started without `pm2 save` afterward.
+The original PM2 daemon was running several apps but `pm2 save` had been writing a dump containing only a subset (pipeline-api, stage-worker). The dump's `.bak` from a prior save also contained the same subset — so the dump had been incomplete for a while, possibly since apps were last manually started without `pm2 save` afterward.
 
-**Recovery:** started missing apps explicitly via `pm2 start <script> --name <name>` and ran `pm2 save` again. Final dump contains all 5 apps. `meal-api` source was eventually located at `/var/www/meals-api/index.js` (non-standard path — the initial search over `/opt /root /home` missed `/var/www`). All apps now in fork mode, dump complete, both services active.
+**Recovery:** started missing in-scope apps explicitly via `pm2 start <script> --name <name>` and ran `pm2 save` again. Final dump contains the 4 content-pipeline apps (pipeline-api, stage-worker, batch-worker, profile-api), all in fork mode.
 
 ### Operational discipline
 
@@ -167,12 +165,13 @@ Expected output:
 - `active` for xvfb
 - `active` for pm2-root (currently inactive — see above)
 - `HTTP 200` from CDP
-- All 5 PM2 apps `online`
+- All 4 content-pipeline PM2 apps `online` (pipeline-api, stage-worker, batch-worker, profile-api). Other apps managed outside this config (e.g. meal-api) may also be present; not in scope here.
 
 ---
 
 ## History
 
-- **2026-06-02 (later)** — Aligned PM2 daemon with `pm2-root.service` (was inactive despite daemon running). Switched pipeline-api / stage-worker / batch-worker from cluster_mode to fork_mode after cluster_mode under PM2 6.0.14 exited with code 9 + SIGINT instantly. Rebuilt dump.pm2 (was silently missing 3 of 5 apps). Removed manually-started `websockify` relic on port 6080. Discovered `meal-api` source missing from disk — not recovered.
+- **2026-06-04** — Decoupled meal-api (Pantry API at /var/www/meals-api) from `ecosystem.config.cjs` and from this document. meal-api is unrelated to the content-pipeline deployment; it is now managed in its own session/scope. The Hetzner host may run other PM2 apps; this config and document only cover the content-pipeline deployment surface.
+- **2026-06-02 (later)** — Aligned PM2 daemon with `pm2-root.service` (was inactive despite daemon running). Switched pipeline-api / stage-worker / batch-worker from cluster_mode to fork_mode after cluster_mode under PM2 6.0.14 exited with code 9 + SIGINT instantly. Rebuilt dump.pm2 (was silently missing several apps). Removed manually-started `websockify` relic on port 6080.
 - **2026-06-02** — Replaced manually-started TigerVNC on `:1` (running since 2026-04-25) with `xvfb.service`. Added `Requires=xvfb.service` + `Environment=DISPLAY=:1` to `pm2-root.service`. TigerVNC was fragile (no respawn, no boot-time start); Xvfb under systemd gives self-healing + clean boot chain.
 - **Earlier** — `pm2-root.service` initially created by `pm2 startup` (standard PM2 systemd installer), edited today to add Xvfb dependency and DISPLAY env.
