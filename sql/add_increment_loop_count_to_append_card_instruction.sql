@@ -22,6 +22,26 @@
 -- Function body is byte-identical to migration_multi_card_pattern.sql:133-163
 -- (the live append_card_instruction body) PLUS one additional SET clause:
 --   loop_count = CASE WHEN p_increment_loop_count THEN COALESCE(loop_count, 0) + 1 ELSE loop_count END
+--
+-- DROP FIRST: PostgreSQL refuses to add a 4-arg-with-DEFAULT-FALSE overload
+-- alongside the existing 3-arg version (would make 3-arg calls ambiguous).
+-- Discovered 2026-06-05 when the original migration form (CREATE OR REPLACE
+-- only) failed on prod with "42725: function name is not unique." The
+-- original PRE-COND 1 dry-run had bootstrapped from empty and missed this
+-- transition cost. Re-verified 2026-06-05 on a fresh Supabase branch that
+-- first installed prod's exact 3-arg body, then applied this DROP+CREATE
+-- atomically, then ran the 4 functional tests (3-arg back-compat, 4-arg
+-- TRUE bumps, dedup-BLOCK with TRUE atomic NO-bump, 4-arg explicit FALSE)
+-- — all pass.
+--
+-- The DROP+CREATE runs in the same migration (apply_migration wraps it in
+-- BEGIN/COMMIT), so there is no transactional window where the function
+-- is absent. Old 3-arg JS callers on Hetzner during the Step 1 → Step 2
+-- deploy window hit the new 4-arg-with-DEFAULT-FALSE function; the 4th
+-- param defaults to FALSE so behavior is byte-identical to the old body
+-- (no loop_count bump on 3-arg calls).
+
+DROP FUNCTION IF EXISTS append_card_instruction(uuid, text, jsonb);
 
 CREATE OR REPLACE FUNCTION append_card_instruction(
   p_run_id UUID,
@@ -58,4 +78,4 @@ END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION append_card_instruction IS
-  'Atomic append to entity_run_meta.card_instructions with target-level dedup + optional atomic loop_count bump. Returns TRUE if appended, FALSE if any target in p_instruction matched an existing pending (step, card_id, loop_iteration) triple (write blocked + loop_count NOT bumped). Section C (2026-06-04): added p_increment_loop_count for routingHandler atomic write+bump.';
+  'Atomic append to entity_run_meta.card_instructions with target-level dedup + optional atomic loop_count bump. Returns TRUE if appended, FALSE if any target in p_instruction matched an existing pending (step, card_id, loop_iteration) triple (write blocked + loop_count NOT bumped). Section C (2026-06-04): added p_increment_loop_count for routingHandler atomic write+bump. Replaces (DROP+CREATE) the 3-arg version from multi_card_pattern_v1 to avoid PG ambiguity on 3-arg calls — re-verified 2026-06-05 on a Supabase branch with prod 3-arg body installed first.';
