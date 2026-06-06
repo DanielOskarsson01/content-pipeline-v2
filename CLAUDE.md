@@ -164,6 +164,8 @@ These rules exist because each one has already failed in this codebase. They are
 
 **Patterns G and H prevent drift in planning sessions.** Without them, A–F catch failures inside individual tasks but miss strategic-level drift — pivots based on stale uploaded files, scope changes made without reviewer engagement, multi-hour sessions that quietly drift from the original direction.
 
+**Pattern I prevents post-merge architectural drift.** Architectural changes ship their own tests for the new behavior, but callsites depending on the changed surface are NOT covered. Without a deliberate post-merge audit, those callsites silently break and stay broken until someone runs the affected path. I is the audit that catches what the change's own tests don't.
+
 ### How to read this document
 
 Not all rules below carry equal weight, and not all hold equally well under pressure. Read going in:
@@ -306,6 +308,28 @@ Specifically dangerous:
 - **Code that exists but has never executed** — NOT "shipped."
 
 *Prevents:* overclaim of "built" or "shipped" capabilities. Inflates project state, drives future sessions to pre-flight against capabilities that don't actually exist (compounds A.2 failure — the implementer reads partial code thinking it's complete). Closely related to F.2 (problem-progress vs context-recovery): naming something is not building it.
+
+### I. Post-merge callsite audit for architectural changes (HARD)
+
+When an architectural change (DDL migration, contract change, identity-shape change, RPC signature change) merges, the change ships with its OWN tests for the new behavior. But callsites referencing the changed surface — code that the change didn't directly touch but that depends on it — are NOT covered by those tests. Without a deliberate post-merge sweep, those callsites silently break and stay broken until someone runs the affected path with eyes open.
+
+After merging any architectural change, before subsequent work begins on top of it, run a callsite audit:
+
+1. **Identify the changed surface.** Concretely: which functions, types, table constraints, manifest fields, RPC signatures, JSONB shapes did the change modify? List them.
+2. **Grep for direct references.** `grep -rn` each name across both repos. List every file that references the changed surface.
+3. **For each referenced file, verify compatibility.** Does the caller's assumed behavior match the new behavior? Does the caller make assumptions the change invalidated? Be specific: line-by-line, not "looks fine."
+4. **Test the actual transition.** If state migrated, exercise the migrated state on a branch/staging DB with the new code. Not just unit tests on the new code in isolation — the actual prod-state-equivalent.
+5. **Document the audit output.** Either: zero additional changes needed (record the audit was done), OR N follow-up fixes filed with traceable references.
+
+Three concrete examples from this codebase:
+
+- **2026-06-03 Multi-Card Pattern migration** added `card_id` to three unique indexes (`run_submodule_config`, `submodule_runs`, `entity_submodule_runs`). Three callsite onConflict strings in `submoduleConfig.js`, `submoduleRuns.js`, `templates.js` were NOT updated. Bug surfaced 2026-06-06 as UI save errors (B052). Callsite audit at merge time would have caught it.
+- **2026-05-24 V5 empty-pool-fix work** introduced composite `(itemKey, source_submodule)` identity in `add` operation. The `remove` and `transform` operations were NOT audited for compatibility. Multi-source duplicates survived all Step 2+ filters for ~13 days in prod (B054). Callsite audit at merge time would have caught it.
+- **2026-04-22 Step 7 routing migration** changed `apply_entity_routing` RPC to accept `p_routing_step` parameter. The deployed `routingHandler.js` call site was NOT updated to pass it (commit `d881612` fixed it post-deploy when prod errored).
+
+*Prevents:* the recurring failure mode where an architectural change ships its own tests in isolation but the lateral impact on call sites isn't audited. The change's own tests pass; the callsites silently break. Without Pattern I, three bugs in 24h of careful testing (B052/B053/B054) is the visible surface of an iceberg whose scale is unknown until a deliberate audit runs.
+
+*When to skip:* never for architectural changes (DDL, contract, signature, shape). Acceptable to skip for pure-implementation changes that don't alter contracts (e.g., refactoring internal helpers, performance tuning a single function). When in doubt, run the audit — its cost is hours, the cost of skipping is days of follow-up bugs.
 
 ---
 
