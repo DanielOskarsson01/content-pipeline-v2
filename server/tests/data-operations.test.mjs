@@ -98,6 +98,106 @@ function assert(condition, label) {
   assert(!result.pool.find(i => i.url === 'b'), 'remove → drops unapproved items');
 })();
 
+// --- B054 fix: multi-source dedup in remove + transform (2026-06-06) ---
+
+(function nonEmptyPool_remove_collapsesMultiSourceDuplicates() {
+  // Step 1 `add` writes one row per (url, source_submodule). Step 2 `remove`
+  // approves URLs (not URL-source pairs), so after `remove` the pool must
+  // contain AT MOST ONE row per url. First occurrence wins. This is the
+  // observed prod bug: 3 copies of `/about-us/` (from browser-crawler,
+  // deep-links, page-links) all survived url-dedup before the fix.
+  const pool = [
+    { url: 'https://x.com/about', source_submodule: 'browser-crawler', section: 'nav' },
+    { url: 'https://x.com/about', source_submodule: 'deep-links', section: 'footer' },
+    { url: 'https://x.com/about', source_submodule: 'page-links', section: 'body' },
+    { url: 'https://x.com/blog', source_submodule: 'browser-crawler' },
+    { url: 'https://x.com/blog', source_submodule: 'deep-links' },
+    { url: 'https://x.com/contact', source_submodule: 'browser-crawler' },
+  ];
+  const approved = [
+    { url: 'https://x.com/about', status: 'unique' },
+    { url: 'https://x.com/blog',  status: 'unique' },
+    { url: 'https://x.com/contact', status: 'unique' },
+  ];
+  const result = applyDataOperation(
+    pool,
+    approved,
+    'remove',
+    'url',
+    new Set(['https://x.com/about', 'https://x.com/blog', 'https://x.com/contact']),
+  );
+  assert(result.pool.length === 3, 'remove → collapses multi-source duplicates to one row per url');
+  assert(result.pool.filter(i => i.url === 'https://x.com/about').length === 1, 'remove → exactly one /about row survives');
+  assert(result.pool.filter(i => i.url === 'https://x.com/blog').length === 1, 'remove → exactly one /blog row survives');
+  // First occurrence wins: the browser-crawler row should be the survivor for /about
+  const aboutSurvivor = result.pool.find(i => i.url === 'https://x.com/about');
+  assert(aboutSurvivor?.source_submodule === 'browser-crawler', 'remove → first occurrence wins');
+  assert(aboutSurvivor?.section === 'nav', 'remove → survivor retains its own per-source fields');
+  // ops.removed counts both unapproved-rejects AND subsequent-key dropouts
+  assert(result.ops.removed === 3, 'remove → ops.removed counts the dropped multi-source dupes');
+})();
+
+(function nonEmptyPool_remove_singleSourceUnchanged() {
+  // Guard: the fix MUST NOT change behavior for the common case of
+  // already-deduplicated pools (no multi-source duplicates).
+  const pool = [{ url: 'a' }, { url: 'b' }, { url: 'c' }];
+  const approved = [{ url: 'a', relevance: 0.9 }, { url: 'c', relevance: 0.7 }];
+  const result = applyDataOperation(pool, approved, 'remove', 'url', new Set(['a', 'c']));
+  assert(result.pool.length === 2, 'remove single-source → unchanged from pre-fix behavior');
+  assert(result.pool.find(i => i.url === 'a')?.relevance === 0.9, 'remove single-source → enrich still applied');
+})();
+
+(function nonEmptyPool_transform_collapsesMultiSourceDuplicates() {
+  // Pool has multi-source duplicates for URLs that url-canonicalizer leaves
+  // UNCHANGED (no redirect needed). Pre-fix, these passed through with all
+  // copies intact. Post-fix, transform collapses them to one row per url.
+  const pool = [
+    { url: 'https://x.com/about', source_submodule: 'browser-crawler' },
+    { url: 'https://x.com/about', source_submodule: 'deep-links' },
+    { url: 'https://x.com/about', source_submodule: 'page-links' },
+    { url: 'https://x.com/blog',  source_submodule: 'browser-crawler' },
+    { url: 'https://x.com/blog',  source_submodule: 'deep-links' },
+  ];
+  // Canonicalizer approves both URLs as "unchanged" — no redirects, items match
+  // existing pool keys but bring no transformation.
+  const approved = [
+    { url: 'https://x.com/about', status: 'unchanged' },
+    { url: 'https://x.com/blog',  status: 'unchanged' },
+  ];
+  const result = applyDataOperation(
+    pool,
+    approved,
+    'transform',
+    'url',
+    new Set(['https://x.com/about', 'https://x.com/blog']),
+  );
+  assert(result.pool.length === 2, 'transform → collapses multi-source duplicates to one row per url');
+  assert(result.pool.filter(i => i.url === 'https://x.com/about').length === 1, 'transform → exactly one /about row');
+  assert(result.pool.filter(i => i.url === 'https://x.com/blog').length === 1, 'transform → exactly one /blog row');
+})();
+
+(function nonEmptyPool_transform_canonicalizationStillWorks() {
+  // Guard: the multi-source dedup MUST NOT break the existing redirect
+  // canonicalization (test nonEmptyPool_transform_canonicalization above
+  // exercises one redirect; this guards the redirect + multi-source combo).
+  const pool = [
+    { url: 'https://x.com/a/', source_submodule: 'browser-crawler', extra: 'x' },
+    { url: 'https://x.com/a/', source_submodule: 'deep-links',      extra: 'y' },
+  ];
+  // Canonicalizer transforms /a/ → /a (redirect). Both pool copies should
+  // collapse and the new (transformed) row should win, not a stale pool copy.
+  const approved = [{ url: 'https://x.com/a', original_url: 'https://x.com/a/' }];
+  const result = applyDataOperation(
+    pool,
+    approved,
+    'transform',
+    'url',
+    new Set(['https://x.com/a']),
+  );
+  assert(result.pool.length === 1, 'transform redirect + multi-source → one row');
+  assert(result.pool[0].url === 'https://x.com/a', 'transform redirect + multi-source → canonical url wins');
+})();
+
 // --- error case ---
 
 (function unknownDataOperation_throws() {

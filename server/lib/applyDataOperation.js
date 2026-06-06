@@ -15,6 +15,26 @@
  *
  * Returns:
  *   { pool: <new entityPool array>, ops: <stats for logging> }
+ *
+ * IDENTITY SEMANTICS (post 2026-06-06 fix):
+ *   - `add` writes one row per composite `(itemKey, source_submodule)`. Multi-source
+ *     provenance is preserved at Step 1 by design (same URL discovered by 3
+ *     discovery submodules = 3 pool rows).
+ *   - `remove` and `transform` COLLAPSE multi-source duplicates: after either
+ *     operation, the pool has AT MOST ONE row per itemKey. First occurrence wins
+ *     (matches url-dedup's documented "first occurrence wins" semantic).
+ *     Subsequent rows sharing the same itemKey are dropped from the pool.
+ *   - This is intentional: Step 2+ filters approve URLs (not URL-source pairs),
+ *     so the pool surfaces one row per surviving URL. Downstream consumers
+ *     (Step 3 scrapers) iterate per-pool-item and would otherwise scrape the
+ *     same URL N times for N discovery sources, wasting bandwidth + LLM tokens.
+ *
+ * BUG HISTORY:
+ *   - Before 2026-06-06: `remove` and `transform` only filtered by approvedKeySet
+ *     membership. Multi-source duplicates from `add` survived all Step 2+ filters,
+ *     leaving 20-30% redundant pool rows that propagated to Step 3 scraping.
+ *     Filed as B054. Fix: add a `seen` Set tracking which itemKey values have
+ *     already been kept; drop subsequent items with the same key.
  */
 export function applyDataOperation(entityPool, approvedItems, dataOperation, itemKey, approvedKeySet) {
   const ops = { added: 0, kept: 0, removed: 0, replaced: 0 };
@@ -35,12 +55,20 @@ export function applyDataOperation(entityPool, approvedItems, dataOperation, ite
   if (dataOperation === 'remove') {
     // Filter to keep only approved items, AND merge any enriched fields from
     // the submodule output into the surviving items.
+    //
+    // Multi-source dedup (B054 fix, 2026-06-06): the pool may contain N rows
+    // for the same itemKey (one per source_submodule from Step 1 `add`).
+    // Approval is per-itemKey, not per-(itemKey, source_submodule). So after
+    // `remove`, keep AT MOST ONE row per itemKey. First occurrence wins.
     const approvedItemMap = new Map(
       approvedItems.map(item => [String(item[itemKey] ?? ''), item])
     );
+    const seen = new Set();
     entityPool = entityPool.filter(item => {
       const keyVal = String(item[itemKey] ?? '');
       if (!approvedKeySet.has(keyVal)) { ops.removed++; return false; }
+      if (seen.has(keyVal)) { ops.removed++; return false; }
+      seen.add(keyVal);
       const enriched = approvedItemMap.get(keyVal);
       if (enriched) {
         for (const [k, v] of Object.entries(enriched)) {
@@ -78,6 +106,23 @@ export function applyDataOperation(entityPool, approvedItems, dataOperation, ite
     ops.replaced = before - entityPool.length;
     entityPool.push(...toAdd);
     ops.added = toAdd.length;
+
+    // Multi-source dedup (B054 fix, 2026-06-06): items that pass through
+    // untouched (no transform applied to them) may still have N rows per
+    // itemKey from Step 1 `add`. Collapse to first-occurrence-wins so the
+    // pool surfaces one row per itemKey after `transform`, same contract
+    // as `remove`. This affects e.g. url-canonicalizer's "unchanged" items
+    // that aren't in removalSet/toAdd but still have multi-source copies.
+    const seen = new Set();
+    const dedupedPool = [];
+    for (const item of entityPool) {
+      const keyVal = String(item[itemKey] ?? '');
+      if (seen.has(keyVal)) { ops.replaced++; continue; }
+      seen.add(keyVal);
+      dedupedPool.push(item);
+    }
+    entityPool = dedupedPool;
+
     return { pool: entityPool, ops };
   }
 
