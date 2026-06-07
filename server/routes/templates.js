@@ -721,10 +721,28 @@ router.post('/:id/launch', upload.single('file'), async (req, res, next) => {
       project = created;
     }
 
-    // 5. Create run (step 0 auto-approved → start at step 1)
+    // 5. Create run (step 0 auto-approved → start at step 1).
+    // Snapshot the linked template's execution_plan (Multi-Card Pattern spec §3.5)
+    // so the auto-executor sees a non-null submodules_per_step. Without this
+    // snapshot, the run halts at Step 1 with "At least one submodule must be
+    // approved" because the auto-executor has no work plan to execute.
+    let linkedTemplateExecutionPlan = null;
+    if (linkedTemplateId) {
+      const { data: linkedTpl } = await db
+        .from('templates')
+        .select('execution_plan')
+        .eq('id', linkedTemplateId)
+        .single();
+      linkedTemplateExecutionPlan = linkedTpl?.execution_plan || null;
+    }
     const { data: run, error: runErr } = await db
       .from('pipeline_runs')
-      .insert({ project_id: project.id, status: 'running', current_step: 1 })
+      .insert({
+        project_id: project.id,
+        status: 'running',
+        current_step: 1,
+        execution_plan_snapshot: linkedTemplateExecutionPlan,
+      })
       .select()
       .single();
     if (runErr) throw runErr;
