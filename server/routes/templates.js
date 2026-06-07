@@ -796,6 +796,37 @@ router.post('/:id/launch', upload.single('file'), async (req, res, next) => {
       }, { onConflict: 'run_id,step_index' });
     }
 
+    // 9b. Seed entity_stage_pool at step 1 for each entity. The auto-executor
+    //     reads entity_stage_pool (not step_context) via getEntityCount() —
+    //     without this seed the per-entity enqueue loop runs 0 iterations and
+    //     the run halts at Step 1 with "At least one submodule must be approved".
+    //     One row per entity, empty pool_items (Step 1 discovery modules
+    //     produce the initial URL set). entity_run_meta seeded alongside so
+    //     routing/threshold logic has rows to update later.
+    if (entities.length > 0) {
+      const poolRows = entities.map(e => ({
+        run_id: run.id,
+        step_index: 1,
+        entity_name: e.name,
+        pool_items: [],
+        status: 'pending',
+      }));
+      const { error: poolErr } = await db
+        .from('entity_stage_pool')
+        .upsert(poolRows, { onConflict: 'run_id,step_index,entity_name' });
+      if (poolErr) throw poolErr;
+
+      const metaRows = entities.map(e => ({ run_id: run.id, entity_name: e.name }));
+      try {
+        await db
+          .from('entity_run_meta')
+          .upsert(metaRows, { onConflict: 'run_id,entity_name', ignoreDuplicates: true });
+      } catch (metaErr) {
+        // Non-fatal — entity_run_meta is created lazily by other paths if missing
+        console.warn(`[launch] entity_run_meta seed skipped: ${metaErr.message}`);
+      }
+    }
+
     // 10. Flip project to active
     await db.from('projects').update({ status: 'active' }).eq('id', project.id);
 
