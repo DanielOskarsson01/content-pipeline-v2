@@ -242,7 +242,7 @@ function buildTools(runId, submoduleId) {
           if (!apiKey) throw new Error('PERPLEXITY_API_KEY not set in environment');
 
           const { status, body } = await withTimeout(async (signal) => {
-            const res = await fetch('https://api.perplexity.ai/v1/chat/completions', {
+            const res = await fetch('https://api.perplexity.ai/chat/completions', {
               method: 'POST',
               signal,
               headers: {
