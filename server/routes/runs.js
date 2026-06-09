@@ -807,12 +807,13 @@ router.post('/:runId/steps/:stepIndex/reopen', async (req, res, next) => {
       .eq('run_id', runId)
       .gte('step_index', stepIndex);
 
-    // 6. Delete run_submodule_config for ALL affected steps
-    await db
-      .from('run_submodule_config')
-      .delete()
-      .eq('run_id', runId)
-      .gte('step_index', stepIndex);
+    // 6. Preserve run_submodule_config across reopen — settings are configuration,
+    // not execution data. Wiping them silently strips template-level prompt
+    // overrides, model choices, reference-doc selections, and per-run UI edits,
+    // forcing the next execute to fall back to manifest defaults. Settings the
+    // user can see in the UI for an upcoming submodule run must be what actually
+    // runs. Reopen wipes the execution data (entity_submodule_runs, submodule_runs,
+    // pools, downloadable files, stage output) above; it must NOT wipe settings.
 
     // 7. Reset the reopened step to 'active' with clean state
     await db
