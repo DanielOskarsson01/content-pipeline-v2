@@ -11,6 +11,7 @@
     "dev:client": "cd client && npm run dev",
     "dev:server": "node server/server.js",
     "build": "cd client && npm run build",
+    "test": "node --test 'server/**/*.test.js'",
     "start": "node server/server.js",
     "clean:chrome": "pkill -f chromium || true"
   },
