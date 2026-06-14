@@ -19,6 +19,7 @@ import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { COST_CONFIG } from '../config/timeouts.js';
 import { hydrateItems } from '../services/poolBlobs.js';
 import { convertXlsxInDir } from '../utils/xlsxConverter.js';
+import { parseAnthropicSSE } from '../services/aiStream.js';
 
 // Load submodule manifests (worker is a separate process from server.js)
 loadModules();
@@ -73,7 +74,9 @@ function buildTools(runId, submoduleId) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         controller.abort();
-        reject(new Error(`HTTP request timed out after ${ms}ms`));
+        const e = new Error(`HTTP request timed out after ${ms}ms`);
+        e.isTimeout = true; // duration-driven; NOT retryable (a retry just re-hits the same wall)
+        reject(e);
       }, ms);
       fn(controller.signal).then(
         (val) => { clearTimeout(timer); resolve(val); },
@@ -133,9 +136,10 @@ function buildTools(runId, submoduleId) {
   // Retry-eligible HTTP status codes (transient errors)
   const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 529]);
 
-  // Per-request timeout for LLM API calls (5 minutes).
-  // Generous for large prompts (content-writer: 100KB+). Cheap modules are bounded
-  // by their entity-level COST_CONFIG timeout (2-5 min) which fires first.
+  // Per-request timeout for LLM API calls (10 minutes).
+  // The Anthropic path STREAMS (see parseAnthropicSSE), so the socket stays warm
+  // and this AbortController — not undici's hidden ~300s body/headers default — is
+  // the real ceiling. Generous for large prompts (content-writer: 100KB+).
   const AI_REQUEST_TIMEOUT_MS = 600_000;
 
   // Retry config for transient failures
@@ -153,7 +157,14 @@ function buildTools(runId, submoduleId) {
           const apiKey = process.env.ANTHROPIC_API_KEY;
           if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
 
-          const { status, body } = await withTimeout(async (signal) => {
+          // STREAM the response. A non-streamed long generation idles the socket
+          // past undici's hidden ~300s body/headers timeout → bare "fetch failed"
+          // → (no statusCode) retried 3x → ~908s wall → no content for large
+          // entities (Wazdan, 2026-06-13). Streaming keeps bytes flowing, so the
+          // request lives until AI_REQUEST_TIMEOUT_MS. The full read is raced
+          // against that timeout via withTimeout (its AbortController aborts the
+          // fetch + stream on expiry).
+          const streamed = await withTimeout(async (signal) => {
             const res = await fetch('https://api.anthropic.com/v1/messages', {
               method: 'POST',
               signal,
@@ -165,26 +176,27 @@ function buildTools(runId, submoduleId) {
               body: JSON.stringify({
                 model: modelId,
                 max_tokens: max_tokens ?? 16384,
+                stream: true,
                 messages: [{ role: 'user', content: prompt }],
                 ...(temperature != null && { temperature }),
               }),
             });
-            return { status: res.status, body: await res.text() };
+            if (res.status !== 200) {
+              // Error responses are NOT streamed — body is a JSON error object.
+              const errBody = await res.text();
+              const err = new Error(`Anthropic API error ${res.status}: ${errBody.slice(0, 500)}`);
+              err.statusCode = res.status;
+              throw err;
+            }
+            return await parseAnthropicSSE(res.body);
           }, AI_REQUEST_TIMEOUT_MS);
 
-          if (status !== 200) {
-            const err = new Error(`Anthropic API error ${status}: ${body.slice(0, 500)}`);
-            err.statusCode = status;
-            throw err;
-          }
-
-          const data = JSON.parse(body);
           const duration_ms = Date.now() - startTime;
-          const stopReason = data.stop_reason || 'unknown';
+          const stopReason = streamed.stop_reason || 'unknown';
           const result = {
-            text: data.content?.[0]?.text || '',
-            tokens_in: data.usage?.input_tokens || 0,
-            tokens_out: data.usage?.output_tokens || 0,
+            text: streamed.text || '',
+            tokens_in: streamed.tokens_in || 0,
+            tokens_out: streamed.tokens_out || 0,
             model: modelId,
             provider: 'anthropic',
             stop_reason: stopReason,
@@ -193,7 +205,7 @@ function buildTools(runId, submoduleId) {
           if (stopReason === 'max_tokens') {
             logger.warn(`[ai] ${provider}/${model} — response TRUNCATED (hit max_tokens). Output may be incomplete.`);
           }
-          logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms, stop: ${stopReason}`);
+          logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms, stop: ${stopReason} (streamed)`);
           return result;
 
         } else if (provider === 'openai') {
@@ -291,8 +303,9 @@ function buildTools(runId, submoduleId) {
           return await callProvider(attempt);
         } catch (err) {
           lastError = err;
-          const isTransient = !err.statusCode                          // Network/timeout errors (no HTTP status)
-            || RETRYABLE_STATUSES.has(err.statusCode);                 // Retryable HTTP statuses
+          const isTransient = !err.isTimeout && (                       // duration-driven timeout: a retry just re-hits the same wall
+            !err.statusCode                                            // Network errors (no HTTP status)
+            || RETRYABLE_STATUSES.has(err.statusCode));                // Retryable HTTP statuses
 
           if (!isTransient || attempt === AI_MAX_RETRIES) {
             throw err; // Permanent error or final attempt — give up
