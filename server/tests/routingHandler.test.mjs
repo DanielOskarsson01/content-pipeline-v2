@@ -676,6 +676,86 @@ await (async function group9_crossStepWarning() {
          'multi-step warning correctly silent today (dead code reserved for future cardId-reuse data model)');
 })();
 
+// ===========================================================================
+// Group 10 — REAL loop-router decisions ('approve'/'failed'/'flag_manual') + summary
+// (Groups 1-9 inject decision:'completed', which loop-router NEVER emits — that
+//  masked the live bug where 'approve' fell through to terminal_state='failed'.)
+// ===========================================================================
+console.log("\n--- Group 10: real loop-router 'approve'/'failed'/'flag_manual' + summary fields ---");
+
+await (async function group10a_approveIsTerminalApproved() {
+  const executionPlan = buildExecutionPlan();
+  const tables = {
+    entity_submodule_runs: [buildRouterRun([
+      { entity_name: 'Wazdan', decision: 'approve', qa_scores: { citation: 'pass' } },
+    ])],
+    entity_run_meta: [
+      { entity_name: 'Wazdan', loop_count: 0, terminal_state: null, loop_config: {}, card_instructions: [] },
+    ],
+  };
+  const { db, capturedUpdate } = buildMockDb({ tables });
+  const result = await applyRouting(db, 'run-1', 7, executionPlan);
+
+  const approvedUpdate = capturedUpdate.find(u =>
+    u.table === 'entity_run_meta' && u.patch?.terminal_state === 'approved' &&
+    u.eqs.some(e => e.col === 'entity_name' && e.val === 'Wazdan'));
+  assert(approvedUpdate !== undefined, "approve → terminal_state='approved' written (so runs.js:494 forwards it to Step 8)");
+  const wrongFail = capturedUpdate.find(u =>
+    u.patch?.terminal_state === 'failed' && u.patch?.failure_reason === 'routing_no_target_step');
+  assert(wrongFail === undefined, "approve is NOT flipped to terminal_state='failed'/routing_no_target_step (the live corruption)");
+  assert(result.all_terminal === true, 'summary.all_terminal === true on all-approved');
+  assert(result.routed_count === 0, 'summary.routed_count === 0');
+  assert(result.earliest_step === null, 'summary.earliest_step === null');
+  assert(result.approved_count === 1, 'summary.approved_count === 1');
+})();
+
+await (async function group10b_failedAndFlaggedSetTerminal() {
+  const executionPlan = buildExecutionPlan();
+  const tables = {
+    entity_submodule_runs: [buildRouterRun([
+      { entity_name: 'E1', decision: 'failed', failure_reason: 'dead_site', qa_scores: {} },
+      { entity_name: 'E2', decision: 'flag_manual', qa_scores: {} },
+    ])],
+    entity_run_meta: [
+      { entity_name: 'E1', loop_count: 0, terminal_state: null, loop_config: {}, card_instructions: [] },
+      { entity_name: 'E2', loop_count: 0, terminal_state: null, loop_config: {}, card_instructions: [] },
+    ],
+  };
+  const { db, capturedUpdate } = buildMockDb({ tables });
+  const result = await applyRouting(db, 'run-1', 7, executionPlan);
+
+  const failedUpdate = capturedUpdate.find(u => u.patch?.terminal_state === 'failed' && u.eqs.some(e => e.col === 'entity_name' && e.val === 'E1'));
+  const flaggedUpdate = capturedUpdate.find(u => u.patch?.terminal_state === 'flagged' && u.eqs.some(e => e.col === 'entity_name' && e.val === 'E2'));
+  assert(failedUpdate !== undefined, "decision='failed' → terminal_state='failed' written (not silently dropped from forward)");
+  assert(flaggedUpdate !== undefined, "decision='flag_manual' → terminal_state='flagged' written");
+  assert(result.failed_count === 1, 'summary.failed_count === 1');
+  assert(result.flagged_count === 1, 'summary.flagged_count === 1');
+  assert(result.all_terminal === true, 'summary.all_terminal === true (terminal decisions, none routed)');
+})();
+
+await (async function group10c_mixedApproveAndRouted() {
+  const executionPlan = buildExecutionPlan(); // default cardA has round 2 → loop_generation routes to step 5
+  const tables = {
+    entity_submodule_runs: [buildRouterRun([
+      { entity_name: 'Approved1', decision: 'approve', qa_scores: { citation: 'pass' } },
+      { entity_name: 'Looper1', decision: 'loop_generation', qa_scores: { citation: 'fail' } },
+    ])],
+    entity_run_meta: [
+      { entity_name: 'Approved1', loop_count: 0, terminal_state: null, loop_config: {}, card_instructions: [] },
+      { entity_name: 'Looper1', loop_count: 0, terminal_state: null, loop_config: {}, card_instructions: [] },
+    ],
+  };
+  const { db, capturedUpdate } = buildMockDb({ tables });
+  const result = await applyRouting(db, 'run-1', 7, executionPlan);
+
+  assert(result.all_terminal === false, 'mixed: all_terminal === false (one entity routed back)');
+  assert(result.routed_count === 1, 'mixed: routed_count === 1 (only the genuinely-routed loop entity)');
+  assert(result.earliest_step === 5, 'mixed: earliest_step === 5 (cardA step — the routed target, not step+1)');
+  assert(result.approved_count === 1, 'mixed: approved_count === 1');
+  const approvedUpdate = capturedUpdate.find(u => u.patch?.terminal_state === 'approved' && u.eqs.some(e => e.col === 'entity_name' && e.val === 'Approved1'));
+  assert(approvedUpdate !== undefined, 'mixed: approved entity still gets terminal_state=approved');
+})();
+
 // ---------------------------------------------------------------------------
 // Run summary — defer to end of microtask queue
 // ---------------------------------------------------------------------------
