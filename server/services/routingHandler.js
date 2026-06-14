@@ -170,6 +170,43 @@ function validateCards(executionPlan, registeredSubmodules) {
 }
 
 /**
+ * Set entity_run_meta.terminal_state, logging (never swallowing) a DB error.
+ *
+ * This is the load-bearing write for the Step-8 forward: runs.js:494 selects
+ * `terminal_state IS NOT NULL`, so an entity stuck at NULL is silently dropped
+ * from bundling — exactly the Bug-1 corruption this fix closes. supabase-js
+ * does NOT throw on a constraint violation or a zero-row match; it RETURNS
+ * `{error}`. The Section C rewrite ignored that return, so a silent write
+ * failure would re-open Bug 1 with no trace. We surface it loudly in logs.
+ *
+ * We log rather than re-throw the `{error}` case: a transient single-row
+ * meta-write failure must not abort the whole routing batch (a prior
+ * instruction write may already have succeeded). A genuinely THROWN error
+ * (network outage) still propagates out of the await and aborts applyRouting —
+ * that contract is intentional and unchanged.
+ *
+ * @param {object} db - Supabase client
+ * @param {string} runId - The run UUID
+ * @param {string} entityName - Entity to flip
+ * @param {'approved'|'failed'|'flagged'} terminalState - terminal_state value
+ * @param {string|null} [failureReason=null] - failure_reason value
+ */
+async function setTerminalState(db, runId, entityName, terminalState, failureReason = null) {
+  const { error } = await db.from('entity_run_meta').update({
+    terminal_state: terminalState,
+    failure_reason: failureReason ?? null,
+  }).eq('run_id', runId).eq('entity_name', entityName);
+  if (error) {
+    console.error(
+      `[routingHandler] FAILED to set terminal_state='${terminalState}' for ` +
+      `${entityName} (run ${runId}): ${error.message || error}. Entity may be ` +
+      `dropped from the Step-8 forward (runs.js selects terminal_state IS NOT ` +
+      `NULL) — investigate.`
+    );
+  }
+}
+
+/**
  * Apply routing for a run. Reads loop-router output, builds decisions for
  * ALL entities, enforces max_loops, then writes per-entity pending card
  * instructions to entity_run_meta.card_instructions via the Multi-Card
@@ -355,9 +392,17 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
   );
 
   for (const d of decisions) {
-    if (d.decision === 'completed') {
+    if (d.decision === 'completed' || d.decision === 'approve') {
+      // Terminal success. loop-router emits 'approve' on the all-pass path (it
+      // never emits 'completed'); both are terminal-success. The dropped
+      // apply_entity_routing RPC used to set terminal_state — Section C must set
+      // it here in JS, or runs.js's Step-8 forward (which selects terminal_state
+      // IS NOT NULL, runs.js:494) silently drops approved entities → empty
+      // bundling. Set it BEFORE the cleanup/push and before the !target_step
+      // branch so 'approve' can never fall through to terminal_state='failed'.
+      await setTerminalState(db, runId, d.entity_name, 'approved', null);
       // QA-passed cleanup: mark any stale pending from prior rounds as skipped
-      // with reason QA_PASSED_ON_RECHECK. Non-fatal — a completed entity has
+      // with reason QA_PASSED_ON_RECHECK. Non-fatal — a passed entity has
       // already passed; cleanup failure is logged but doesn't warrant a
       // terminal_state flip.
       const entityPending = pendingByEntity.get(d.entity_name)?.pending || [];
@@ -376,29 +421,35 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
       }
       writeResults.push({
         entity_name: d.entity_name,
-        decision: 'completed',
+        decision: d.decision,
+        terminal: 'approved',
         instructions_skipped: entityPending.length,
       });
       continue;
     }
 
     if (d.decision === 'flag_manual' || d.decision === 'failed') {
+      // Terminal non-success. Must set terminal_state or these vanish from the
+      // runs.js:494 Step-8 forward exactly as approved entities did before the
+      // fix (decision='failed' is emitted for dead_site / max_loops_exceeded;
+      // flag_manual needs human review).
+      const terminal = d.decision === 'failed' ? 'failed' : 'flagged';
+      await setTerminalState(db, runId, d.entity_name, terminal, d.failure_reason || null);
       writeResults.push({
         entity_name: d.entity_name,
         decision: d.decision,
+        terminal,
         instructions_written: 0,
       });
       continue;
     }
 
     if (!d.target_step) {
-      await db.from('entity_run_meta').update({
-        terminal_state: 'failed',
-        failure_reason: 'routing_no_target_step',
-      }).eq('run_id', runId).eq('entity_name', d.entity_name);
+      await setTerminalState(db, runId, d.entity_name, 'failed', 'routing_no_target_step');
       writeResults.push({
         entity_name: d.entity_name,
         decision: d.decision,
+        terminal: 'failed',
         error: 'no_target_step',
       });
       continue;
@@ -464,15 +515,16 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
     // exhausted at the cards level. Flip to terminal_state='failed' with the
     // most informative failure_reason and skip the writeInstructions call.
     if (targets.length === 0) {
-      await db.from('entity_run_meta').update({
-        terminal_state: 'failed',
-        failure_reason: exhaustedCards.some(e => e.reason === 'card_not_in_definitions')
+      await setTerminalState(
+        db, runId, d.entity_name, 'failed',
+        exhaustedCards.some(e => e.reason === 'card_not_in_definitions')
           ? 'card_not_in_definitions'
-          : 'rounds_exhausted',
-      }).eq('run_id', runId).eq('entity_name', d.entity_name);
+          : 'rounds_exhausted'
+      );
       writeResults.push({
         entity_name: d.entity_name,
         decision: d.decision,
+        terminal: 'failed',
         instructions_written: 0,
         exhausted_cards: exhaustedCards.length,
       });
@@ -505,13 +557,11 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
       console.error(
         `[routingHandler] writeInstructions failed for ${d.entity_name}: ${err.message}`
       );
-      await db.from('entity_run_meta').update({
-        terminal_state: 'failed',
-        failure_reason: 'instruction_write_failed',
-      }).eq('run_id', runId).eq('entity_name', d.entity_name);
+      await setTerminalState(db, runId, d.entity_name, 'failed', 'instruction_write_failed');
       writeResults.push({
         entity_name: d.entity_name,
         decision: d.decision,
+        terminal: 'failed',
         instructions_written: 0,
         error: err.message,
       });
@@ -519,11 +569,49 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
   }
 
   // ── f) Return summary ──────────────────────────────────────────────
+  // runs.js (:486,:536) and autoExecutor.js (:404,:418-422) READ all_terminal /
+  // routed_count / earliest_step — the Section C rewrite dropped them, which is
+  // why an all-approved run halted at 7→8. Derive them defensively from
+  // writeResults (single source of truth), never throwing (one malformed row
+  // must not poison the batch summary and re-introduce all-or-nothing failure).
+  //
+  // routed = entities that received an ACTUAL backward-routing write: a write was
+  // attempted (instructions_written>0) AND not dedup-blocked (dedup_blocked!==true
+  // means a real append happened + loop_count bumped). Counting a dedup-blocked
+  // row would feed a too-low earliest_step and re-route an entity with no pending
+  // card. earliest_step is the MIN per-entity target_step among genuinely-routed
+  // rows — NOT step+1, NOT a global plan minimum (a wrong value silently mis-routes
+  // real loop-backs, worse than the loud halt this replaces).
+  //
+  // Excluding dedup-blocked rows cannot strand a still-pending entity: loop_count
+  // is monotonic and read fresh per call, and the bump is atomic with the write
+  // (incrementLoopCount inside writeInstructions), so the dedup key advances
+  // between passes — a genuinely-routed entity never dedup-blocks within the
+  // normal flow. A dedup block means the identical pending card already exists
+  // (the entity is ALREADY queued to loop), so it is correctly not re-counted.
+  //
+  // approved/failed/flagged counts are CURRENT-PASS best-effort (prior-pass
+  // terminals are skipped before the loop) and are read only for logging
+  // (autoExecutor routing_events), never control flow — the pool-forward decision
+  // uses all_terminal/routed_count, which are exact for this pass.
+  const routedRows = writeResults.filter(
+    (r) => (r.instructions_written || 0) > 0 && r.dedup_blocked !== true && r.target_step != null
+  );
+  const routed_count = routedRows.length;
+  const earliest_step = routed_count > 0
+    ? Math.min(...routedRows.map((r) => r.target_step))
+    : null;
   return {
     decisions_sent: decisions.length,
     instructions_written: writeResults.reduce(
       (n, r) => n + (r.instructions_written || 0), 0
     ),
+    routed_count,
+    earliest_step,
+    all_terminal: routed_count === 0,
+    approved_count: writeResults.filter((r) => r.terminal === 'approved').length,
+    failed_count: writeResults.filter((r) => r.terminal === 'failed').length,
+    flagged_count: writeResults.filter((r) => r.terminal === 'flagged').length,
     per_entity: writeResults,
   };
 }
