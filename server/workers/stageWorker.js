@@ -20,6 +20,7 @@ import { COST_CONFIG } from '../config/timeouts.js';
 import { hydrateItems } from '../services/poolBlobs.js';
 import { convertXlsxInDir } from '../utils/xlsxConverter.js';
 import { parseAnthropicSSE } from '../services/aiStream.js';
+import { deriveEntityRunStatus } from '../utils/entityRunStatus.js';
 
 // Load submodule manifests (worker is a separate process from server.js)
 loadModules();
@@ -835,14 +836,25 @@ async function handleEntityJob(job) {
   //     Sanitize: PostgreSQL JSONB rejects \u0000 (null bytes) in text.
   //     Scraped HTML/content may contain them. Strip before writing.
   const sanitizedResult = JSON.parse(JSON.stringify(result).replace(/\\u0000/g, ''));
+  // A module that RETURNS an error result (meta.status==='error') for this entity
+  // — e.g. content-writer "fetch failed", seo-planner parse-fail — did NOT throw,
+  // so without this it was written as 'completed', masking the failure and
+  // starving the auto-executor failure-rate threshold. deriveEntityRunStatus
+  // flags those as 'failed' while leaving valid QA verdicts (qa_pass:false) as
+  // 'completed'. Output is still saved either way so the error item is visible.
+  const { status: entityStatus, error: entityError } = deriveEntityRunStatus(result);
+  if (entityStatus === 'failed') {
+    console.warn(`[worker:entity] ${submodule_id}/${entity_name} returned an ERROR result (not thrown) — marking failed: ${entityError}`);
+  }
   const { error: writeErr } = await db
     .from('entity_submodule_runs')
     .update({
-      status: 'completed',
+      status: entityStatus,
+      ...(entityError ? { error: entityError } : {}),
       output_data: sanitizedResult,
       output_render_schema: manifest.output_schema || null,
       logs: tools._logs,
-      progress: { current: tools.progress.lastTotal, total: tools.progress.lastTotal, message: 'Done' },
+      progress: { current: tools.progress.lastTotal, total: tools.progress.lastTotal, message: entityStatus === 'failed' ? 'Failed' : 'Done' },
       completed_at: new Date().toISOString(),
     })
     .eq('id', entity_submodule_run_id);
@@ -856,17 +868,22 @@ async function handleEntityJob(job) {
     throw writeErr;
   }
 
-  // 11. Update entity_stage_pool status to 'completed'
+  // 11. Mirror the run status into entity_stage_pool. batchWorker derives
+  //      pipeline_stages.completed_count/failed_count from the POOL status, so a
+  //      returned-error entity must be 'failed' here too — otherwise the headline
+  //      "N completed, 0 failed" count keeps masking the failure even though the
+  //      run row is 'failed'. (The throw-path already mirrors run status to the
+  //      pool; this makes the return-path consistent.)
   await db
     .from('entity_stage_pool')
-    .update({ status: 'completed', updated_at: new Date().toISOString() })
+    .update({ status: entityStatus, updated_at: new Date().toISOString() })
     .eq('run_id', entityRun.run_id)
     .eq('step_index', step_index)
     .eq('entity_name', entity_name);
 
   const duration_ms = Date.now() - startTime;
-  console.log(`[worker:entity] Completed: ${submodule_id} for "${entity_name}" (${(duration_ms / 1000).toFixed(1)}s)`);
-  logMetric({ run_id: entityRun.run_id, submodule_id, entity_name, status: 'completed', duration_ms, step_index, cost: manifest.cost || 'medium' });
+  console.log(`[worker:entity] ${entityStatus === 'failed' ? 'FAILED' : 'Completed'}: ${submodule_id} for "${entity_name}" (${(duration_ms / 1000).toFixed(1)}s)`);
+  logMetric({ run_id: entityRun.run_id, submodule_id, entity_name, status: entityStatus, duration_ms, step_index, cost: manifest.cost || 'medium' });
   return result;
 }
 
