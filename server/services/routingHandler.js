@@ -51,29 +51,37 @@ const DECISION_TARGET_MAP = {
  */
 function resolveCards(qaScores, executionPlan, existingLoopConfig) {
   const rules = executionPlan?.routing_rules || {};
-  const cards = executionPlan?.cards || {};
+  // Canonical Multi-Card schema (PHASE_3B §1.2 / §2.1): cards are UUID-keyed
+  // under `card_definitions`; each routing_rules["<check>:fail"] is an ARRAY of
+  // { step, card_id } targets. (Pre-2026-06-15 this read the legacy string-keyed
+  // `cards` + `rule.target_cards` shape, which threw a TypeError on a real
+  // card_definitions template — see routingHandler.test.js.)
+  const cards = executionPlan?.card_definitions || {};
   // "consumed" means "assigned to this entity at least once" — NOT "executed."
   // Cards are marked consumed at routing time (when assigned), not at execution time.
   // This prevents the same card from being re-assigned on subsequent routing passes.
   const consumed = existingLoopConfig?.consumed_cards || [];
-  const activeCards = {};  // step → [cardName, ...]
+  const activeCards = {};  // step → [card_id, ...]
   const triggeredBy = [];
   const newlyActivated = [];
 
   for (const [check, result] of Object.entries(qaScores || {})) {
     if (result !== 'fail') continue;
-    const rule = rules[`${check}:fail`];
-    if (!rule) continue;
+    const targets = rules[`${check}:fail`];
+    if (!Array.isArray(targets)) continue;  // tolerate absent / malformed rule
     triggeredBy.push(`${check}:fail`);
-    for (const cardName of rule.target_cards) {
-      if (consumed.includes(cardName)) continue;
-      const card = cards[cardName];
-      if (!card) continue;
-      const step = String(card.step);
+    for (const target of targets) {
+      const cardId = target?.card_id;
+      if (!cardId || consumed.includes(cardId)) continue;
+      const card = cards[cardId];
+      if (!card) continue;  // rule references a card_id absent from card_definitions
+      // The rule target carries the routing step (PHASE_3B §2.1 keeps it equal
+      // to the card's own step); fall back to the card definition's step.
+      const step = String(target.step ?? card.step);
       if (!activeCards[step]) activeCards[step] = [];
-      if (!activeCards[step].includes(cardName)) {
-        activeCards[step].push(cardName);
-        newlyActivated.push(cardName);
+      if (!activeCards[step].includes(cardId)) {
+        activeCards[step].push(cardId);
+        newlyActivated.push(cardId);
       }
     }
   }
@@ -100,21 +108,30 @@ function resolveCards(qaScores, executionPlan, existingLoopConfig) {
  */
 function validateCards(executionPlan, registeredSubmodules) {
   const warnings = [];
-  const cards = executionPlan?.cards || {};
+  // Canonical schema (PHASE_3B §1.2 / §2.1): UUID-keyed card_definitions +
+  // routing_rules["<check>:fail"] = [{ step, card_id }]. (Pre-2026-06-15 this
+  // read the legacy `cards` + `rule.target_cards` shape and silently passed
+  // every real card_definitions config — see routingHandler.test.js.)
+  const cards = executionPlan?.card_definitions || {};
   const rules = executionPlan?.routing_rules || {};
+  // Targets of a routing rule, tolerating a malformed (non-array) value.
+  const ruleTargets = (rule) => (Array.isArray(rule) ? rule : []);
 
   // Card definition validation
-  for (const [name, card] of Object.entries(cards)) {
-    if (!card.submodule_id) warnings.push(`Card "${name}": missing submodule_id`);
+  for (const [cardId, card] of Object.entries(cards)) {
+    if (!card.submodule_id) warnings.push(`Card "${cardId}": missing submodule_id`);
     else if (registeredSubmodules && !registeredSubmodules.includes(card.submodule_id))
-      warnings.push(`Card "${name}": submodule "${card.submodule_id}" not found`);
-    if (card.step === undefined) warnings.push(`Card "${name}": missing step`);
+      warnings.push(`Card "${cardId}": submodule "${card.submodule_id}" not found`);
+    if (card.step === undefined) warnings.push(`Card "${cardId}": missing step`);
   }
 
   // Routing rule → card reference validation
   for (const [ruleKey, rule] of Object.entries(rules)) {
-    for (const cardName of rule.target_cards || []) {
-      if (!cards[cardName]) warnings.push(`Rule "${ruleKey}": targets unknown card "${cardName}"`);
+    for (const target of ruleTargets(rule)) {
+      const cardId = target?.card_id;
+      if (!cardId || !cards[cardId]) {
+        warnings.push(`Rule "${ruleKey}": targets unknown card_id "${cardId}"`);
+      }
     }
   }
 
@@ -122,17 +139,19 @@ function validateCards(executionPlan, registeredSubmodules) {
   // can activate multiple cards targeting the same submodule at the same step.
   // Only the first card wins at execution time (break in submoduleRuns.js),
   // but all are marked consumed — silently wasting card variants.
-  const allRuleCards = new Set();
+  const allRuleCardIds = new Set();
   for (const rule of Object.values(rules)) {
-    for (const cardName of rule.target_cards || []) allRuleCards.add(cardName);
+    for (const target of ruleTargets(rule)) {
+      if (target?.card_id) allRuleCardIds.add(target.card_id);
+    }
   }
-  const slotMap = {};  // "step:submodule_id" → [cardName, ...]
-  for (const cardName of allRuleCards) {
-    const card = cards[cardName];
+  const slotMap = {};  // "step:submodule_id" → [card_id, ...]
+  for (const cardId of allRuleCardIds) {
+    const card = cards[cardId];
     if (!card) continue;
     const slot = `${card.step}:${card.submodule_id}`;
     if (!slotMap[slot]) slotMap[slot] = [];
-    slotMap[slot].push(cardName);
+    slotMap[slot].push(cardId);
   }
   for (const [slot, names] of Object.entries(slotMap)) {
     if (names.length > 1) {
@@ -314,7 +333,10 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
 
   // Bind once for the whole function — used by b2 (resolveCards) and by the
   // per-entity instruction-write loop (e). Empty {} when no cards configured.
-  const cardDefinitions = executionPlan?.cards || {};
+  // Canonical UUID-keyed card_definitions (PHASE_3B §1.2); was `cards` (legacy)
+  // pre-2026-06-15 — which left this {} for every real template, starving the
+  // routed-target build below (cardDefinitions[cardId]).
+  const cardDefinitions = executionPlan?.card_definitions || {};
 
   // ── b2) Resolve routing_rules → cards for each decision ─────────────
   const hasRoutingRules = executionPlan?.routing_rules && Object.keys(executionPlan.routing_rules).length > 0;
@@ -616,4 +638,4 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
   };
 }
 
-export { validateCards };
+export { validateCards, resolveCards };
