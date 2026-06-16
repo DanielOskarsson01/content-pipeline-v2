@@ -530,6 +530,59 @@ router.post('/:runId/steps/:stepIndex/approve', async (req, res, next) => {
         });
       }
 
+      // ── BACKLOG #28: reopen the loop body so Round 2 actually re-executes ──
+      // Section C writes card instructions but leaves the re-entered stages in
+      // their Round-1 terminal state (approved/completed/skipped). The
+      // auto-executor's resume-safety check (autoExecutor.js:160-167) then skips
+      // every terminal step on re-entry, so Round 2 never runs. Mirror the reopen
+      // endpoint's STAGE reset across the loop body [earliest_step .. stepIndex]
+      // — but DO NOT delete entity_submodule_runs/submodule_runs: that would
+      // re-introduce the BACKLOG #7 cascade-delete and destroy Round-1 history.
+      // The append-only model needs Round-1 rows preserved + Round-2 appended.
+      const loopTarget = routingSummary.earliest_step;
+      if (loopTarget != null && loopTarget <= stepIndex) {
+        // Clear the denormalized STAGE columns too (output_data/working_pool, and
+        // input_data on the pending steps) — same as the reopen endpoint, so no
+        // stale Round-1 stage output lingers (e.g. submoduleRuns.js Priority-2
+        // reading a prior step's output_data). These are pipeline_stages COLUMNS,
+        // not execution rows — clearing them does NOT touch entity_submodule_runs,
+        // so Round-1 history is still preserved (the #7 / orphan-check guarantee).
+        //
+        // Target step → 'active' (the re-entry point the auto-executor runs first);
+        // keep its input_data, like reopen keeps the reopened step's input_data.
+        await db.from('pipeline_stages')
+          .update({ status: 'active', completed_at: null, approved_count: 0,
+                    working_pool: null, output_data: null })
+          .eq('run_id', runId).eq('step_index', loopTarget);
+        // Intermediate loop-body steps (target, stepIndex] → 'pending' (re-activated
+        // in turn by approve_step_v2 as Round 2 advances). Downstream of the routing
+        // step (> stepIndex) is left untouched — it must stay terminal/pending.
+        if (stepIndex > loopTarget) {
+          await db.from('pipeline_stages')
+            .update({ status: 'pending', completed_at: null, approved_count: 0,
+                      working_pool: null, output_data: null, input_data: null })
+            .eq('run_id', runId).gt('step_index', loopTarget).lte('step_index', stepIndex);
+        }
+        // Reopen the routed entities' pool at the target step. The card-routed read
+        // (submoduleRuns.js: cardId → resets only 'completed'→'pending', then reads
+        // status='pending') cannot see the 'approved' Round-1 pool, so without this
+        // the retry inits an empty pool from body-entity names and Round 2 runs on
+        // nothing. Scope to the routed entities; never resurrect 'failed' ones.
+        // Mirror routingHandler's exact routed_count definition (it computed
+        // earliest_step from these same rows) so we never reopen a pool for a
+        // dedup-blocked entity or one routed to a different step.
+        const routedEntities = (routingSummary.per_entity || [])
+          .filter(r => (r.instructions_written || 0) > 0 && r.dedup_blocked !== true && r.target_step != null)
+          .map(r => r.entity_name)
+          .filter(Boolean);
+        if (routedEntities.length > 0) {
+          await db.from('entity_stage_pool')
+            .update({ status: 'pending', updated_at: new Date().toISOString() })
+            .eq('run_id', runId).eq('step_index', loopTarget)
+            .in('entity_name', routedEntities).neq('status', 'failed');
+        }
+      }
+
       // Backward routing triggered — auto-executor handles loop re-entry
       return res.json({
         step_completed: stepIndex,
