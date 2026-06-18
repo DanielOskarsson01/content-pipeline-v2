@@ -21,6 +21,7 @@ import {
 } from '../config/timeouts.js';
 import { expandCardGroups } from './cardGroups.js';
 import { resolveStepEntries } from './executionPlanUtils.js';
+import { widenStepRange } from '../utils/stepRange.js';
 
 const PORT = process.env.PORT || 3001;
 const LOCK_TTL = 300;       // 5 min Redis lock TTL
@@ -426,6 +427,19 @@ export async function executeRun(runId, config, previousState = null) {
 
         console.log(`[auto-execute] Routing loop ${routingLoops}: ` +
           `${summary.routed_count} entities routed to step ${earliestStep}`);
+
+        // BACKLOG #29: a resumed run clamps config.steps to [haltedStep..N]. If the
+        // route targets a step below that range, widen the iteration range down to
+        // earliestStep so the re-entry for-loop actually reaches the reopened target
+        // (the #28 stage reopen is wasted otherwise). No-op for non-paused runs
+        // (config.steps already starts at 0). Done BEFORE the per_step_results
+        // cleanup below so the cleanup covers the widened range too.
+        const widenedSteps = widenStepRange(config.steps, earliestStep);
+        if (widenedSteps !== config.steps) {
+          console.log(`[auto-execute] Routing target ${earliestStep} is below the current ` +
+            `step range [${config.steps.join(',')}] — widening to [${widenedSteps.join(',')}]`);
+          config.steps = widenedSteps;
+        }
 
         // Record routing event in state
         state.routing_loops = routingLoops;
