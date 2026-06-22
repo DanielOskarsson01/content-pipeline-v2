@@ -13,6 +13,35 @@ LOCAL_MODULES="$(cd "$LOCAL_APP/../content-pipeline-modules-v2" && pwd)"
 echo "=== Content Pipeline v2 — Deploy to Hetzner ==="
 echo ""
 
+# 0. Pre-flight: never deploy a parked commit (BACKLOG #31).
+# Steps 3-4 rsync the ENTIRE working tree (--delete) to prod, so any commit
+# tagged `parked-not-deployed` that sits in HEAD would be shipped silently,
+# breaking a deliberate "do not deploy" park decision (e.g. #29's widenStepRange).
+# Abort if the parked commit is an ancestor of HEAD, unless DEPLOY_ALLOW_PARKED=1
+# is set to override consciously. Self-clears once the park tag is deleted at
+# resurrection. (Note: rsync also excludes .git, so this guard is the ONLY thing
+# standing between a parked working tree and production.)
+# Scope: guards the Step-3 app-repo rsync. The Step-4 modules-repo rsync is
+# intentionally NOT covered — no park mechanism exists in that repo today.
+echo "[0/6] Pre-flight: parked-commit guard..."
+PARKED_TAG="parked-not-deployed"
+if git -C "$LOCAL_APP" rev-parse -q --verify "refs/tags/$PARKED_TAG" >/dev/null 2>&1; then
+  PARKED_COMMIT="$(git -C "$LOCAL_APP" rev-list -n1 "$PARKED_TAG")"
+  if git -C "$LOCAL_APP" merge-base --is-ancestor "$PARKED_COMMIT" HEAD 2>/dev/null; then
+    if [ "${DEPLOY_ALLOW_PARKED:-0}" != "1" ]; then
+      echo "      ❌ ABORT: HEAD contains parked commit ${PARKED_COMMIT:0:9} (tag $PARKED_TAG)."
+      echo "         A whole-tree rsync would ship parked code to prod, breaking the park."
+      echo "         Resolve the park, or set DEPLOY_ALLOW_PARKED=1 to override deliberately."
+      exit 1
+    fi
+    echo "      ⚠️  DEPLOY_ALLOW_PARKED=1 set — shipping parked commit ${PARKED_COMMIT:0:9} consciously."
+  else
+    echo "      OK — no parked commit in HEAD."
+  fi
+else
+  echo "      OK — no $PARKED_TAG tag present."
+fi
+
 # 1. Build the React client locally
 echo "[1/6] Building React client..."
 cd "$LOCAL_APP/client"
