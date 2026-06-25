@@ -20,6 +20,7 @@ import { COST_CONFIG } from '../config/timeouts.js';
 import { hydrateItems } from '../services/poolBlobs.js';
 import { convertXlsxInDir } from '../utils/xlsxConverter.js';
 import { parseAnthropicSSE } from '../services/aiStream.js';
+import { buildCachedUserContent } from '../services/promptCache.js';
 import { deriveEntityRunStatus } from '../utils/entityRunStatus.js';
 
 // Load submodule manifests (worker is a separate process from server.js)
@@ -148,7 +149,7 @@ function buildTools(runId, submoduleId) {
   const AI_BASE_DELAY_MS = 2000; // 2s → 4s → 8s exponential backoff
 
   const ai = {
-    complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens }) => {
+    complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens, cache_prefix }) => {
       const startTime = Date.now();
       const modelId = MODEL_MAP[model] || model;
 
@@ -178,7 +179,11 @@ function buildTools(runId, submoduleId) {
                 model: modelId,
                 max_tokens: max_tokens ?? 16384,
                 stream: true,
-                messages: [{ role: 'user', content: prompt }],
+                // BACKLOG #21: when the caller passes a large stable cache_prefix
+                // (e.g. reference docs), split it into a cache_control'd block so
+                // the API caches it (~10% input cost on re-read within 5 min).
+                // No cache_prefix → plain string content, unchanged from before.
+                messages: [{ role: 'user', content: buildCachedUserContent(prompt, cache_prefix) }],
                 ...(temperature != null && { temperature }),
               }),
             });
@@ -198,6 +203,10 @@ function buildTools(runId, submoduleId) {
             text: streamed.text || '',
             tokens_in: streamed.tokens_in || 0,
             tokens_out: streamed.tokens_out || 0,
+            // BACKLOG #21 prompt-cache observability — additive fields, 0 when
+            // no cache_prefix was sent or the prefix was below the cache minimum.
+            cache_write_tokens: streamed.cache_creation_input_tokens || 0,
+            cache_read_tokens: streamed.cache_read_input_tokens || 0,
             model: modelId,
             provider: 'anthropic',
             stop_reason: stopReason,
@@ -206,7 +215,10 @@ function buildTools(runId, submoduleId) {
           if (stopReason === 'max_tokens') {
             logger.warn(`[ai] ${provider}/${model} — response TRUNCATED (hit max_tokens). Output may be incomplete.`);
           }
-          logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms, stop: ${stopReason} (streamed)`);
+          const cacheNote = (result.cache_read_tokens || result.cache_write_tokens)
+            ? `, cache: ${result.cache_read_tokens} read / ${result.cache_write_tokens} write`
+            : '';
+          logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out${cacheNote}, ${duration_ms}ms, stop: ${stopReason} (streamed)`);
           return result;
 
         } else if (provider === 'openai') {
