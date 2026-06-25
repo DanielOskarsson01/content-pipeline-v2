@@ -12,7 +12,10 @@
  *
  * parseAnthropicSSE turns the Anthropic Messages streaming (SSE) response into
  * the SAME result shape the non-streamed path returned, so callers are
- * unchanged: { text, tokens_in, tokens_out, stop_reason }.
+ * unchanged: { text, tokens_in, tokens_out, stop_reason }. It additionally
+ * surfaces prompt-cache usage (cache_creation_input_tokens,
+ * cache_read_input_tokens) from the message_start usage block for BACKLOG #21
+ * observability — additive fields; existing callers ignore them.
  *
  * Pure + dependency-free (no undici import) — uses only Web streams / TextDecoder
  * available in Node 18+. Accepts an async iterable yielding string OR Uint8Array
@@ -21,7 +24,7 @@
 
 /**
  * @param {AsyncIterable<string|Uint8Array>} stream  the response body
- * @returns {Promise<{text:string,tokens_in:number,tokens_out:number,stop_reason:string}>}
+ * @returns {Promise<{text:string,tokens_in:number,tokens_out:number,stop_reason:string,cache_creation_input_tokens:number,cache_read_input_tokens:number}>}
  * @throws {Error} if the stream emits an Anthropic `error` event
  */
 export async function parseAnthropicSSE(stream) {
@@ -35,6 +38,11 @@ export async function parseAnthropicSSE(stream) {
   let tokens_in = 0;
   let tokens_out = 0;
   let stop_reason = 'unknown';
+  // Prompt-cache usage (BACKLOG #21) — present in message_start usage when a
+  // cache_control breakpoint is sent; 0 otherwise. tokens_in is the UNcached
+  // input remainder, so total prompt = tokens_in + cache_creation + cache_read.
+  let cache_creation_input_tokens = 0;
+  let cache_read_input_tokens = 0;
 
   const decoder = new TextDecoder();
   let buffer = '';
@@ -44,6 +52,8 @@ export async function parseAnthropicSSE(stream) {
       case 'message_start':
         if (evt.message?.usage?.input_tokens != null) tokens_in = evt.message.usage.input_tokens;
         if (evt.message?.usage?.output_tokens != null) tokens_out = evt.message.usage.output_tokens;
+        if (evt.message?.usage?.cache_creation_input_tokens != null) cache_creation_input_tokens = evt.message.usage.cache_creation_input_tokens;
+        if (evt.message?.usage?.cache_read_input_tokens != null) cache_read_input_tokens = evt.message.usage.cache_read_input_tokens;
         break;
       case 'content_block_delta':
         if (typeof evt.delta?.text === 'string') text += evt.delta.text;
@@ -85,5 +95,5 @@ export async function parseAnthropicSSE(stream) {
   buffer += decoder.decode();
   if (buffer.length > 0) consumeLine(buffer);
 
-  return { text, tokens_in, tokens_out, stop_reason };
+  return { text, tokens_in, tokens_out, stop_reason, cache_creation_input_tokens, cache_read_input_tokens };
 }
