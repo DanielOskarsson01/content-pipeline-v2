@@ -14,6 +14,7 @@ import db from '../services/db.js';
 import { getSubmoduleById, getSubmodules } from '../services/moduleLoader.js';
 import { enqueueEntityBatch, redis } from '../services/queue.js';
 import { applyDataOperation } from '../lib/applyDataOperation.js';
+import { resolveBatchLoopIteration } from '../utils/loopIteration.js';
 
 // --- Execute router (mounted at /api/runs/:runId/steps/:stepIndex/submodules/:submoduleId) ---
 export const executeRouter = Router({ mergeParams: true });
@@ -362,19 +363,21 @@ executeRouter.post('/run', async (req, res) => {
       }
     }
 
-    // Load entity_run_meta for loop metadata on card-routed batches — they
-    // need loop_count to derive loop_iteration for the resume-safety check in
-    // autoExecutor.checkExistingSubmoduleRun.
+    // Load entity_run_meta loop metadata for ALL groups — default (card_id=null)
+    // AND card-routed. The default group needs loop_count too: after a backward
+    // route, default-group submodules (content-analyzer/seo-planner/tone-seo-editor)
+    // re-execute in Round 2+ and MUST be stamped with the bumped loop_iteration so
+    // autoExecutor's iteration-scoped completion wait + resume-safety check match.
+    // Gating this load on `if (cardId)` stamped default-group Round-2 rows with a
+    // stale 0 → the iter=1 wait never matched → false 120s "batchWorker may be down"
+    // timeout → halt before the routed card ran (sub-plan 4 task 2, fixed 2026-06-27).
     // Section C pre-flight (2026-06-03): dropped loop_config from select
     // — verified unused in this file (grep loopMeta.loop_config returns 0).
-    let metaMap = new Map();
-    if (cardId) {
-      const { data: entityMeta } = await db
-        .from('entity_run_meta')
-        .select('entity_name, loop_count, card_instructions')
-        .eq('run_id', runId);
-      metaMap = new Map((entityMeta || []).map(m => [m.entity_name, m]));
-    }
+    const { data: entityMeta } = await db
+      .from('entity_run_meta')
+      .select('entity_name, loop_count, card_instructions')
+      .eq('run_id', runId);
+    const metaMap = new Map((entityMeta || []).map(m => [m.entity_name, m]));
 
     // If no entity pools exist yet (Step 0/1), create them from inputData entities
     let entities;
@@ -526,18 +529,11 @@ executeRouter.post('/run', async (req, res) => {
     }
     // ── END PRECONDITION CHECK ─────────────────────────────────────────────
 
-    // Card-routed batches share one loop_iteration. Default groups after
-    // routing may legitimately mix per-entity loop_counts — warn and pick the
-    // first (matches autoExecutor.processStep:230-238).
-    const batchLoopIteration = (() => {
-      if (entities.length === 0) return 0;
-      const iters = entities.map(ep => metaMap.get(ep.entity_name)?.loop_count ?? 0);
-      const first = iters[0];
-      if (iters.some(i => i !== first)) {
-        console.warn(`[submoduleRuns] Step ${stepIdx}/${submoduleId} (card=${cardId || 'default'}): mixed entity loop_counts [${iters.join(',')}], using ${first} for batch loop_iteration`);
-      }
-      return first;
-    })();
+    // loop_iteration is the entity's current round (entity_run_meta.loop_count),
+    // card-agnostic — see resolveBatchLoopIteration. Default groups after routing
+    // may legitimately mix per-entity loop_counts; the helper picks the first
+    // (matches autoExecutor.processStep:230-238).
+    const batchLoopIteration = resolveBatchLoopIteration(entities, metaMap);
 
     // 7. Create batch record in submodule_runs
     const batchId = randomUUID();
