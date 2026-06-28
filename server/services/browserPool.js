@@ -290,15 +290,32 @@ async function fetchWithBrowser(browser, url, options, useProxy) {
   }
 }
 
-// Cloudflare challenge markers — if browser result body contains these,
-// the page is a challenge page, not real content.
+// Cloudflare challenge / block markers — if the browser result body contains
+// any of these, the page is a challenge or block page, not real content.
+// Kept SPECIFIC to challenge/block pages on purpose: a false positive routes a
+// normal page to the paid Web Unlocker for nothing, so generic strings that also
+// appear on normal Cloudflare-served content (e.g. 'cf-ray', 'Performance &
+// security by Cloudflare') are deliberately excluded.
 const CHALLENGE_MARKERS = [
-  'cf-browser-verification',
-  'Checking your browser',
-  'Just a moment...',
+  'cf-browser-verification',                    // legacy interstitial
+  'Checking your browser',                      // legacy interstitial
+  'Just a moment...',                           // managed challenge title
+  'Enable JavaScript and cookies to continue',  // JS/cookie block
+  'Sorry, you have been blocked',               // hard block page
+  'Attention Required! | Cloudflare',           // hard block title
+  '/cdn-cgi/challenge-platform/',               // challenge JS bundle (path-specific, not bare word)
+  'cf_chl_opt',                                 // challenge JS options object
+  '__cf_chl_',                                  // challenge token prefix
 ];
+// Deliberately NOT included (false-positive risk → wasted paid Web Unlocker calls):
+//   'Verify you are human'  — embedded captcha widgets appear on normal 200 pages;
+//                             real CF challenges also carry the cf_chl tokens above.
+//   bare 'cloudflare' / 'cf-ray' / status-only rules — match normal CF-served content
+//                             and app-level 403/geo/auth blocks the unlocker can't fix.
 
-function hasCloudflareChallenge(body) {
+// Accepts the full browser result ({ status, body }) or a raw body string (back-compat).
+function hasCloudflareChallenge(result) {
+  const body = typeof result === 'string' ? result : (result?.body || '');
   return CHALLENGE_MARKERS.some(m => body.includes(m));
 }
 
@@ -366,7 +383,7 @@ export async function browserFetch(url, options = {}) {
   }
 
   // Cloudflare challenge detected — fall back to Web Unlocker if configured
-  if (hasUnlocker && result.body && hasCloudflareChallenge(result.body)) {
+  if (hasUnlocker && hasCloudflareChallenge(result)) {
     console.warn(`[browserPool] Cloudflare challenge detected for ${url} — falling back to Web Unlocker`);
     try {
       return await webUnlockerFetch(url);
