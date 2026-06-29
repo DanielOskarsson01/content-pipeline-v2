@@ -1,0 +1,73 @@
+-- B052 — run_submodule_config onConflict fix
+--
+-- PROBLEM
+-- The Multi-Card migration (`migration_multi_card_pattern.sql`, commit 376022d,
+-- applied to prod 2026-06-03) replaced the plain unique constraint
+--   (run_id, step_index, submodule_id)
+-- with an EXPRESSION index
+--   run_submodule_config_run_step_sm_card_uniq
+--     ON (run_id, step_index, submodule_id, COALESCE((card_id)::text, ''::text))
+-- so that multiple cards of the same submodule (different card_id) could coexist.
+--
+-- PostgREST's `onConflict` (what supabase-js `.upsert(..., { onConflict })` uses)
+-- can ONLY infer PLAIN-COLUMN unique indexes — it cannot reference a COALESCE
+-- expression, and it cannot supply a partial-index predicate. So after that
+-- migration, EVERY upsert into run_submodule_config failed at runtime with
+--   "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+-- (observed as UI save-error toasts on prod, 2026-06-06; per-run option
+-- customisations silently failed to persist — the run otherwise fell back to
+-- template defaults). The three call sites are:
+--   server/routes/submoduleConfig.js, submoduleRuns.js, templates.js.
+--
+-- FIX (B052 diagnosis option (i) — the option the diagnosis itself called cleanest;
+-- requires Postgres 15+ for NULLS NOT DISTINCT, prod is 17.6)
+-- Replace the expression index with a PLAIN 4-column unique index declared
+-- NULLS NOT DISTINCT:
+--   * legacy rows (card_id IS NULL) dedupe on (run_id, step_index, submodule_id)
+--     exactly as before, because NULL = NULL under NULLS NOT DISTINCT;
+--   * card rows (card_id set) dedupe including card_id, so multiple cards of the
+--     same submodule still coexist;
+--   * a single plain onConflict string 'run_id,step_index,submodule_id,card_id'
+--     serves BOTH paths and is fully inferable by PostgREST.
+--
+-- The replacement is exactly equivalent to the COALESCE expression index it replaces
+-- (NULL and '' collapse to the same dedupe key under NULLS NOT DISTINCT), so no
+-- existing row can violate the new index. (Today every row has card_id IS NULL, so
+-- both reduce to the pre-multi-card (run_id, step_index, submodule_id) key.)
+--
+-- It is, however, a deliberately LOOSER guarantee than PHASE_3B §6.4's card key
+-- (which is (run_id, step_index, card_id) — submodule_id ABSENT). Under this index two
+-- rows could share a card_id across different submodule_ids; §6.4 would reject that.
+-- Harmless in practice because a card has exactly one submodule_id (card_id→submodule_id
+-- is 1:1 per card_definitions), so the column is redundant, not wrong. NOT equivalent to
+-- §6.4 — equivalent to the replaced COALESCE index. (PHASE_3B §6.4 amended 2026-06-29 to
+-- this model; see the spec.)
+--
+-- WHY NOT PHASE_3B §6.4's "two separate constraints"
+-- That design is incompatible with PostgREST: it relies on (a) passing an INDEX
+-- NAME to onConflict and (b) inferring a PARTIAL (WHERE card_id IS NOT NULL) index.
+-- PostgREST supports neither — onConflict is plain-column inference only (verified
+-- against supabase-js/PostgREST docs, 2026-06-29). NULLS NOT DISTINCT achieves the
+-- intended semantics with one index targetable by plain columns.
+--
+-- RE-RUN: not safely re-runnable after success — the CREATE has no IF NOT EXISTS, so a
+-- second run errors on "already exists". Intentional: a re-run should fail loud, not
+-- silently skip. One-shot prod migration.
+--
+-- READ-SIDE CAVEAT (carry-forward, NOT fixed here — see modules BACKLOG): this migration
+-- makes the WRITE path card-safe. The options READ at submoduleRuns.js:248
+-- (.eq run_id/step_index/submodule_id + .maybeSingle(), no card_id filter) is NOT yet
+-- card-aware and will see >1 row once card rows exist. The card-UI session must make the
+-- read card-aware as part of enabling card writes.
+--
+-- LOCK NOTE
+-- DROP + CREATE (non-CONCURRENTLY) takes a brief ACCESS EXCLUSIVE lock on
+-- run_submodule_config. The table is small (retention purges it with its run), so
+-- the lock is sub-second. CONCURRENTLY is intentionally avoided: it cannot run in a
+-- transaction and can leave an INVALID index on failure.
+
+DROP INDEX IF EXISTS run_submodule_config_run_step_sm_card_uniq;
+
+CREATE UNIQUE INDEX run_submodule_config_run_step_sm_card_uniq
+  ON run_submodule_config (run_id, step_index, submodule_id, card_id)
+  NULLS NOT DISTINCT;
