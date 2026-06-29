@@ -68,9 +68,10 @@ const cardDefinitions = {
 };
 
 const executionPlan = {
-  cards: cardDefinitions,
+  // Canonical (post-be07509): card_definitions + routing_rules[key] = [{ step, card_id }].
+  card_definitions: cardDefinitions,
   routing_rules: {
-    'citation:fail': { target_cards: [CARD_A_ID] },
+    'citation:fail': [{ step: 5, card_id: CARD_A_ID }],
   },
 };
 

@@ -158,13 +158,15 @@ function buildMockDb({ tables = {}, rpcOverrides = {} } = {}) {
 const CARD_A_ID = 'card-A-uuid';
 const CARD_B_ID = 'card-B-uuid';
 
+// Canonical execution_plan (post-be07509): card_definitions (not `cards`) and
+// routing_rules[key] = [{ step, card_id }] (not `{ target_cards: [...] }`).
 function buildExecutionPlan({
-  cardA = { submodule_id: 'pse', step: 5, rounds: { '1': {}, '2': { _marker: 'A-R2' } } },
-  cardB = { submodule_id: 'writer', step: 5, rounds: { '1': {}, '2': { _marker: 'B-R2' } } },
-  rules = { 'citation:fail': { target_cards: [CARD_A_ID] } },
+  cardA = { card_name: 'card-A', submodule_id: 'pse', step: 5, rounds: { '1': {}, '2': { _marker: 'A-R2' } } },
+  cardB = { card_name: 'card-B', submodule_id: 'writer', step: 5, rounds: { '1': {}, '2': { _marker: 'B-R2' } } },
+  rules = { 'citation:fail': [{ step: 5, card_id: CARD_A_ID }] },
 } = {}) {
   return {
-    cards: {
+    card_definitions: {
       [CARD_A_ID]: cardA,
       [CARD_B_ID]: cardB,
     },
@@ -397,8 +399,8 @@ await (async function group5_partialExhaustion() {
     cardA: { submodule_id: 'pse', step: 5, rounds: { '1': {}, '2': {}, '3': {} } },
     cardB: { submodule_id: 'writer', step: 5, rounds: { '1': {}, '2': { _marker: 'B-R2' } } },
     rules: {
-      'citation:fail':     { target_cards: [CARD_A_ID] },
-      'hallucination:fail': { target_cards: [CARD_B_ID] },
+      'citation:fail':      [{ step: 5, card_id: CARD_A_ID }],
+      'hallucination:fail': [{ step: 5, card_id: CARD_B_ID }],
     },
   });
   // entity_run_meta has card_instructions showing card-A rounds 2 + 3 already consumed
@@ -446,8 +448,8 @@ await (async function group6_allExhausted() {
     cardA: { submodule_id: 'pse', step: 5, rounds: { '1': {}, '2': {} } },
     cardB: { submodule_id: 'writer', step: 5, rounds: { '1': {}, '2': {} } },
     rules: {
-      'citation:fail':     { target_cards: [CARD_A_ID] },
-      'hallucination:fail': { target_cards: [CARD_B_ID] },
+      'citation:fail':      [{ step: 5, card_id: CARD_A_ID }],
+      'hallucination:fail': [{ step: 5, card_id: CARD_B_ID }],
     },
   });
   const consumed_history = [{
@@ -612,9 +614,9 @@ console.log('\n--- Group 9: validateCards cardId-step-uniqueness warning ---');
 
 await (async function group9_crossStepWarning() {
   const executionPlan = {
-    cards: {
-      'shared-card': { submodule_id: 'pse', step: 1 },
-      'other-card':  { submodule_id: 'writer', step: 5 },
+    card_definitions: {
+      'shared-card': { card_name: 'shared-card', submodule_id: 'pse', step: 1 },
+      'other-card':  { card_name: 'other-card', submodule_id: 'writer', step: 5 },
     },
     routing_rules: {},
   };
