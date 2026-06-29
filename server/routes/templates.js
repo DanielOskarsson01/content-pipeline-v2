@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import db from '../services/db.js';
 import { getSubmoduleById } from '../services/moduleLoader.js';
+import { validateExecutionPlan } from '../services/executionPlanUtils.js';
 import { sortSubmoduleIds } from '../services/moduleOrder.js';
 import { STEP_CONFIG } from '../../shared/stepConfig.js';
 import { parseSeedFile } from '../utils/seedParser.js';
@@ -116,7 +117,12 @@ router.post('/', async (req, res, next) => {
 
     const insert = { name: name.trim(), description: description || null };
     if (preset_map) insert.preset_map = preset_map;
-    if (execution_plan) insert.execution_plan = execution_plan;
+    if (execution_plan) {
+      // Card save-path validation (PHASE_3B §9) — fail loud before persisting a malformed plan.
+      const { errors } = validateExecutionPlan(execution_plan, { isRegisteredSubmodule: (id) => !!getSubmoduleById(id) });
+      if (errors.length) return res.status(400).json({ error: 'Invalid execution_plan', details: errors });
+      insert.execution_plan = execution_plan;
+    }
     if (seed_config) insert.seed_config = seed_config;
 
     const { data, error } = await db
@@ -144,7 +150,12 @@ router.put('/:id', async (req, res, next) => {
     if (req.body.name !== undefined) updates.name = req.body.name.trim();
     if (req.body.description !== undefined) updates.description = req.body.description;
     if (req.body.preset_map !== undefined) updates.preset_map = req.body.preset_map;
-    if (req.body.execution_plan !== undefined) updates.execution_plan = req.body.execution_plan;
+    if (req.body.execution_plan !== undefined) {
+      // Card save-path validation (PHASE_3B §9) — fail loud before persisting a malformed plan.
+      const { errors } = validateExecutionPlan(req.body.execution_plan, { isRegisteredSubmodule: (id) => !!getSubmoduleById(id) });
+      if (errors.length) return res.status(400).json({ error: 'Invalid execution_plan', details: errors });
+      updates.execution_plan = req.body.execution_plan;
+    }
     if (req.body.seed_config !== undefined) updates.seed_config = req.body.seed_config;
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ error: 'Nothing to update' });
