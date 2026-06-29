@@ -267,7 +267,9 @@ executeRouter.post('/run', async (req, res) => {
         submodule_id: submoduleId,
         options,
         updated_at: new Date().toISOString(),
-      }, { onConflict: 'run_id,step_index,submodule_id' });
+        // B052: card_id in the conflict target so PostgREST can infer the live
+        // (run_id, step_index, submodule_id, card_id) NULLS NOT DISTINCT index.
+      }, { onConflict: 'run_id,step_index,submodule_id,card_id' });
     } catch (persistErr) {
       console.warn(`[submoduleRuns] Failed to persist resolved options for ${submoduleId}:`, persistErr.message);
     }

@@ -539,7 +539,9 @@ router.post('/:id/apply', async (req, res, next) => {
     const configRows = buildConfigRowsFromPresetMap(run_id, resolved, docIdMap);
     for (const row of configRows) {
       await db.from('run_submodule_config').upsert(row, {
-        onConflict: 'run_id,step_index,submodule_id',
+        // B052: card_id in the conflict target so PostgREST can infer the live
+        // (run_id, step_index, submodule_id, card_id) NULLS NOT DISTINCT index.
+        onConflict: 'run_id,step_index,submodule_id,card_id',
       });
     }
 

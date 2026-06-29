@@ -55,7 +55,9 @@ router.put('/', async (req, res) => {
 
   const { data, error } = await supabase
     .from('run_submodule_config')
-    .upsert(row, { onConflict: 'run_id,step_index,submodule_id' })
+    // B052: live unique index is (run_id, step_index, submodule_id, card_id) NULLS
+    // NOT DISTINCT — card_id must be in the conflict target for PostgREST to infer it.
+    .upsert(row, { onConflict: 'run_id,step_index,submodule_id,card_id' })
     .select()
     .single();
 
