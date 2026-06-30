@@ -200,16 +200,51 @@ export interface TemplatePresetMapEntry {
 }
 export type TemplatePresetMap = Record<string, TemplatePresetMapEntry>;
 
+// ── Multi-Card Pattern (PHASE_3B) — canonical card config ─────────────────────
+// Runtime-faithful shapes. Source of truth: server routingHandler.js + executionPlanUtils.js
+// + the live 30-april template (verified 2026-06-30). These intentionally DIVERGE from
+// PHASE_3B's abstract §1 schema (no separate options_overrides/prompt_overrides object;
+// routing_rules is array-form, not {target_cards}); the deployed runtime wins.
+// Step 2 repoints CardsSection/RoutingRulesSection (TemplateEditor.tsx) onto these and
+// deletes the @deprecated legacy types below.
+
+/** Sparse per-round option overrides. Any submodule option (prompt, ai_model, temperature,
+ *  curated_list, max_results, …) is just a key here — there is NO separate options_overrides
+ *  object; overrides are spread shallowly over base options at execution ({ ...base, ...rounds[N] }). */
+export type CardRoundOverrides = Record<string, unknown>;
+
+/** Round overrides keyed by the STRING digits "1".."4" (NOT an array, NOT numeric keys).
+ *  Round "1" is always present (validator rule 5); max 4 rounds (rule 7). For a Round-1 card
+ *  "1" carries its differentiating config; for a retry-only card "1" is typically {} and
+ *  "2"/"3"/"4" carry escalation overrides. */
+export interface CardRounds {
+  '1': CardRoundOverrides;
+  '2'?: CardRoundOverrides;
+  '3'?: CardRoundOverrides;
+  '4'?: CardRoundOverrides;
+}
+
+/** A card = a named, configured instance of a submodule. Stored UUID-keyed in
+ *  execution_plan.card_definitions; the map key is the card_id (stable, never changes on rename). */
 export interface CardDefinition {
+  /** Display name. Cosmetic only — identity is always the card_id (the map key). The runtime
+   *  tolerates its absence (validator does not require it), but the UI should always set it. */
+  card_name: string;
+  /** Which submodule this card invokes. Must be a registered submodule. */
   submodule_id: string;
+  /** Which pipeline step the card executes at. Must equal its submodules_per_step placement. */
   step: number;
-  options_overrides: Record<string, unknown>;
+  /** Sparse option overrides per round. */
+  rounds: CardRounds;
+  /** Optional operator note. */
   description?: string;
 }
 
-export interface RoutingRule {
-  target_cards: string[];
-  description?: string;
+/** One routing target: run `card_id` at `step` when a QA check fails. `step` is optional at
+ *  runtime (falls back to the card's own step) but the UI should set it = card.step. */
+export interface RoutingTarget {
+  step: number;
+  card_id: string;
 }
 
 export interface EscalationRule {
@@ -220,15 +255,38 @@ export interface EscalationRule {
   escalation_submodules: string[];
 }
 
+/** @deprecated Legacy string-keyed card shape the dead CardsSection still reads/writes
+ *  (TemplateEditor.tsx). The runtime ignores `execution_plan.cards` entirely. Retained only so
+ *  the dead UI compiles until Step 2 repoints it; DELETE with the CardsSection rewrite. */
+export interface LegacyCardDefinition {
+  submodule_id: string;
+  step: number;
+  options_overrides: Record<string, unknown>;
+  description?: string;
+}
+
+/** @deprecated Legacy object-form routing rule ({ target_cards }) the dead RoutingRulesSection
+ *  emitted. The runtime + save validator require array-form `RoutingTarget[]`. Unreferenced;
+ *  kept for migration documentation. DELETE with the RoutingRulesSection rewrite (Step 2). */
+export interface LegacyRoutingRule {
+  target_cards: string[];
+  description?: string;
+}
+
 export interface TemplateExecutionPlan {
   submodules_per_step?: Record<string, string[]>;
   skip_steps?: number[];
   pause_before_steps?: number[];
   pause_after_submodules?: string[];
   failure_thresholds?: Record<string, number>;
-  cards?: Record<string, CardDefinition>;
-  routing_rules?: Record<string, RoutingRule>;
+  /** Canonical card config — UUID-keyed. Round-1 cards ALSO appear (by card_id) in
+   *  submodules_per_step; retry-only cards appear here only. */
+  card_definitions?: Record<string, CardDefinition>;
+  /** Canonical routing — keyed by "{qa_check}:fail"; each value is the target array. */
+  routing_rules?: Record<string, RoutingTarget[]>;
   escalation_rules?: Record<string, EscalationRule>;
+  /** @deprecated Legacy string-keyed cards; runtime ignores it. Step 2 removes (see LegacyCardDefinition). */
+  cards?: Record<string, LegacyCardDefinition>;
 }
 
 export interface TemplateSeedConfig {
