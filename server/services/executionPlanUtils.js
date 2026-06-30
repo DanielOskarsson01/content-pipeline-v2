@@ -109,14 +109,21 @@ const MAX_ROUNDS_PER_CARD = 4;
  *   9  card.step matches its submodules_per_step placement step (§9)
  *  10  every routing_rules card_id ∈ card_definitions           (§9)
  *  11  every routing_rules-referenced card has a round > 1      (§9 / §2.1)
+ *  12  legacy `cards` key (string-keyed) is rejected — card UI must emit card_definitions
+ *  13  routing_rules values must be arrays of {step, card_id}  (legacy {target_cards} rejected)
+ *
+ * Rules 12-13 (card-write enablement gap close): the dead CardsSection/RoutingRulesSection
+ * emitted `cards` + object-form routing_rules that this validator previously passed clean,
+ * so the save gate did not gate what the card UI produced. These rules close that gap.
  *
  * DEFERRED (returned in warnings[] only once buildable): QA-check-name →
  * manifest `qa_outputs` matching (§2.2, non-blocking warning). No manifest
  * declares `qa_outputs` yet (§6.6 not built), so there is nothing to match
  * against — implementing it now would be a no-op. Wire it when qa_outputs ships.
  *
- * Legacy plans (no card_definitions, kebab-case submodules_per_step entries)
- * validate clean — the card rules only engage when cards/UUIDs are present.
+ * A plain card-less legacy pipeline plan (kebab-case submodules_per_step entries, no
+ * `cards`, no `card_definitions`, no `routing_rules`) still validates clean — only the
+ * legacy CARD-authoring shapes (rules 12-13) are rejected.
  *
  * @param {object} executionPlan  the execution_plan being saved
  * @param {object} deps
@@ -129,6 +136,22 @@ export function validateExecutionPlan(executionPlan, { isRegisteredSubmodule } =
   const warnings = [];
   if (!executionPlan || typeof executionPlan !== 'object' || Array.isArray(executionPlan)) {
     return { errors, warnings };
+  }
+
+  // Gap close (card-write enablement): reject the LEGACY card-authoring shapes the
+  // dead CardsSection/RoutingRulesSection emit so the save gate actually gates what the
+  // card UI produces. Before this, a legacy `cards` (string-keyed) plan + object-form
+  // routing_rules ({target_cards}) validated with ZERO errors — dead data the runtime
+  // ignores sailed through. The canonical shape is `card_definitions` (UUID-keyed) +
+  // array-form routing_rules. Migration surface is empty: verified 2026-06-30 that 0
+  // production templates carry `cards`, and the only card template (30-april) is already
+  // canonical — so this rejection breaks no existing template.
+  // NOTE: a plain card-less legacy pipeline plan (kebab `submodules_per_step`, no `cards`,
+  // no `routing_rules`) is NOT a card plan and still validates clean — only the legacy
+  // CARD shapes are rejected here.
+  const legacyCards = executionPlan.cards;
+  if (legacyCards && typeof legacyCards === 'object' && !Array.isArray(legacyCards) && Object.keys(legacyCards).length > 0) {
+    errors.push('legacy `cards` key is not supported — use `card_definitions` (UUID-keyed). The card UI must emit card_definitions.');
   }
 
   const cardDefs = executionPlan.card_definitions;
@@ -203,7 +226,12 @@ export function validateExecutionPlan(executionPlan, { isRegisteredSubmodule } =
   const rr = executionPlan.routing_rules;
   if (rr && typeof rr === 'object' && !Array.isArray(rr)) {
     for (const [ruleKey, targets] of Object.entries(rr)) {
-      if (!Array.isArray(targets)) continue;
+      if (!Array.isArray(targets)) {
+        // Gap close: the dead RoutingRulesSection's legacy {target_cards: [...]} object
+        // form must be rejected (the runtime reads each value as the target array directly).
+        errors.push(`routing_rules["${ruleKey}"]: must be an array of {step, card_id} targets (legacy {target_cards} object form is not supported)`);
+        continue;
+      }
       for (const target of targets) {
         const cid = target?.card_id;
         if (!cid) {                                                     // routing target must name a card
