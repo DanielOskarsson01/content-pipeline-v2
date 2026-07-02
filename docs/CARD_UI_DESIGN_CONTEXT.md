@@ -9,6 +9,56 @@ editor**, not an invention. The design has **two fixed constraints and invents n
 
 A static visual reference mock is at `docs/card-ui-reference-mock.html` (open in a browser / render in Claude Design — it reproduces the existing editor's look with the exact classes).
 
+> **⚠️ §0 below supersedes the flat-sections reading.** The 2026-06-30 → 07-01 design conversation reconciled the model into a **nested, step-based** editor (not separate Cards/Routing/Escalation lists). §1–§9 remain valid for **tokens, idioms, gold patterns, and the data contract**; §0 says how to compose them and what changed.
+
+---
+
+## 0. Reconciled interaction model (2026-07-01) — READ FIRST
+
+The design is **one nested surface organized by pipeline step**, not a stack of flat sections. The same surface serves **building a new template** and **editing an existing one**. This supersedes any "separate CardsSection / RoutingRulesSection" reading below.
+
+**A. One surface, nested by step; greyed-until-activated.**
+- Show the pipeline steps (0–10). Each step expands to reveal the submodules that run in it.
+- **Every submodule is greyed until activated** (= added to `submodules_per_step`). Activating + configuring **is** template-building; editing later is the same surface. No separate "creation wizard."
+- **Steps 6 (QA) and 7 (Routing) are configured here too** — set thresholds, pick which submodules/variants to route to. Not a separate mode.
+
+**B. Submodule-row CTAs (these replace the flat removable chip).** Each active submodule row carries, on the right (where "idle →" sits today):
+- **data-op glyph `➕ / ➖ / ＝`** — the EXISTING `CategoryCardGrid` control (add / remove / transform). **DO NOT remove it** — it's the Rule-12 pool-operation contract, a different axis from the CTAs. Keep it.
+- **Edit** (renamed from "Change") — opens the config / round-overrides editor (settings, reference docs, LLM/model, prompt) = **reuse `SubmoduleOptions`** (§4).
+- **Clone** — clones the submodule into a card/variant (see E).
+- **Reorder** up/down arrows — running order **is** the `submodules_per_step` array order (saved in the template).
+
+**C. Variants (v2/v3/v4) are inset + badged; the step view is a CATALOG, not the orchestrator.**
+- A cloned variant renders **inset (~100px indent)** under its parent submodule, with a version badge (`v2`/`v3`/`v4`) and a `Retry-only` tag where applicable.
+- The generation/step view only shows **which variants exist**. It does **not** decide when they run — routing does (F). Do not make variants look like they run on their own.
+
+**D. Run 1 / 2 / 3 / 4 tabs (at the top of a step).**
+- Tabs select which "run" (round) you're viewing. **Run 1** = the normal-order submodules (`submodules_per_step`). **Run 2+** = the routed retry variants.
+- Selecting Run 2 **highlights** the variants active on the 2nd pass and **greys** the rest. So "greyed" has ONE meaning: *not active in the run you're currently viewing* (this resolves the earlier "unused vs variant" ambiguity — the run tab is the single axis).
+- The tabs are a **view** consistent with `routing_rules` (the source of truth for which variant runs when), not a second place to author routing.
+
+**E. Clone → save-scope chooser.** Clicking Clone prompts where to save the variant:
+- **Template-specific** — ✅ supported now (`card_definitions`, template-scoped by default).
+- **Global (reusable across templates)** — ⏳ **STUB, unlinked.** Show the option, mark it "coming"; **no backend** (BACKLOG **Item 37**). Caveat baked into 37: escalation/writer variants are the *config-carrying, routing-target* case (need fresh namespaced `card_name` + provenance when built); config-free discovery clones (e.g. a PSE curated source list) are the clean global-safe case.
+- **As a v2/v3/v4 version** of an existing submodule.
+
+**F. Variant → routing connection (answers "how do they get wired").**
+- A variant is **dormant until routing wires it** — existing-but-unrouted is fine, not an error.
+- In Step-7 routing: map a QA failure `"<check>:fail"` **→ a target card** via a dropdown listing **all existing variant cards + any unused submodule**. The **threshold** lives in the QA submodule's **Step-6** config; the failure signal it emits is the routing key.
+- **Build order works top-down:** create variants first (Step 5) → set QA thresholds (Step 6) → wire failure→variant (Step 7). Rules 10/11: routing can only target a pre-existing card with a round > 1.
+
+**G. Escalation rules — NOW IN SCOPE, structured, NO raw JSON.**
+- Replace the raw-JSON `escalation_rules` textarea with **per-round labeled number inputs** (Round 2 / 3 / 4 → `volume_threshold`, `fail_threshold`, …) using the commit-on-blur `ThresholdInput` primitive (§4). They belong **inside the round tabs**.
+- ⚠️ **UI-only change: the emitted `escalation_rules` shape must stay byte-identical** (object keyed by round-number string → `{ threshold fields }`). Its consumer `autoExecutor.evaluateEscalationGate` is unchanged. Structure the *input*, preserve the *output*.
+
+**H. Out of scope — two documented future epics. Design forward-compatible; DO NOT build.**
+- **Global variant library — BACKLOG Item 37.** Stub only (E). No store, no resolver.
+- **Non-linear / fluent-graph flow — BACKLOG Item 36** (analysis-driven re-discovery: an analysis LLM finds new companies/people/concepts → a *new* discovery round → scrape/transcribe → writer; arbitrary step jumps with different inputs per re-entry). Architecturally in-bounds (same routing / ID-composition machinery) **but** needs new discovery modules, LLM question-expansion, a **NEW routing trigger beyond `"<check>:fail"`**, and executor work. **Keep the routing model generic (trigger → target card at step)** so Item 36 extends it later; a stubbed note "future: non-`:fail` triggers (Item 36)" is fine, but **build only the stepwise + QA-failure routing-loop model.**
+
+**I. Collapse the "three overlapping lists" confusion.** In the flat model a submodule appears in Preset Map *and* Execution Plan *and* Cards — three places. The nested model shows each submodule **once**, under its step, with its preset/config in its Edit body and its variants inset. Don't re-list the same submodule across sibling sections.
+
+**J. Two surfaces, same writes.** The nested editor is used both as an all-steps **overview/editor** and, step-by-step, **during a live run** (the run is genuinely per-step / per-submodule). Edit + Clone are legitimate in both; a clone during a run persists to the **template** (per E's save-scope), not just that run instance.
+
 ---
 
 ## 1. Tech & design system
@@ -59,7 +109,7 @@ All three are rendered in the editor at `TemplateEditor.tsx:151-165`, each as a 
 |---|---|---|---|
 | **CardsSection** | 743-808 | `<textarea>` (`font-mono text-[11px]`) editing `plan.cards` (human-name-keyed legacy); client warn on missing `submodule_id`/`step`; "Save Cards" when dirty | **Replace** with a structured per-card editor (extend the §6-gold PresetMapEntry pattern). Emit `card_definitions` (UUID-keyed) via `cardPlanEditor.addCard`. Delete the @deprecated `LegacyCardDefinition` type. |
 | **RoutingRulesSection** | 812-887 | `<textarea>` editing `plan.routing_rules` (object `{target_cards}` legacy); shows `FAILURE_TYPES` chips (`hallucination:fail`, `citation:fail`, `keyword:fail`, `meta:fail`, `structural:fail`); warn on unknown card name; "Save Routing Rules" when dirty | **Replace** with a structured `"<check>:fail" → card(s)` mapper; emit array-form `routing_rules` (`RoutingTarget[]`) via `cardPlanEditor.setRoutingTargets`. The `FAILURE_TYPES` list is the canonical set of rule keys. |
-| **EscalationRulesSection** | 891-947 | `<textarea>` editing `plan.escalation_rules` | **DO NOT CHANGE.** This section is LIVE/correct (its consumer `autoExecutor.evaluateEscalationGate` matches). Out of scope. Shown only so the design doesn't accidentally restyle/remove it. |
+| **EscalationRulesSection** | 891-947 | `<textarea>` editing `plan.escalation_rules` | **NOW IN SCOPE (updated 2026-07-01, see §0.G): structure the UI, preserve the emitted shape.** Replace the raw-JSON textarea with per-round labeled number inputs (`ThresholdInput`). The emitted `escalation_rules` object (round-string → `{threshold fields}`) MUST stay byte-identical — `autoExecutor.evaluateEscalationGate` is unchanged. (Prior guidance "DO NOT CHANGE" referred to the emitted contract, which still holds; the raw-JSON *input* is what changes.) |
 
 ## 7. Gold patterns to extend (explicit mapping)
 - **A card row** = `PresetMapEntry` (TemplateEditor.tsx:313-425): an expandable bordered row with a name + meta header, a Remove button, and an expanded body that hosts `SubmoduleOptions` + a dirty "Save". For the card editor the header carries **card_name** (editable) + submodule + step + a Round-1/retry indicator; the body hosts **round tabs/sections** (1-4), each a `SubmoduleOptions` over that round's sparse overrides.
@@ -67,8 +117,8 @@ All three are rendered in the editor at `TemplateEditor.tsx:151-165`, each as a 
 - **Failure-type → card mapping** = `FAILURE_TYPES` chips (851) as the rule rows; each row gets the dropdown-add to attach `card_definitions` entries as `RoutingTarget`s.
 
 ## 8. Genuinely-new interaction (no existing idiom — design must introduce, flag as invention)
-- **Reorder.** Item 16 says "add/remove/**reorder**", but **the editor has NO reorder idiom anywhere** (no drag-handle, no up/down). This is invention, not extension — design a minimal one (e.g. up/down arrows matching the chip/▼ button styling) or defer reorder to a later pass. Don't assume a pattern exists.
-- **Round tabs (1-4)** within a card body — closest precedent is the expand/collapse; tabs are mild invention. Keep them in the existing type scale (`text-[10px]`/`text-xs`).
+- **Reorder.** Item 16 says "add/remove/**reorder**", and **the editor has NO reorder idiom anywhere** (no drag-handle, no up/down). **DECIDED (2026-07-01): up/down arrow buttons** matching the chip/▼ button styling — NOT drag (the editor has zero drag interactions; a drag handle would be the only one). Running order = the `submodules_per_step` array order. Do not defer.
+- **Round tabs (1-4)** within a **single card's Edit body** — for editing THAT card's per-round sparse overrides. Closest precedent is expand/collapse; tabs are mild invention. Keep them in the existing type scale (`text-[10px]`/`text-xs`). **Distinct from the step-level Run 1–4 tabs (§0.D)**, which show *which cards are active per run* across the whole step — different granularity: step-level = which cards run; card-level = that card's round overrides.
 - **Round-1 vs retry-only toggle** — maps to a *data* fact (is the card_id in `submodules_per_step`?), so it's a single control whose flip drives the atomic dual-write. No existing single-control-drives-two-keys precedent; design it explicitly and route through `cardPlanEditor` (never two saves).
 - **Sparse-diff affordance for rounds 2-4** — must read visually as "only what differs from round 1," not a full config (contract 5). No existing precedent for a diff-style option editor; design a clear "inherits round 1 except…" framing.
 
@@ -117,4 +167,4 @@ never hand-assemble JSON. Types are in `client/src/types/step.ts`.
 ---
 
 ## Summary for the design pass
-Extend the existing template editor: white section cards, sky-600 controls, chips + dropdown-add, the expandable `PresetMapEntry` row hosting `SubmoduleOptions`, batched dirty-save → one PUT. Replace the two raw-JSON textareas (Cards, Routing) with structured controls that emit the §9-valid canonical shapes via `cardPlanEditor`. Invent only reorder, round tabs, the round-1/retry toggle, and the sparse-diff framing — and flag those as the new parts. Leave EscalationRulesSection alone.
+Extend the existing template editor's **look** (white section cards, sky-600 controls, chips + dropdown-add, the expandable `PresetMapEntry` row hosting `SubmoduleOptions`, batched dirty-save → one PUT) into the **nested step-based model of §0**: one surface, submodules grouped under their step (greyed until activated), each row carrying data-op glyph + **Edit** + **Clone** + reorder arrows, variants inset+badged under their parent, **Run 1–4 tabs** at step level, routing wired as `"<check>:fail" → target card` (§0.F). Replace **all three** raw-JSON textareas — Cards, Routing, **and Escalation** (§0.G, structure the input / preserve the emitted shape) — with structured controls that emit the §9-valid canonical shapes via `cardPlanEditor` (escalation keeps its own shape via the existing key). Invent only: reorder (up/down arrows, decided), round tabs, the round-1/retry toggle, and the sparse-diff framing. **Stub** the global-save option (Item 37). **Do not build** the non-linear graph flow (Item 36) — keep the routing seam generic so it extends later.
