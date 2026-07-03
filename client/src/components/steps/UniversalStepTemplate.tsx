@@ -1,5 +1,5 @@
 import { useMemo, useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PipelineStage, SubmoduleManifest } from '../../types/step';
 import { useStepSubmodules } from '../../hooks/useSubmodules';
 import { useSubmoduleConfig, useSubmoduleConfigs, useSaveSubmoduleConfig } from '../../hooks/useSubmoduleConfig';
@@ -9,6 +9,7 @@ import { useAppStore } from '../../stores/appStore';
 import { api } from '../../api/client';
 import { CategoryCardGrid } from '../shared/CategoryCardGrid';
 import { SubmodulePanel } from '../shared/SubmodulePanel';
+import { VariantPane } from '../shared/VariantPane';
 import { StepSummary } from '../shared/StepSummary';
 import { StepApprovalFooter } from '../shared/StepApprovalFooter';
 import { ContentRenderer, type RenderSchema } from '../primitives/ContentRenderer';
@@ -32,6 +33,8 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
   const { data: categories, isLoading: submodulesLoading } = useStepSubmodules(stage.step_index);
   const { activeSubmoduleId } = usePanelStore();
   const { data: latestRuns } = useLatestSubmoduleRuns(stage.run_id, stage.step_index);
+  // Project → template_id + mode, for variant rows/pane + "Clone as variant" (single_run has no template).
+  const { data: project } = useQuery({ queryKey: ['project', projectId], queryFn: () => api.getProject(projectId), enabled: !!projectId });
 
   // All submodule configs for this step — used by CategoryCardGrid for data op display
   const { data: configMap } = useSubmoduleConfigs(stage.run_id, stage.step_index);
@@ -120,6 +123,7 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
           latestRuns={latestRuns}
           configMap={configMap}
           onDataOperationChange={handleGridDataOpChange}
+          templateId={project?.template_id}
         />
       )}
 
@@ -179,7 +183,12 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
         }
         previousStepRenderSchema={stage.input_render_schema as Record<string, unknown> | null}
         runStatus={runStatus}
+        templateId={project?.template_id}
+        projectMode={project?.mode}
       />
+
+      {/* VariantPane — slides from left when a variant row is clicked (or a clone is created) */}
+      <VariantPane templateId={project?.template_id} projectId={projectId} />
     </div>
   );
 }

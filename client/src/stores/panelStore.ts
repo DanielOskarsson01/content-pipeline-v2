@@ -21,11 +21,17 @@ interface PanelStore {
   // Accordion state
   panelAccordion: PanelAccordion;
 
+  // Variant pane (card editor) — mutually exclusive with the submodule panel
+  variantPaneOpen: boolean;
+  variantCardId: string | null;
+
   // Actions
   openSubmodulePanel: (submoduleId: string, categoryKey: string) => void;
   closeSubmodulePanel: () => void;
   setPanelAccordion: (accordion: PanelAccordion) => void;
   setActiveSubmoduleRunId: (runId: string | null) => void;
+  openVariantPane: (cardId: string) => void;
+  closeVariantPane: () => void;
   resetPanel: () => void;
 }
 
@@ -35,6 +41,8 @@ export const usePanelStore = create<PanelStore>((set) => ({
   activeCategoryKey: null,
   activeSubmoduleRunId: null,
   panelAccordion: 'input',
+  variantPaneOpen: false,
+  variantCardId: null,
 
   openSubmodulePanel: (submoduleId, categoryKey) =>
     set({
@@ -43,6 +51,7 @@ export const usePanelStore = create<PanelStore>((set) => ({
       activeCategoryKey: categoryKey,
       activeSubmoduleRunId: null, // Reset so effect can set from latestRuns
       panelAccordion: 'input',
+      variantPaneOpen: false, // the two left-slide panes are mutually exclusive
     }),
 
   closeSubmodulePanel: () =>
@@ -56,6 +65,12 @@ export const usePanelStore = create<PanelStore>((set) => ({
   setActiveSubmoduleRunId: (runId) =>
     set({ activeSubmoduleRunId: runId }),
 
+  openVariantPane: (cardId) =>
+    set({ variantPaneOpen: true, variantCardId: cardId, submodulePanelOpen: false }),
+
+  closeVariantPane: () =>
+    set({ variantPaneOpen: false }),
+
   resetPanel: () =>
     set({
       submodulePanelOpen: false,
@@ -63,5 +78,7 @@ export const usePanelStore = create<PanelStore>((set) => ({
       activeCategoryKey: null,
       activeSubmoduleRunId: null,
       panelAccordion: 'input',
+      variantPaneOpen: false,
+      variantCardId: null,
     }),
 }));

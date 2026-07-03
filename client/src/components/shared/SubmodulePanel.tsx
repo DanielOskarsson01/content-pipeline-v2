@@ -6,21 +6,16 @@ import { useStepContext } from '../../hooks/useStepContext';
 import { useSubmoduleRun, useSubmoduleRunFull, useExecuteSubmodule, useApproveSubmoduleRun, useApproveSubmoduleRunPerEntity, useLatestSubmoduleRuns, useEntityRunDetail } from '../../hooks/useSubmoduleRuns';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../api/client';
-import type { SubmoduleManifest, SubmoduleConfig, DownloadableField, SubmoduleRun, SubmoduleRunBatch, EntityRunStatus } from '../../types/step';
+import type { SubmoduleManifest, SubmoduleConfig, DownloadableField, SubmoduleRun, SubmoduleRunBatch, EntityRunStatus, ProjectMode, TemplateExecutionPlan } from '../../types/step';
 import { isPerEntityRun } from '../../types/step';
 import { CsvUploadInput, type UploadResult } from '../primitives/CsvUploadInput';
 import { ContentRenderer, type RenderSchema } from '../primitives/ContentRenderer';
 import { SubmoduleOptions } from '../primitives/SubmoduleOptions';
 import { UrlTextarea, parseTextareaToEntities } from '../primitives/UrlTextarea';
 import { sanitizeFilename } from '../../utils/sanitize';
-
-type AccordionVariant = 'blue' | 'teal' | 'pink';
-
-const VARIANT_COLORS: Record<AccordionVariant, { bg: string; buttonBg: string; buttonText: string }> = {
-  blue: { bg: 'bg-[#3B82F6]', buttonBg: 'bg-white', buttonText: 'text-[#3B82F6]' },
-  teal: { bg: 'bg-[#0891B2]', buttonBg: 'bg-[#E11D73]', buttonText: 'text-white' },
-  pink: { bg: 'bg-[#E11D73]', buttonBg: 'bg-white', buttonText: 'text-[#E11D73]' },
-};
+import { PanelAccordionItem } from './PanelAccordionItem';
+import { useTemplatePlan, useTemplateCardMutation } from '../../hooks/useTemplatePlan';
+import { addCard } from '../../api/cardPlanEditor';
 
 const DATA_OP_OPTIONS = ['add', 'remove', 'transform'] as const;
 const DATA_OP_ICONS: Record<string, string> = { add: '\u2795', remove: '\u2796', transform: '\uFF1D' };
@@ -39,52 +34,9 @@ interface SubmodulePanelProps {
   previousStepData: Record<string, unknown>[] | null;
   previousStepRenderSchema: Record<string, unknown> | null;
   runStatus?: string;
-}
-
-function PanelAccordionItem({
-  title,
-  badge,
-  isOpen,
-  onToggle,
-  variant,
-  children,
-}: {
-  title: string;
-  badge?: string;
-  isOpen: boolean;
-  onToggle: () => void;
-  variant: AccordionVariant;
-  children: React.ReactNode;
-}) {
-  const colors = VARIANT_COLORS[variant];
-
-  return (
-    <div
-      className={`bg-white rounded-lg border border-gray-200 ${isOpen ? 'flex-1 flex flex-col min-h-0' : 'flex-shrink-0'}`}
-    >
-      <button
-        onClick={onToggle}
-        className={`w-full flex items-center justify-between px-4 py-3 ${colors.bg} text-white rounded-t-lg`}
-      >
-        <span className="font-semibold text-sm flex items-center gap-2">
-          {title}
-          {badge && (
-            <span className="text-[10px] bg-white/20 px-2 py-0.5 rounded-full">{badge}</span>
-          )}
-        </span>
-        <div
-          className={`w-6 h-6 rounded-full ${colors.buttonBg} flex items-center justify-center`}
-        >
-          <span className={`${colors.buttonText} font-bold text-sm`}>
-            {isOpen ? '\u2212' : '+'}
-          </span>
-        </div>
-      </button>
-      {isOpen && (
-        <div className="p-4 flex-1 overflow-y-auto">{children}</div>
-      )}
-    </div>
-  );
+  /** Template this run derives from — enables "Clone as variant". Null/absent for single_run. */
+  templateId?: string | null;
+  projectMode?: ProjectMode;
 }
 
 export function SubmodulePanel({
@@ -100,6 +52,8 @@ export function SubmodulePanel({
   previousStepData,
   previousStepRenderSchema,
   runStatus,
+  templateId,
+  projectMode,
 }: SubmodulePanelProps) {
   const queryClient = useQueryClient();
   const showToast = useAppStore((s) => s.showToast);
@@ -110,7 +64,26 @@ export function SubmodulePanel({
     closeSubmodulePanel,
     setPanelAccordion,
     setActiveSubmoduleRunId,
+    openVariantPane,
   } = usePanelStore();
+
+  // Clone-as-variant (template-scoped; separate from run-scoped config) ─ one updateTemplate PUT.
+  const { data: cloneTemplate } = useTemplatePlan(templateId);
+  const cloneMutation = useTemplateCardMutation(templateId);
+  const [cloneName, setCloneName] = useState('');
+  const canClone = !!templateId && projectMode !== 'single_run';
+  const handleCloneAsVariant = () => {
+    if (!submodule || !templateId) return;
+    const basePlan: TemplateExecutionPlan = cloneTemplate?.execution_plan ?? {};
+    const { plan: next, cardId } = addCard(
+      basePlan,
+      { card_name: cloneName.trim(), submodule_id: submodule.id, step: stepIndex, rounds: { '1': {}, '2': {} } },
+      { round1: false },
+    );
+    cloneMutation.mutate(next, {
+      onSuccess: () => { setCloneName(''); showToast('Variant created', 'success'); openVariantPane(cardId); },
+    });
+  };
 
   // Step context (shared CSV data for this step)
   const { data: stepContext } = useStepContext(runId, stepIndex);
@@ -624,6 +597,34 @@ export function SubmodulePanel({
             <span className="font-medium">{DATA_OP_LABELS[dataOperation]}</span>
             <span className="text-[10px] text-gray-400 ml-1">(click to change)</span>
           </button>
+        </div>
+
+        {/* Clone as variant (template-scoped) */}
+        <div className="px-4 py-2 bg-white border-b flex-shrink-0">
+          {canClone ? (
+            <>
+              <div className="flex items-center gap-2">
+                <input
+                  value={cloneName}
+                  onChange={(e) => setCloneName(e.target.value)}
+                  placeholder={`${submodule?.id || 'submodule'}-v2`}
+                  className="flex-1 min-w-0 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                />
+                <button
+                  onClick={handleCloneAsVariant}
+                  disabled={!cloneName.trim() || cloneMutation.isPending}
+                  className="px-3 py-1 text-xs bg-sky-600 text-white rounded hover:bg-sky-700 disabled:bg-gray-300 flex-shrink-0"
+                >
+                  {cloneMutation.isPending ? 'Creating…' : 'Clone as variant'}
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1">saves to template — dormant until routed in Step 7</p>
+            </>
+          ) : (
+            <p className="text-[10px] text-gray-400">
+              Clone as variant — <span className="text-amber-600">Save as Template first</span>
+            </p>
+          )}
         </div>
 
         {/* Previous Run Summary — visible when a completed/approved/failed run exists */}

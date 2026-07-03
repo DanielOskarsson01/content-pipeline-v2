@@ -125,6 +125,7 @@ export function removeCard(plan: TemplateExecutionPlan, cardId: string): Templat
 
   const routing: Record<string, RoutingTarget[]> = {};
   for (const [failKey, targets] of Object.entries(plan.routing_rules ?? {})) {
+    if (!Array.isArray(targets)) continue; // defensive: skip malformed non-array values (server rejects them anyway)
     const kept = targets.filter((t) => t.card_id !== cardId);
     if (kept.length) routing[failKey] = kept; // drop emptied rule keys
   }
@@ -188,5 +189,19 @@ export function setCardRounds(
     ...plan,
     // deep-copy rounds so the stored card can't alias the caller's object (see addCard)
     card_definitions: { ...plan.card_definitions, [cardId]: { ...existing, rounds: structuredClone(rounds) } },
+  };
+}
+
+/** Rename a card (display name only; card_id identity unchanged). No-op if the card is absent. */
+export function renameCard(
+  plan: TemplateExecutionPlan,
+  cardId: string,
+  cardName: string,
+): TemplateExecutionPlan {
+  const existing = plan.card_definitions?.[cardId];
+  if (!existing) return plan;
+  return {
+    ...plan,
+    card_definitions: { ...plan.card_definitions, [cardId]: { ...existing, card_name: cardName } },
   };
 }

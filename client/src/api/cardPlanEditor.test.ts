@@ -3,7 +3,7 @@
 // Cross-checks the client's rule-10/11 messages against the REAL server validator.
 import { describe, it, expect } from 'vitest';
 import {
-  mintCardId, addCard, setCardPlacement, removeCard, setRoutingTargets, setCardRounds,
+  mintCardId, addCard, setCardPlacement, removeCard, setRoutingTargets, setCardRounds, renameCard,
 } from './cardPlanEditor.ts';
 // The exact gate PUT /api/templates/:id runs — proves "server-matching messages" + acceptance:
 import { validateExecutionPlan } from '../../../server/services/executionPlanUtils.js';
@@ -162,6 +162,21 @@ describe('setCardRounds', () => {
   it('unknown card is a no-op', () => {
     const before = { card_definitions: {} };
     expect(setCardRounds(before, GHOST, { '1': {} })).toEqual(before);
+  });
+});
+
+describe('renameCard', () => {
+  it('changes card_name, preserves identity + rounds; immutable', () => {
+    const w = addCard({}, writerInput, { round1: false });
+    const snap = structuredClone(w.plan);
+    const plan = renameCard(w.plan, w.cardId, 'content-writer-v3');
+    expect(plan.card_definitions?.[w.cardId].card_name).toBe('content-writer-v3');
+    expect(plan.card_definitions?.[w.cardId].rounds).toEqual(writerInput.rounds);
+    expect(w.plan).toEqual(snap); // input untouched
+  });
+  it('unknown card is a no-op', () => {
+    const before = { card_definitions: {} };
+    expect(renameCard(before, GHOST, 'x')).toEqual(before);
   });
 });
 

@@ -1,6 +1,10 @@
 import { useState } from 'react';
-import type { CategoryGroups, SubmoduleManifest, SubmoduleLatestRunMap, SubmoduleConfig } from '../../types/step';
+import type { CategoryGroups, SubmoduleManifest, SubmoduleLatestRunMap, SubmoduleConfig, CardDefinition, TemplateExecutionPlan } from '../../types/step';
 import { usePanelStore } from '../../stores/panelStore';
+import { useAppStore } from '../../stores/appStore';
+import { useTemplatePlan, useTemplateCardMutation } from '../../hooks/useTemplatePlan';
+import { cardsForSubmodule, cardIsRound1, cardRoutingInfo } from '../../api/cardPlanView';
+import { removeCard } from '../../api/cardPlanEditor';
 
 const DATA_OP_OPTIONS = ['add', 'remove', 'transform'] as const;
 const DATA_OP_ICONS: Record<string, string> = {
@@ -14,11 +18,19 @@ interface CategoryCardGridProps {
   latestRuns?: SubmoduleLatestRunMap;
   configMap?: Record<string, SubmoduleConfig>;
   onDataOperationChange?: (submoduleId: string, op: 'add' | 'remove' | 'transform') => void;
+  /** Template whose cards render as variant rows inset under their submodule. Omit for single_run. */
+  templateId?: string | null;
 }
 
-export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, onDataOperationChange }: CategoryCardGridProps) {
-  const { openSubmodulePanel } = usePanelStore();
+export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, onDataOperationChange, templateId }: CategoryCardGridProps) {
+  const { openSubmodulePanel, openVariantPane } = usePanelStore();
+  const showToast = useAppStore((s) => s.showToast);
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
+  const { data: template } = useTemplatePlan(templateId);
+  const plan: TemplateExecutionPlan = template?.execution_plan ?? {};
+  const cardMutation = useTemplateCardMutation(templateId);
+  const removeVariant = (cardId: string) =>
+    cardMutation.mutate(removeCard(plan, cardId), { onSuccess: () => showToast('Variant removed', 'success') });
 
   // Sort categories in logical pipeline order (not alphabetical/load order)
   const CATEGORY_ORDER: Record<string, number> = {
@@ -75,10 +87,11 @@ export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, 
                   {submodules.map((sub) => {
                     const savedOp = configMap[sub.id]?.data_operation;
                     const currentOp = savedOp || sub.data_operation_default;
+                    const variants = cardsForSubmodule(plan, sub.id);
 
                     return (
+                      <div key={sub.id}>
                       <SubmoduleRow
-                        key={sub.id}
                         submodule={sub}
                         categoryKey={catKey}
                         onOpen={openSubmodulePanel}
@@ -100,6 +113,19 @@ export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, 
                             : undefined
                         }
                       />
+                      {variants.map((v, i) => (
+                        <VariantRow
+                          key={v.cardId}
+                          card={v.card}
+                          version={i + 2}
+                          isRound1={cardIsRound1(plan, v.cardId)}
+                          routing={cardRoutingInfo(plan, v.cardId)}
+                          onOpen={() => openVariantPane(v.cardId)}
+                          onRemove={() => removeVariant(v.cardId)}
+                          removing={cardMutation.isPending}
+                        />
+                      ))}
+                      </div>
                     );
                   })}
                 </div>
@@ -183,6 +209,49 @@ function SubmoduleRow({
         ) : (
           <span className="text-[10px] text-gray-300 italic">inactive</span>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Variant (card) row — inset under its parent submodule.
+function VariantRow({ card, version, isRound1, routing, onOpen, onRemove, removing }: {
+  card: CardDefinition;
+  version: number;
+  isRound1: boolean;
+  routing: { routed: boolean; failKeys: string[] };
+  onOpen: () => void;
+  onRemove: () => void;
+  removing: boolean;
+}) {
+  return (
+    <div
+      className="flex items-center justify-between pl-11 pr-2 py-1.5 rounded bg-[#fcfcfd] hover:bg-gray-50 cursor-pointer group"
+      onClick={onOpen}
+    >
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="text-[10px] font-mono bg-gray-100 text-gray-500 px-1 rounded">v{version}</span>
+        <span className="text-xs text-gray-700 truncate">{card.card_name}</span>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${isRound1 ? 'bg-sky-50 text-sky-600' : 'bg-gray-100 text-gray-500'}`}>
+          {isRound1 ? 'Round 1' : 'Retry-only'}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0">
+        {routing.routed ? (
+          <span className="text-[10px] text-sky-600" title={`routed by ${routing.failKeys.join(', ')}`}>← {routing.failKeys.join(', ')}</span>
+        ) : (
+          <span className="text-[10px] text-amber-600" title="Not routed — wire a QA failure in Step 7">dormant</span>
+        )}
+        <button
+          onClick={(e) => { e.stopPropagation(); onRemove(); }}
+          disabled={removing}
+          className="text-[10px] text-gray-400 hover:text-red-500 disabled:opacity-40"
+        >
+          Remove
+        </button>
+        <svg className="w-4 h-4 text-gray-400 opacity-50 group-hover:opacity-100" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clipRule="evenodd" />
+        </svg>
       </div>
     </div>
   );
