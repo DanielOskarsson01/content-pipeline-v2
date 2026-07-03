@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import db from '../services/db.js';
 import { getSubmoduleById } from '../services/moduleLoader.js';
-import { validateExecutionPlan } from '../services/executionPlanUtils.js';
+import { validateExecutionPlan, mergeCardWorkFromSourcePlan } from '../services/executionPlanUtils.js';
 import { sortSubmoduleIds } from '../services/moduleOrder.js';
 import { STEP_CONFIG } from '../../shared/stepConfig.js';
 import { parseSeedFile } from '../utils/seedParser.js';
@@ -432,13 +432,15 @@ router.post('/from-run/:runId', async (req, res, next) => {
       .eq('id', run.project_id)
       .single();
     let srcOrder = {};
+    let srcPlan = {};
     if (srcProject?.template_id) {
       const { data: srcTpl } = await db
         .from('templates')
         .select('execution_plan')
         .eq('id', srcProject.template_id)
         .single();
-      srcOrder = srcTpl?.execution_plan?.submodules_per_step || {};
+      srcPlan = srcTpl?.execution_plan || {};
+      srcOrder = srcPlan.submodules_per_step || {};
     }
     for (const stepIdx of Object.keys(submodulesPerStep)) {
       const existing = srcOrder[stepIdx] || [];
@@ -447,7 +449,18 @@ router.post('/from-run/:runId', async (req, res, next) => {
       const preserved = existing.filter(id => submodulesPerStep[stepIdx].includes(id));
       submodulesPerStep[stepIdx] = [...preserved, ...sortSubmoduleIds(newSubs)];
     }
-    const executionPlan = { submodules_per_step: submodulesPerStep };
+    // item-3 fix: the rebuild above only produced submodules_per_step (strings). Carry the source
+    // template's card work + structural config it dropped (card_definitions, routing_rules,
+    // escalation_rules, skip_steps, failure_thresholds), restore placed card UUIDs / drop dangling
+    // ones, and gate the merged plan through the same §9 validator the PUT save path uses.
+    const { executionPlan, errors: mergeErrors } = mergeCardWorkFromSourcePlan(
+      { submodules_per_step: submodulesPerStep },
+      srcPlan,
+      { isRegisteredSubmodule: (id) => !!getSubmoduleById(id) },
+    );
+    if (mergeErrors.length) {
+      return res.status(400).json({ error: 'Invalid execution_plan (merged card work)', details: mergeErrors });
+    }
     const finalSeedConfig = seed_config || { seed_type: 'csv' };
 
     // 6. Update template with JSONB fields

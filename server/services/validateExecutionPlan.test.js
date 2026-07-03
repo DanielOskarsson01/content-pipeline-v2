@@ -177,7 +177,8 @@ test('templates.js save path wires validateExecutionPlan into both handlers with
   const { fileURLToPath } = await import('node:url');
   const { dirname, join } = await import('node:path');
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'routes', 'templates.js'), 'utf8');
-  assert.match(src, /import\s*\{\s*validateExecutionPlan\s*\}/, 'must import validateExecutionPlan');
+  // tolerant of co-imports (e.g. `{ validateExecutionPlan, mergeCardWorkFromSourcePlan }`)
+  assert.match(src, /import\s*\{[^}]*\bvalidateExecutionPlan\b[^}]*\}\s*from\s*['"][^'"]*executionPlanUtils/, 'must import validateExecutionPlan');
   const calls = src.match(/validateExecutionPlan\(/g) || [];
   assert.ok(calls.length >= 2, `expected ≥2 validateExecutionPlan calls (POST + PUT), got ${calls.length}`);
   assert.match(src, /status\(400\)[\s\S]*Invalid execution_plan/, 'must 400 with "Invalid execution_plan" on errors');

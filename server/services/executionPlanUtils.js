@@ -274,3 +274,79 @@ export function detectExecutionPlanFormat(executionPlan) {
   }
   return 'empty';
 }
+
+/**
+ * mergeCardWorkFromSourcePlan — from-run "item 3" fix (pure).
+ *
+ * The from-run handler (templates.js POST /from-run/:runId) rebuilds submodules_per_step from
+ * run_submodule_config (submodule-id STRINGS) and drops everything else the source template's
+ * execution_plan carried. This helper merges that dropped card work + structural config from the
+ * SOURCE template plan back into the rebuilt TARGET plan:
+ *   • carries card_definitions, routing_rules, escalation_rules, skip_steps, failure_thresholds
+ *   • NEVER re-emits the legacy `cards` key
+ *   • reconciles submodules_per_step: restores placed card UUIDs (source running order), drops
+ *     dangling UUIDs (not in carried card_definitions), keeps still-present strings, appends new
+ *     target strings (B046 order), and dedupes a restored card's own submodule-id string (no
+ *     double-run of the card + its plain submodule)
+ *   • gates the merged output through the SAME §9 validator as the PUT save path
+ *
+ * B046 order semantics are unchanged for non-card (string) entries: preserved strings keep source
+ * order; genuinely-new strings keep the target's (already-B046-sorted) order.
+ *
+ * @param {object} targetPlan   the from-run-rebuilt plan (submodules_per_step of strings)
+ * @param {object} sourcePlan   the source template's execution_plan
+ * @param {object} deps
+ * @param {(id:string)=>boolean} [deps.isRegisteredSubmodule]  same registry the PUT handler injects
+ * @returns {{ executionPlan: object, errors: string[] }}
+ */
+export function mergeCardWorkFromSourcePlan(targetPlan, sourcePlan, { isRegisteredSubmodule } = {}) {
+  const target = (targetPlan && typeof targetPlan === 'object' && !Array.isArray(targetPlan)) ? targetPlan : {};
+  const source = (sourcePlan && typeof sourcePlan === 'object' && !Array.isArray(sourcePlan)) ? sourcePlan : {};
+
+  // Start from target (keeps its submodules_per_step + any unknown/forward-compat keys). `cards` is
+  // intentionally never copied from source.
+  const merged = { ...target };
+  // Deep-copy carried source fields so the returned plan never aliases the (persisted, possibly
+  // reused) source plan — a caller mutating the output can't corrupt the source template.
+  for (const key of ['card_definitions', 'routing_rules', 'escalation_rules', 'skip_steps', 'failure_thresholds']) {
+    if (source[key] !== undefined) merged[key] = structuredClone(source[key]);
+  }
+
+  const cardDefs = (source.card_definitions && typeof source.card_definitions === 'object' && !Array.isArray(source.card_definitions))
+    ? source.card_definitions : {};
+
+  const srcSps = (source.submodules_per_step && typeof source.submodules_per_step === 'object' && !Array.isArray(source.submodules_per_step)) ? source.submodules_per_step : {};
+  const tgtSps = (target.submodules_per_step && typeof target.submodules_per_step === 'object' && !Array.isArray(target.submodules_per_step)) ? target.submodules_per_step : {};
+  const reconciled = {};
+  for (const stepKey of new Set([...Object.keys(srcSps), ...Object.keys(tgtSps)])) {
+    const sourceEntries = Array.isArray(srcSps[stepKey]) ? srcSps[stepKey] : [];
+    const targetStrings = Array.isArray(tgtSps[stepKey]) ? tgtSps[stepKey] : [];
+    const targetSet = new Set(targetStrings);
+    const out = [];
+    const seen = new Set();
+    const restoredSubmoduleIds = new Set();
+    // 1. Walk source in running order: keep placed cards (in defs) + still-present strings.
+    for (const entry of sourceEntries) {
+      if (typeof entry !== 'string' || seen.has(entry)) continue;
+      if (UUID_REGEX.test(entry)) {
+        const card = cardDefs[entry];
+        if (card) {                                   // placed card resolves → keep in running order
+          out.push(entry); seen.add(entry);
+          if (card.submodule_id) restoredSubmoduleIds.add(card.submodule_id);
+        }                                             // else: dangling UUID → drop
+      } else if (targetSet.has(entry)) {
+        out.push(entry); seen.add(entry);             // still-configured string → keep, source order
+      }                                               // else: string removed in the run → drop
+    }
+    // 2. Append genuinely-new target strings (B046 order), minus any already placed OR superseded
+    //    by a restored card's own submodule-id (avoids double-running the card + its plain entry).
+    for (const s of targetStrings) {
+      if (!seen.has(s) && !restoredSubmoduleIds.has(s)) { out.push(s); seen.add(s); }
+    }
+    reconciled[stepKey] = out;
+  }
+  merged.submodules_per_step = reconciled;
+
+  const { errors } = validateExecutionPlan(merged, { isRegisteredSubmodule });
+  return { executionPlan: merged, errors };
+}
