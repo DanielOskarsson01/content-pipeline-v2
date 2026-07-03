@@ -84,6 +84,16 @@ test('legacy object-form routing_rules ({target_cards}) → 400', () => {
     `expected object-form routing_rules rejection, got: ${errs(plan).join(' | ')}`);
 });
 
+// ── no over-rejection: empty routing_rules / empty target arrays are tolerated ───
+test('empty routing_rules ({} and empty target arrays) → errors:[] (rule 13 tolerates arrays incl. empty)', () => {
+  assert.deepEqual(errs({ routing_rules: {} }), []);
+  assert.deepEqual(errs({
+    card_definitions: correctedPlan().card_definitions,
+    submodules_per_step: correctedPlan().submodules_per_step,
+    routing_rules: { 'citation:fail': [] },
+  }), []);
+});
+
 // ── 400 branch: representative §9 violation still fires ──────────────────────────
 test('§9 rule 10: routing_rules card_id absent from card_definitions → 400', () => {
   const plan = correctedPlan();

@@ -205,8 +205,8 @@ export type TemplatePresetMap = Record<string, TemplatePresetMapEntry>;
 // + the live 30-april template (verified 2026-06-30). These intentionally DIVERGE from
 // PHASE_3B's abstract §1 schema (no separate options_overrides/prompt_overrides object;
 // routing_rules is array-form, not {target_cards}); the deployed runtime wins.
-// Step 2 repoints CardsSection/RoutingRulesSection (TemplateEditor.tsx) onto these and
-// deletes the @deprecated legacy types below.
+// The dead CardsSection/RoutingRulesSection textareas + their legacy types were deleted (item 9);
+// cards + routing are edited in the run view (Step-7 routing body + variant panes).
 
 /** Sparse per-round option overrides. Any submodule option (prompt, ai_model, temperature,
  *  curated_list, max_results, …) is just a key here — there is NO separate options_overrides
@@ -255,24 +255,6 @@ export interface EscalationRule {
   escalation_submodules: string[];
 }
 
-/** @deprecated Legacy string-keyed card shape the dead CardsSection still reads/writes
- *  (TemplateEditor.tsx). The runtime ignores `execution_plan.cards` entirely. Retained only so
- *  the dead UI compiles until Step 2 repoints it; DELETE with the CardsSection rewrite. */
-export interface LegacyCardDefinition {
-  submodule_id: string;
-  step: number;
-  options_overrides: Record<string, unknown>;
-  description?: string;
-}
-
-/** @deprecated Legacy object-form routing rule ({ target_cards }) the dead RoutingRulesSection
- *  emitted. The runtime + save validator require array-form `RoutingTarget[]`. Unreferenced;
- *  kept for migration documentation. DELETE with the RoutingRulesSection rewrite (Step 2). */
-export interface LegacyRoutingRule {
-  target_cards: string[];
-  description?: string;
-}
-
 export interface TemplateExecutionPlan {
   submodules_per_step?: Record<string, string[]>;
   skip_steps?: number[];
@@ -285,8 +267,6 @@ export interface TemplateExecutionPlan {
   /** Canonical routing — keyed by "{qa_check}:fail"; each value is the target array. */
   routing_rules?: Record<string, RoutingTarget[]>;
   escalation_rules?: Record<string, EscalationRule>;
-  /** @deprecated Legacy string-keyed cards; runtime ignores it. Step 2 removes (see LegacyCardDefinition). */
-  cards?: Record<string, LegacyCardDefinition>;
 }
 
 export interface TemplateSeedConfig {
