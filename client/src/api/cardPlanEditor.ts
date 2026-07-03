@@ -205,3 +205,39 @@ export function renameCard(
     card_definitions: { ...plan.card_definitions, [cardId]: { ...existing, card_name: cardName } },
   };
 }
+
+/**
+ * APPEND a routing target to a "{check}:fail" key — the spread-not-replace contract.
+ * `setRoutingTargets` REPLACES the whole target list, so an "+ add target" handler MUST pass the
+ * existing targets too; this wrapper enforces that (passing only the new target would silently drop
+ * the others). Re-runs the §9 rule 10/11 checks via setRoutingTargets.
+ */
+export function addRoutingTarget(
+  plan: TemplateExecutionPlan,
+  failKey: string,
+  existingTargets: RoutingTarget[],
+  newTarget: RoutingTarget,
+): TemplateExecutionPlan {
+  return setRoutingTargets(plan, failKey, [...existingTargets, newTarget]);
+}
+
+/**
+ * Create a retry-only variant AND route a QA failure to it, in ONE plan transform (one PUT at the
+ * call site). The card is `round1: false` (retry-only — absent from submodules_per_step) with
+ * `rounds: {1,2}` so it satisfies rule 11 (has a round > 1). Returns the plan + the new cardId
+ * (so the caller can open its pane).
+ */
+export function createAndRoute(
+  plan: TemplateExecutionPlan,
+  input: { card_name: string; submodule_id: string; step: number },
+  failKey: string,
+  existingTargets: RoutingTarget[],
+): { plan: TemplateExecutionPlan; cardId: string } {
+  const { plan: p1, cardId } = addCard(
+    plan,
+    { card_name: input.card_name, submodule_id: input.submodule_id, step: input.step, rounds: { '1': {}, '2': {} } },
+    { round1: false },
+  );
+  const p2 = setRoutingTargets(p1, failKey, [...existingTargets, { step: input.step, card_id: cardId }]);
+  return { plan: p2, cardId };
+}

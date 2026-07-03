@@ -4,6 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   mintCardId, addCard, setCardPlacement, removeCard, setRoutingTargets, setCardRounds, renameCard,
+  addRoutingTarget, createAndRoute,
 } from './cardPlanEditor.ts';
 // The exact gate PUT /api/templates/:id runs — proves "server-matching messages" + acceptance:
 import { validateExecutionPlan } from '../../../server/services/executionPlanUtils.js';
@@ -162,6 +163,37 @@ describe('setCardRounds', () => {
   it('unknown card is a no-op', () => {
     const before = { card_definitions: {} };
     expect(setCardRounds(before, GHOST, { '1': {} })).toEqual(before);
+  });
+});
+
+describe('addRoutingTarget (append-not-replace)', () => {
+  it('appends to a fail key without dropping the existing targets', () => {
+    const a = addCard({}, { card_name: 'a', submodule_id: 'content-writer', step: 5, rounds: { '1': {}, '2': {} } }, { round1: false });
+    const b = addCard(a.plan, { card_name: 'b', submodule_id: 'content-writer', step: 5, rounds: { '1': {}, '2': {} } }, { round1: false });
+    let plan = setRoutingTargets(b.plan, 'citation:fail', [{ step: 5, card_id: a.cardId }]);
+    const existing = plan.routing_rules!['citation:fail'];
+    plan = addRoutingTarget(plan, 'citation:fail', existing, { step: 5, card_id: b.cardId });
+    expect(plan.routing_rules!['citation:fail']).toEqual([{ step: 5, card_id: a.cardId }, { step: 5, card_id: b.cardId }]);
+  });
+  it('re-enforces rule 10 (unknown target card throws)', () => {
+    const a = addCard({}, { card_name: 'a', submodule_id: 'content-writer', step: 5, rounds: { '1': {}, '2': {} } }, { round1: false });
+    expect(() => addRoutingTarget(a.plan, 'citation:fail', [], { step: 5, card_id: GHOST })).toThrow(/not found in card_definitions/i);
+  });
+});
+
+describe('createAndRoute', () => {
+  it('creates a retry-only round-{1,2} card AND routes to it, in one plan; passes §9', () => {
+    const { plan, cardId } = createAndRoute({}, { card_name: 'writer-v2', submodule_id: 'content-writer', step: 5 }, 'citation:fail', []);
+    const card = plan.card_definitions![cardId];
+    expect(Object.keys(card.rounds)).toEqual(['1', '2']);                 // round 2 present (rule 11)
+    expect(plan.submodules_per_step?.['5'] ?? []).not.toContain(cardId);  // retry-only (not placed)
+    expect(plan.routing_rules!['citation:fail']).toEqual([{ step: 5, card_id: cardId }]);
+    expect(validateExecutionPlan(plan, opts).errors).toEqual([]);
+  });
+  it('preserves existing targets on the same fail key (append)', () => {
+    const first = createAndRoute({}, { card_name: 'a', submodule_id: 'content-writer', step: 5 }, 'citation:fail', []);
+    const second = createAndRoute(first.plan, { card_name: 'b', submodule_id: 'content-writer', step: 5 }, 'citation:fail', first.plan.routing_rules!['citation:fail']);
+    expect(second.plan.routing_rules!['citation:fail'].map((t) => t.card_id)).toEqual([first.cardId, second.cardId]);
   });
 });
 

@@ -214,8 +214,9 @@ function SubmoduleRow({
   );
 }
 
-// Variant (card) row — inset under its parent submodule.
-function VariantRow({ card, version, isRound1, routing, onOpen, onRemove, removing }: {
+// Variant (card) row — inset under its parent submodule. Exported so the Step-7 routed-variants
+// list reuses the SAME row (same card, opens the same pane).
+export function VariantRow({ card, version, isRound1, routing, onOpen, onRemove, removing }: {
   card: CardDefinition;
   version: number;
   isRound1: boolean;

@@ -10,6 +10,7 @@ import { api } from '../../api/client';
 import { CategoryCardGrid } from '../shared/CategoryCardGrid';
 import { SubmodulePanel } from '../shared/SubmodulePanel';
 import { VariantPane } from '../shared/VariantPane';
+import { Step7RoutingBody } from './Step7RoutingBody';
 import { StepSummary } from '../shared/StepSummary';
 import { StepApprovalFooter } from '../shared/StepApprovalFooter';
 import { ContentRenderer, type RenderSchema } from '../primitives/ContentRenderer';
@@ -112,11 +113,13 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
 
   return (
     <div>
-      {/* CategoryCardGrid — real manifest data */}
+      {/* Step body — Step 7 (Routing) gets the structured routing editor; others get the submodule grid */}
       {submodulesLoading ? (
         <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center mb-4">
           <p className="text-gray-400 text-sm">Loading submodules...</p>
         </div>
+      ) : stage.step_index === 7 ? (
+        <Step7RoutingBody templateId={project?.template_id} projectMode={project?.mode} />
       ) : (
         <CategoryCardGrid
           categories={categories || {}}
