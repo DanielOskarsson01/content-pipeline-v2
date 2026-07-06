@@ -587,6 +587,19 @@ All findings tracked in `specs/BACKLOG.md`.
 - Media Transcript Fetcher — moved from Step 5 to Step 3 (scraping is where it belongs)
 - Step 5 media enrichment — split into three: Image Generator, Video Generator, Audio/TTS Generator
 
+## Multi-window discipline (#42)
+
+Multiple Claude windows over the shared `Dropbox/Projects` tree have repeatedly clobbered each other's work. Five confirmed #42 incidents: a wrong-branch cross-repo push (2026-05-31), a wrong-thread session report, repeated `RESUME.md` overwrites by a parallel window, a lost session of client work, and the lost card-write landing kit. The six rules below are binding for every session in this repo. **Thread ownership** — which thread owns which repo/branch/worktree — is recorded in `content-pipeline-specs/THREAD_OWNERSHIP.md`; read it before you commit, and only commit within the repos/branches it assigns you.
+
+1. **Verify repo + branch before any commit.** Use `git -C <absolute-path>` and absolute paths; never trust the shell's cwd — a persisted `cd` caused the 2026-05-31 wrong-branch cross-repo push. Confirm you are in the repo AND on the branch you think you are before staging.
+2. **Push immediately after any commit that represents real work.** Unpushed local state has caused lost work more than once (the card-write kit, a client session). Do not batch pushes for later.
+3. **RESUME.md etiquette.** A per-thread `RESUME.md` lives in that thread's own repo. Read it skeptically (it may be stale or written by another window). Update only your own thread's section. Never overwrite another thread's RESUME.
+4. **One workstream per session.** One window = one thread = one worktree. Never run two concurrent windows over the same working directory. If a second track needs the same repo, it gets its own worktree (see THREAD_OWNERSHIP.md).
+5. **Cross-boundary change flagging.** Any change that would touch another thread's repo, branch, or worktree STOPS and reports — it does not reach across. (Unit 0.1 did this correctly: the buildout-thread cross-refs living on another branch were handed off, not edited.)
+6. **Never fabricate missing artifacts.** If a handoff kit, file, or prior state cannot be located, STOP AND REPORT. Do not reconstruct it from memory — a confidently-wrong reconstruction is worse than an honest "not found."
+
+---
+
 ## Decision Log
 
 This project uses automated decision logging via a PostToolUse hook.
