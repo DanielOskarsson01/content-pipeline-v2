@@ -226,6 +226,107 @@ async function setTerminalState(db, runId, entityName, terminalState, failureRea
 }
 
 /**
+ * Persist one entity's QA scores to entity_run_meta:
+ *   - last_qa_scores   ← latest scores object (overwrite)
+ *   - qa_score_history ← APPEND { iteration, scores, timestamp } (never overwrite)
+ *
+ * Restores the write DROPPED when Section C (2026-06-04, commit be07509)
+ * replaced the apply_entity_routing RPC with JS routing. That RPC recorded
+ * exactly this shape (migration_move_routing_to_step7.sql:169-180) for every
+ * decision carrying qa_scores, keyed by the current loop_count. The columns
+ * still exist (migration_routing.sql:18-19); only the writer was lost, so QA
+ * quality history has silently stopped accumulating since that rewrite.
+ *
+ * PURELY ADDITIVE. This records quality history and nothing else — it never
+ * reads or alters terminal_state, the routing decision, target_step, or the
+ * loop_count bump. It is called once per decision at the TOP of the applyRouting
+ * per-entity loop (the same pre-dispatch position the dropped RPC used), so
+ * routed entities accrue per-iteration history, not just terminal ones.
+ *
+ * DEFENSIVE BY CONTRACT (this fix must never destabilise routing):
+ *   - a missing / null / malformed score is a no-op (no partial or garbage row);
+ *   - no failure here — a read {error}, a write {error}, or a thrown exception —
+ *     is allowed to abort the routing batch. Quality history is a side-record,
+ *     never load-bearing the way the terminal_state write is.
+ *
+ * supabase-js has no server-side JSONB `||` append, and this file's persistence
+ * idiom is select + update (not raw SQL), so history is appended read-modify-
+ * write. Safe here: each entity is processed exactly once per applyRouting pass,
+ * sequentially, and only this function writes these two columns.
+ *
+ * @param {object} db - Supabase client
+ * @param {string} runId - The run UUID
+ * @param {string} entityName - Entity whose scores to record
+ * @param {*} qaScores - Scores object from loop-router output (e.g. { citation: 0.72 })
+ * @param {number} iteration - Current loop_count (the round these scores rate)
+ */
+async function recordQaScores(db, runId, entityName, qaScores, iteration) {
+  // Only a non-null, non-array object with at least one key is a valid score
+  // set. null / undefined / string / number / array / {} → skip. (The dropped
+  // RPC gated on `qa_scores IS NOT NULL`; we additionally reject shapes that
+  // would write garbage into the history array.)
+  if (
+    !qaScores ||
+    typeof qaScores !== 'object' ||
+    Array.isArray(qaScores) ||
+    Object.keys(qaScores).length === 0
+  ) {
+    return;
+  }
+
+  try {
+    const { data: current, error: readErr } = await db
+      .from('entity_run_meta')
+      .select('qa_score_history')
+      .eq('run_id', runId)
+      .eq('entity_name', entityName)
+      .maybeSingle();
+
+    if (readErr) {
+      console.error(
+        `[routingHandler] FAILED to read qa_score_history for ${entityName} ` +
+        `(run ${runId}): ${readErr.message || readErr}. Skipping QA-score ` +
+        `record for this round (non-fatal).`
+      );
+      return;
+    }
+
+    const history = Array.isArray(current?.qa_score_history)
+      ? current.qa_score_history
+      : [];
+    history.push({
+      iteration: iteration ?? 0,
+      scores: qaScores,
+      timestamp: new Date().toISOString(),
+    });
+
+    const { error: writeErr } = await db
+      .from('entity_run_meta')
+      .update({
+        last_qa_scores: qaScores,
+        qa_score_history: history,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('run_id', runId)
+      .eq('entity_name', entityName);
+
+    if (writeErr) {
+      console.error(
+        `[routingHandler] FAILED to persist qa_score_history for ${entityName} ` +
+        `(run ${runId}): ${writeErr.message || writeErr}. Quality history not ` +
+        `updated for this round (non-fatal).`
+      );
+    }
+  } catch (err) {
+    // A quality-history write must never abort the routing batch.
+    console.error(
+      `[routingHandler] Unexpected error recording QA scores for ${entityName} ` +
+      `(run ${runId}): ${err?.message || err}. Non-fatal.`
+    );
+  }
+}
+
+/**
  * Apply routing for a run. Reads loop-router output, builds decisions for
  * ALL entities, enforces max_loops, then writes per-entity pending card
  * instructions to entity_run_meta.card_instructions via the Multi-Card
@@ -414,6 +515,13 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
   );
 
   for (const d of decisions) {
+    // Persist QA scores BEFORE dispatch (restores the Section-C-dropped RPC
+    // write). Additive only — never touches terminal_state/routing. Done here,
+    // once per decision, so routed AND terminal entities accrue per-iteration
+    // history; iteration = current loop_count (the round these scores rate),
+    // matching the dropped RPC. Awaited but self-guarded to never throw.
+    await recordQaScores(db, runId, d.entity_name, d.qa_scores, loopCounts.get(d.entity_name) || 0);
+
     if (d.decision === 'completed' || d.decision === 'approve') {
       // Terminal success. loop-router emits 'approve' on the all-pass path (it
       // never emits 'completed'); both are terminal-success. The dropped
@@ -638,4 +746,4 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
   };
 }
 
-export { validateCards, resolveCards };
+export { validateCards, resolveCards, recordQaScores };
