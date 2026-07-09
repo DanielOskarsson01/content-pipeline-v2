@@ -22,6 +22,7 @@ import { convertXlsxInDir } from '../utils/xlsxConverter.js';
 import { parseAnthropicSSE } from '../services/aiStream.js';
 import { buildCachedUserContent } from '../services/promptCache.js';
 import { deriveEntityRunStatus } from '../utils/entityRunStatus.js';
+import { createHttp } from '../lib/httpTools.js';
 
 // Load submodule manifests (worker is a separate process from server.js)
 loadModules();
@@ -87,36 +88,9 @@ function buildTools(runId, submoduleId) {
     });
   }
 
-  const http = {
-    get: async (url, options = {}) => {
-      const timeout = options.timeout || 30000;
-      return withTimeout(async (signal) => {
-        const res = await fetch(url, { signal, headers: options.headers || {} });
-        const body = await res.text();
-        return { status: res.status, headers: Object.fromEntries(res.headers), body, url: res.url };
-      }, timeout);
-    },
-    head: async (url, options = {}) => {
-      const timeout = options.timeout || 30000;
-      return withTimeout(async (signal) => {
-        const res = await fetch(url, { method: 'HEAD', signal, headers: options.headers || {} });
-        return { status: res.status, headers: Object.fromEntries(res.headers), url: res.url };
-      }, timeout);
-    },
-    post: async (url, body, options = {}) => {
-      const timeout = options.timeout || 30000;
-      return withTimeout(async (signal) => {
-        const res = await fetch(url, {
-          method: 'POST',
-          signal,
-          headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-          body: typeof body === 'string' ? body : JSON.stringify(body),
-        });
-        const responseBody = await res.text();
-        return { status: res.status, headers: Object.fromEntries(res.headers), body: responseBody };
-      }, timeout);
-    },
-  };
+  // tools.http — GET/HEAD/POST/PUT/PATCH, binary-safe request+response, multipart.
+  // Implementation extracted to server/lib/httpTools.js (unit-tested in isolation).
+  const http = createHttp({ fetch, withTimeout });
 
   let _lastTotal = 1; // Track last reported total for completion write
   const progress = {
