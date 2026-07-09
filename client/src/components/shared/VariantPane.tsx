@@ -50,8 +50,14 @@ export function VariantPane({ templateId, projectId }: { templateId: string | nu
   useEffect(() => {
     if (card) {
       setLocalName(card.card_name);
-      setLocalRounds(structuredClone(card.rounds) as unknown as Rounds);
-      setActiveRound((prev) => (card.rounds[prev as '1'] ? prev : '1'));
+      // TODO(2.6): remove — VariantPane scalar rewrite. COMPILE-ONLY guard for the now-OPTIONAL
+      // `rounds` map (unit 2.4 made it optional; scalar `round`+`overrides` is canonical). A v6
+      // scalar card has NO `rounds` map, so this pane cannot edit it here — render an EXPLICIT
+      // EMPTY placeholder ({ '1': {} }) and default to the round-1 tab. NEVER derive/fabricate a
+      // rounds map from the scalar fields and NEVER fall back to a stale value — a wrong render is
+      // worse than a blank one. VariantPane is rewritten to the scalar model in unit 2.6.
+      setLocalRounds(structuredClone(card.rounds ?? { '1': {} }) as unknown as Rounds);
+      setActiveRound((prev) => (card.rounds?.[prev as '1'] ? prev : '1'));
     }
   }, [variantCardId, card?.card_name, roundsKey]);
 

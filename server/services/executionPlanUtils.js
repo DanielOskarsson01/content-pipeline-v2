@@ -44,7 +44,10 @@ export function resolveStepEntry(entry, cardDefinitions) {
       submodule_id: card.submodule_id,
       card_id: entry,
       card_name: card.card_name || card.name || null,
-      round_1_overrides: card.rounds?.['1'] || {},
+      // v6 scalar model: a placed card is Round-1 (placement === round-1 membership, D6), so its
+      // flat `overrides` ARE the round-1 overrides. Fall back to the legacy `rounds["1"]` shape so
+      // a not-yet-migrated card (e.g. the 30-april prod fixture, flipped in unit 2.7) still resolves.
+      round_1_overrides: card.overrides ?? card.rounds?.['1'] ?? {},
     };
   }
 
@@ -84,8 +87,9 @@ export function resolveStepEntries(stepEntries, cardDefinitions) {
   return (stepEntries || []).map(e => resolveStepEntry(e, cardDefinitions));
 }
 
-const VALID_ROUND_KEYS = ['1', '2', '3', '4'];
-const MAX_ROUNDS_PER_CARD = 4;
+// v6 scalar-round bound: a card's `round` is an integer in [1, MAX_ROUNDS].
+// (Was VALID_ROUND_KEYS/MAX_ROUNDS_PER_CARD for the dropped `rounds` MAP.)
+const MAX_ROUNDS = 4;
 
 /**
  * Validate an execution_plan's card config at TEMPLATE SAVE time (PHASE_3B §9
@@ -101,16 +105,18 @@ const MAX_ROUNDS_PER_CARD = 4;
  *   1  card_id (map key) is a valid UUID                         (§9)
  *   2  submodule_id present AND registered                      (§1.2)
  *   3  step present AND integer                                 (§1.2)
- *   4  rounds present AND a plain object                        (§1.2)
- *   5  round "1" always present                                 (§9)
- *   6  round keys ∈ {1,2,3,4}                                   (§9)
- *   7  ≤ MAX_ROUNDS_PER_CARD (4) rounds                         (§9)
+ *   4  round present AND an integer ≥ 1        [v6 scalar; the `rounds` MAP shape check is DELETED]
+ *  4b  overrides (if present) is a plain object [v6 scalar; the single flat overrides]
+ *   6  round ≤ MAX_ROUNDS (4)                  [v6 scalar bound; rule 7 map-size bound DELETED]
  *   8  every UUID entry in submodules_per_step ∈ card_definitions (§9)
  *   9  card.step matches its submodules_per_step placement step (§9)
  *  10  every routing_rules card_id ∈ card_definitions           (§9)
- *  11  every routing_rules-referenced card has a round > 1      (§9 / §2.1)
+ *  11  every routing_rules-referenced card has round > 1        [v6 scalar: card.round > 1]
  *  12  legacy `cards` key (string-keyed) is rejected — card UI must emit card_definitions
  *  13  routing_rules values must be arrays of {step, card_id}  (legacy {target_cards} rejected)
+ *  GROUP (D7/D8, Q3 option (e)): per (submodule,step) — retry rounds (round>1) UNIQUE; Round-1
+ *      clones allowed; PLACED groups contiguous-from-1 (was rule 5); ROUTING-ONLY groups may
+ *      start at round 2 (gaps there defer to the V6-§3 run-time terminus).
  *
  * Rules 12-13 (card-write enablement gap close): the dead CardsSection/RoutingRulesSection
  * emitted `cards` + object-form routing_rules that this validator previously passed clean,
@@ -181,27 +187,74 @@ export function validateExecutionPlan(executionPlan, { isRegisteredSubmodule } =
       if (!Number.isInteger(card.step)) {                               // 3
         errors.push(`${at}: step is required and must be an integer`);
       }
-      const rounds = card.rounds;
-      if (!rounds || typeof rounds !== 'object' || Array.isArray(rounds)) { // 4
-        errors.push(`${at}: rounds is required and must be an object`);
-      } else {
-        const keys = Object.keys(rounds);
-        if (!Object.prototype.hasOwnProperty.call(rounds, '1')) {       // 5
-          errors.push(`${at}: round "1" must always be present`);
+      // Rule 4 (v6 scalar) — `round` is required and an integer ≥ 1 (the `rounds`-MAP shape check
+      // is DELETED). Rule 6 (scalar bound) — round ≤ MAX_ROUNDS. Rule 7 (map-size bound) — DELETED.
+      if (!Number.isInteger(card.round) || card.round < 1) {           // 4
+        errors.push(`${at}: round is required and must be an integer ≥ 1`);
+      } else if (card.round > MAX_ROUNDS) {                            // 6
+        errors.push(`${at}: round must be ≤ ${MAX_ROUNDS} (got ${card.round})`);
+      }
+      // Rule 4b (v6 scalar) — the single flat `overrides`, if present, must be a plain object.
+      if (card.overrides !== undefined &&
+          (card.overrides === null || typeof card.overrides !== 'object' || Array.isArray(card.overrides))) { // 4b
+        errors.push(`${at}: overrides must be an object`);
+      }
+      // Rule 5 (round-1 presence) is now the PLACED-group contiguity rule below (scoped to placed
+      // cards per Q3 option (e)) — a routing-only card may start at round 2 with no round-1 sibling.
+    }
+  }
+
+  // GROUP RULE (D7/D8, Q3 option (e)) — group cards by (submodule_id, step):
+  //   • Multiple Round-1 clones (round === 1) are VALID (D8); RETRY rounds (round > 1) must be UNIQUE.
+  //   • A PLACED group (≥1 of its cards is in submodules_per_step) must be CONTIGUOUS FROM 1
+  //     (round 1 present, no interior gap) — this is rule 5 scoped to placed cards.
+  //   • A ROUTING-ONLY group (no placed card) MAY START AT ROUND 2 (option (e)); an interior gap
+  //     there is NOT an author-time error — it hits the V6-§3 run-time flag-and-continue terminus.
+  if (hasCards) {
+    const placedCardIds = new Set();
+    const sps = executionPlan.submodules_per_step;
+    if (sps && typeof sps === 'object' && !Array.isArray(sps)) {
+      for (const entries of Object.values(sps)) {
+        if (Array.isArray(entries)) {
+          for (const e of entries) if (typeof e === 'string' && UUID_REGEX.test(e)) placedCardIds.add(e);
         }
-        const invalid = keys.filter((k) => !VALID_ROUND_KEYS.includes(k)); // 6
-        if (invalid.length) {
-          errors.push(`${at}: round keys must be integers 1-4; invalid: ${invalid.join(', ')}`);
-        }
-        if (keys.length > MAX_ROUNDS_PER_CARD) {                        // 7
-          errors.push(`${at}: MAX_ROUNDS_PER_CARD=${MAX_ROUNDS_PER_CARD} exceeded (${keys.length} rounds)`);
-        }
-        for (const [rk, rv] of Object.entries(rounds)) {                // 4b: each round's overrides must be an object
-          if (rv === null || typeof rv !== 'object' || Array.isArray(rv)) {
-            errors.push(`${at}: round "${rk}" overrides must be an object`);
+      }
+    }
+    const SEP = '␟'; // unit-separator: safe group key join (submodule_id ␟ step)
+    const groups = new Map();
+    for (const [cardId, card] of Object.entries(cardDefs)) {
+      if (!card || typeof card !== 'object' || Array.isArray(card)) continue;
+      if (!Number.isInteger(card.round)) continue; // rule 4 already errored; don't double-report
+      if (typeof card.submodule_id !== 'string' || !Number.isInteger(card.step)) continue; // rules 2a/3 already errored
+      const key = `${card.submodule_id}${SEP}${card.step}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ cardId, round: card.round });
+    }
+    for (const [key, members] of groups) {
+      const [submoduleId, stepStr] = key.split(SEP);
+      const gat = `group (submodule "${submoduleId}", step ${stepStr})`;
+      const isPlaced = members.some((m) => placedCardIds.has(m.cardId));
+      // duplicate RETRY round (round > 1) — Round-1 clones are allowed (D8), so skip round 1
+      const retryCounts = new Map();
+      for (const m of members) if (m.round > 1) retryCounts.set(m.round, (retryCounts.get(m.round) || 0) + 1);
+      for (const [r, count] of retryCounts) {
+        if (count > 1) errors.push(`${gat}: duplicate retry round ${r} (retry rounds must be unique)`);
+      }
+      if (isPlaced) {
+        const distinct = [...new Set(members.map((m) => m.round))].sort((a, b) => a - b);
+        if (!distinct.includes(1)) {
+          errors.push(`${gat}: a PLACED group must include round 1 (round-1 membership is placement — D6/D7)`);
+        } else {
+          for (let i = 0; i < distinct.length; i++) {
+            if (distinct[i] !== i + 1) {
+              errors.push(`${gat}: rounds must be contiguous from 1 (gap before round ${distinct[i]})`);
+              break;
+            }
           }
         }
       }
+      // ROUTING-ONLY groups: no round-1 requirement (option (e)); interior gaps deferred to the
+      // V6-§3 run-time terminus. Retry-round uniqueness (above) still applies.
     }
   }
 
@@ -242,9 +295,9 @@ export function validateExecutionPlan(executionPlan, { isRegisteredSubmodule } =
         if (!card) {                                                    // 10
           errors.push(`routing_rules["${ruleKey}"]: card_id ${cid} not found in card_definitions`);
         } else {
-          const hasEscalation = card.rounds && typeof card.rounds === 'object' &&
-            Object.keys(card.rounds).some((k) => Number(k) > 1);
-          if (!hasEscalation) {                                         // 11
+          // Rule 11 (v6 scalar): a routing-referenced card must be a retry variant (round > 1),
+          // else routing to it can never escalate.
+          if (!(Number.isInteger(card.round) && card.round > 1)) {      // 11
             errors.push(`routing_rules["${ruleKey}"]: card ${cid} has no round > 1 (routing can never escalate)`);
           }
         }

@@ -51,7 +51,13 @@ export interface AutoExecuteStepResult {
   status: string;
   completed: number;
   failed: number;
+  /** Entities skipped (e.g. no input). Part of the real persisted per_step_results shape —
+   *  added in unit 2.4 (2.3 §5b drift W2: step.ts omitted it). */
+  skipped: number;
   total: number;
+  /** total minus skipped — the denominator the failure rate is actually computed against
+   *  (autoExecutor.js). Added in unit 2.4 (2.3 §5b drift W2: step.ts omitted it). */
+  effectiveTotal: number;
   failureRate: number;
   duration_ms: number;
   errorSummary: Record<string, number>;
@@ -225,7 +231,12 @@ export interface CardRounds {
 }
 
 /** A card = a named, configured instance of a submodule. Stored UUID-keyed in
- *  execution_plan.card_definitions; the map key is the card_id (stable, never changes on rename). */
+ *  execution_plan.card_definitions; the map key is the card_id (stable, never changes on rename).
+ *
+ *  v6 (unit 2.4): the per-round `rounds` MAP is dropped in favour of a SCALAR `round` + a single
+ *  FLAT `overrides` object — one card IS exactly one round (D10). `round === 1` ⇒ a first-pass
+ *  (placed) variant; `round > 1` ⇒ a retry/escalation variant (routing-only). Multiple cards
+ *  sharing (submodule, step) — one per round — is the normal, valid shape (D8). */
 export interface CardDefinition {
   /** Display name. Cosmetic only — identity is always the card_id (the map key). The runtime
    *  tolerates its absence (validator does not require it), but the UI should always set it. */
@@ -234,8 +245,16 @@ export interface CardDefinition {
   submodule_id: string;
   /** Which pipeline step the card executes at. Must equal its submodules_per_step placement. */
   step: number;
-  /** Sparse option overrides per round. */
-  rounds: CardRounds;
+  /** v6 CANONICAL — the scalar round this card is (integer 1..4). round===1 ⇒ placed first-pass;
+   *  round>1 ⇒ routing-only retry. Validator (executionPlanUtils.validateExecutionPlan) enforces it. */
+  round?: number;
+  /** v6 CANONICAL — this round's FLAT option overrides (no `rounds[N]` nesting). */
+  overrides?: CardRoundOverrides;
+  /** @deprecated v6 (unit 2.4): superseded by scalar `round` + flat `overrides`. NOT removed here —
+   *  the 2.5 engine (submoduleRuns.js / routingHandler.js / cardInstructions.js) still reads
+   *  `rounds` at runtime, and the 30-april prod fixture is still map-shaped until unit 2.7. Removed
+   *  together with the 2.5 engine reshape + 2.6 UI rewrite at the atomic 3.1 deploy. */
+  rounds?: CardRounds;
   /** Optional operator note. */
   description?: string;
 }

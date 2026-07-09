@@ -28,16 +28,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const U = {
   pse: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
-  writer: 'c9d0e1f2-a3b4-5678-cdef-901234567890',
+  writer: 'c9d0e1f2-a3b4-5678-cdef-901234567890',   // Round-1 content-writer, placed @5
+  writer2: 'd0e1f2a3-b4c5-6789-def0-123456789abc',  // Round-2 content-writer, routing-only escalation
   ghost: 'b2c3d4e5-f6a7-8901-bcde-f12345678901',
 };
 const REGISTERED = new Set(['google-pse-curated-search', 'content-writer', 'sitemap-parser', 'url-dedup']);
 const opts = { isRegisteredSubmodule: (id) => REGISTERED.has(id) };
 const errs = (plan) => validateExecutionPlan(plan, opts).errors;
 
-// A correctly-shaped card plan — the canonical runtime shape (card_definitions UUID-keyed,
-// rounds string-keyed sparse overrides, array-form routing_rules). This is exactly the
-// shape client/src/api/cardPlanEditor.ts builds and api.updateTemplate PUTs.
+// A correctly-shaped v6 card plan — canonical runtime shape (card_definitions UUID-keyed, SCALAR
+// `round` + flat `overrides`, array-form routing_rules). Exactly what cardPlanEditor.ts builds and
+// api.updateTemplate PUTs: a placed Round-1 card + a routing-only Round-2 escalation card.
 function correctedPlan() {
   return {
     submodules_per_step: {
@@ -46,12 +47,13 @@ function correctedPlan() {
       '5': [U.writer],
     },
     card_definitions: {
-      [U.pse]: { card_name: 'pse-directories', submodule_id: 'google-pse-curated-search', step: 1, rounds: { '1': { curated_list: 'directories' } } },
-      [U.writer]: { card_name: 'content-writer-v2', submodule_id: 'content-writer', step: 5, rounds: { '1': {}, '2': { temperature: 0.3, prompt: 'stricter citation rules' } } },
+      [U.pse]:     { card_name: 'pse-directories',  submodule_id: 'google-pse-curated-search', step: 1, round: 1, overrides: { curated_list: 'directories' } },
+      [U.writer]:  { card_name: 'content-writer',   submodule_id: 'content-writer',            step: 5, round: 1, overrides: {} },
+      [U.writer2]: { card_name: 'content-writer-v2', submodule_id: 'content-writer',           step: 5, round: 2, overrides: { temperature: 0.3, prompt: 'stricter citation rules' } },
     },
     routing_rules: {
-      'citation:fail': [{ step: 5, card_id: U.writer }],
-      'hallucination:fail': [{ step: 5, card_id: U.writer }],
+      'citation:fail': [{ step: 5, card_id: U.writer2 }],
+      'hallucination:fail': [{ step: 5, card_id: U.writer2 }],
     },
   };
 }

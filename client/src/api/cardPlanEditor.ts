@@ -19,7 +19,7 @@
 import type {
   TemplateExecutionPlan,
   CardDefinition,
-  CardRounds,
+  CardRoundOverrides,
   RoutingTarget,
 } from '../types/step';
 
@@ -32,7 +32,10 @@ export interface NewCardInput {
   card_name: string;
   submodule_id: string;
   step: number;
-  rounds: CardRounds;
+  /** v6 scalar: the round this card IS (1 = placed first-pass, >1 = routing-only retry). */
+  round: number;
+  /** v6 scalar: this round's flat option overrides (defaults to {}). */
+  overrides?: CardRoundOverrides;
   description?: string;
   /** Pre-minted id (deterministic tests / cloning a known card); defaults to mintCardId(). */
   cardId?: string;
@@ -80,8 +83,9 @@ export function addCard(
     card_name: input.card_name,
     submodule_id: input.submodule_id,
     step: input.step,
-    // deep-copy so a caller mutating its own `rounds` object after the call can't alias stored state
-    rounds: structuredClone(input.rounds),
+    round: input.round,
+    // deep-copy so a caller mutating its own `overrides` object after the call can't alias stored state
+    overrides: structuredClone(input.overrides ?? {}),
     ...(input.description !== undefined ? { description: input.description } : {}),
   };
   const next: TemplateExecutionPlan = {
@@ -156,10 +160,8 @@ export function setRoutingTargets(
       // §9 rule 10 — verbatim server message
       throw new Error(`routing_rules["${failKey}"]: card_id ${cid} not found in card_definitions`);
     }
-    const hasEscalation =
-      card.rounds && typeof card.rounds === 'object' &&
-      Object.keys(card.rounds).some((k) => Number(k) > 1);
-    if (!hasEscalation) {
+    // §9 rule 11 (v6 scalar) — a routing target must be a retry variant (round > 1).
+    if (!(Number.isInteger(card.round) && (card.round as number) > 1)) {
       // §9 rule 11 — verbatim server message
       throw new Error(`routing_rules["${failKey}"]: card ${cid} has no round > 1 (routing can never escalate)`);
     }
@@ -171,24 +173,24 @@ export function setRoutingTargets(
 }
 
 /**
- * Replace a card's per-round overrides (card identity unchanged). STRICT on edit: `rounds` must
- * include round "1" (§9 rule 5) — throws otherwise, so the UI can't persist a round-1-less card.
- * No-op if the card is absent.
+ * Replace a card's FLAT overrides (v6 scalar model — card identity + `round` unchanged). Semantics
+ * changed in unit 2.4: a card is exactly ONE round now, so there is no `rounds` map and no round-1
+ * presence check — this just sets the single `overrides` object. No-op if the card is absent.
  */
 export function setCardRounds(
   plan: TemplateExecutionPlan,
   cardId: string,
-  rounds: CardRounds,
+  overrides: CardRoundOverrides,
 ): TemplateExecutionPlan {
   const existing = plan.card_definitions?.[cardId];
   if (!existing) return plan; // unknown card → no-op
-  if (!rounds || typeof rounds !== 'object' || !Object.prototype.hasOwnProperty.call(rounds, '1')) {
-    throw new Error(`setCardRounds: rounds must include round "1" (card ${cardId})`);
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
+    throw new Error(`setCardRounds: overrides must be an object (card ${cardId})`);
   }
   return {
     ...plan,
-    // deep-copy rounds so the stored card can't alias the caller's object (see addCard)
-    card_definitions: { ...plan.card_definitions, [cardId]: { ...existing, rounds: structuredClone(rounds) } },
+    // deep-copy so the stored card can't alias the caller's object (see addCard)
+    card_definitions: { ...plan.card_definitions, [cardId]: { ...existing, overrides: structuredClone(overrides) } },
   };
 }
 
@@ -223,9 +225,9 @@ export function addRoutingTarget(
 
 /**
  * Create a retry-only variant AND route a QA failure to it, in ONE plan transform (one PUT at the
- * call site). The card is `round1: false` (retry-only — absent from submodules_per_step) with
- * `rounds: {1,2}` so it satisfies rule 11 (has a round > 1). Returns the plan + the new cardId
- * (so the caller can open its pane).
+ * call site). The card is `round1: false` (retry-only — absent from submodules_per_step) with the
+ * v6 scalar `round: 2` so it satisfies rule 11 (round > 1). This is option (e): a routing-only card
+ * that starts at round 2 with no round-1 sibling. Returns the plan + the new cardId (open its pane).
  */
 export function createAndRoute(
   plan: TemplateExecutionPlan,
@@ -235,7 +237,7 @@ export function createAndRoute(
 ): { plan: TemplateExecutionPlan; cardId: string } {
   const { plan: p1, cardId } = addCard(
     plan,
-    { card_name: input.card_name, submodule_id: input.submodule_id, step: input.step, rounds: { '1': {}, '2': {} } },
+    { card_name: input.card_name, submodule_id: input.submodule_id, step: input.step, round: 2, overrides: {} },
     { round1: false },
   );
   const p2 = setRoutingTargets(p1, failKey, [...existingTargets, { step: input.step, card_id: cardId }]);

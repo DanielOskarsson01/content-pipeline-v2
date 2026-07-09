@@ -79,6 +79,36 @@ const cardDefs = {
   assert(JSON.stringify(r.round_1_overrides) === '{}', 'missing rounds["1"] → empty overrides');
 })();
 
+// v6 scalar model: a placed card carries scalar `round` + flat `overrides` (no `rounds` map).
+// resolveStepEntry reads `overrides` as the round-1 overrides (placement === round-1 membership).
+console.log('\n--- resolveStepEntry — v6 scalar model ---');
+
+(function res_scalar_readsOverrides() {
+  const scalarDefs = { 'a1b2c3d4-e5f6-7890-abcd-ef1234567890': { submodule_id: 'google-pse', card_name: 'pse-v2', step: 1, round: 1, overrides: { source: 'curated' } } };
+  const r = resolveStepEntry('a1b2c3d4-e5f6-7890-abcd-ef1234567890', scalarDefs);
+  assert(r.submodule_id === 'google-pse', 'scalar card: submodule_id resolved');
+  assert(r.round_1_overrides.source === 'curated', 'scalar card: round_1_overrides from flat `overrides`');
+})();
+
+(function res_scalar_emptyOverrides() {
+  const scalarDefs = { 'a1b2c3d4-e5f6-7890-abcd-ef1234567890': { submodule_id: 'x', step: 1, round: 1, overrides: {} } };
+  const r = resolveStepEntry('a1b2c3d4-e5f6-7890-abcd-ef1234567890', scalarDefs);
+  assert(JSON.stringify(r.round_1_overrides) === '{}', 'scalar card: empty overrides → {} (kept, not dropped)');
+})();
+
+(function res_scalar_noOverrides() {
+  const scalarDefs = { 'a1b2c3d4-e5f6-7890-abcd-ef1234567890': { submodule_id: 'x', step: 1, round: 1 } };
+  const r = resolveStepEntry('a1b2c3d4-e5f6-7890-abcd-ef1234567890', scalarDefs);
+  assert(JSON.stringify(r.round_1_overrides) === '{}', 'scalar card without overrides → {} default');
+})();
+
+(function res_scalar_preferredOverLegacyRounds() {
+  // Transitional card carrying BOTH shapes: the scalar `overrides` wins (canonical).
+  const bothDefs = { 'a1b2c3d4-e5f6-7890-abcd-ef1234567890': { submodule_id: 'x', step: 1, round: 1, overrides: { via: 'scalar' }, rounds: { '1': { via: 'legacy' } } } };
+  const r = resolveStepEntry('a1b2c3d4-e5f6-7890-abcd-ef1234567890', bothDefs);
+  assert(r.round_1_overrides.via === 'scalar', 'scalar `overrides` takes precedence over legacy rounds["1"]');
+})();
+
 // ===========================================================================
 // resolveStepEntry — legacy (submodule_id string)
 // ===========================================================================
