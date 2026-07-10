@@ -3,14 +3,17 @@ import type { CategoryGroups, SubmoduleManifest, SubmoduleLatestRunMap, Submodul
 import { usePanelStore } from '../../stores/panelStore';
 import { useAppStore } from '../../stores/appStore';
 import { useTemplatePlan, useTemplateCardMutation } from '../../hooks/useTemplatePlan';
-import { cardsForSubmodule, cardIsRound1, cardRoutingInfo } from '../../api/cardPlanView';
-import { removeCard } from '../../api/cardPlanEditor';
+import {
+  ROUND_TABS, cardRound, cardsForSubmodule, cardsAt, cardIsRound1, cardRoutingInfo, cardIsDormant,
+  submoduleActiveInRound, activeInOtherRounds, placedEntriesForStep,
+} from '../../api/cardPlanView';
+import { addCard, removeCard, setLegacyPlacement, moveEntryInStep } from '../../api/cardPlanEditor';
 
 const DATA_OP_OPTIONS = ['add', 'remove', 'transform'] as const;
 const DATA_OP_ICONS: Record<string, string> = {
-  add: '\u2795',
-  remove: '\u2796',
-  transform: '\uFF1D',
+  add: '➕',
+  remove: '➖',
+  transform: '＝',
 };
 
 interface CategoryCardGridProps {
@@ -20,17 +23,45 @@ interface CategoryCardGridProps {
   onDataOperationChange?: (submoduleId: string, op: 'add' | 'remove' | 'transform') => void;
   /** Template whose cards render as variant rows inset under their submodule. Omit for single_run. */
   templateId?: string | null;
+  /** The pipeline step this grid renders — cards live at (submodule, step, round). */
+  stepIndex: number;
 }
 
-export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, onDataOperationChange, templateId }: CategoryCardGridProps) {
-  const { openSubmodulePanel, openVariantPane } = usePanelStore();
+export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, onDataOperationChange, templateId, stepIndex }: CategoryCardGridProps) {
+  const { openSubmodulePanel, openVariantPane, openCloneDialog } = usePanelStore();
   const showToast = useAppStore((s) => s.showToast);
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
+  const [activeRound, setActiveRound] = useState(1);
   const { data: template } = useTemplatePlan(templateId);
   const plan: TemplateExecutionPlan = template?.execution_plan ?? {};
   const cardMutation = useTemplateCardMutation(templateId);
-  const removeVariant = (cardId: string) =>
-    cardMutation.mutate(removeCard(plan, cardId), { onSuccess: () => showToast('Variant removed', 'success') });
+  const cardsEnabled = !!templateId; // card editing needs a template (single_run has none)
+
+  const savePlan = (next: TemplateExecutionPlan, msg: string, after?: () => void) =>
+    cardMutation.mutate(next, { onSuccess: () => { showToast(msg, 'success'); after?.(); } });
+
+  const removeVariant = (cardId: string) => savePlan(removeCard(plan, cardId), 'Variant removed');
+  const moveEntry = (entry: string, dir: -1 | 1) => savePlan(moveEntryInStep(plan, stepIndex, entry, dir), 'Reordered');
+
+  // Base-row toggle. The checkbox is DISABLED whenever a named card already occupies this
+  // (submodule, step, round) — that activation is owned by the variant row's Remove — so each branch
+  // below is reachable and unambiguous. Round 1 = a bare legacy placement (first pass, default
+  // config); Round ≥ 2 = a default routing-only card (dormant until routed — V6-§2.5 item 4/8).
+  const toggleBase = (sub: SubmoduleManifest, on: boolean) => {
+    if (activeRound === 1) {
+      savePlan(setLegacyPlacement(plan, stepIndex, sub.id, on), on ? 'Runs in Round 1' : 'Removed from Round 1');
+      return;
+    }
+    // Round ≥ 2: only ON is reachable (OFF is disabled once a card exists — removed via its row).
+    if (on) {
+      const { plan: next, cardId } = addCard(
+        plan,
+        { card_name: `${sub.id}-r${activeRound}`, submodule_id: sub.id, step: stepIndex, round: activeRound, overrides: {} },
+        { round1: false },
+      );
+      savePlan(next, `Active in Round ${activeRound} (dormant until routed)`, () => openVariantPane(cardId));
+    }
+  };
 
   // Sort categories in logical pipeline order (not alphabetical/load order)
   const CATEGORY_ORDER: Record<string, number> = {
@@ -50,92 +81,166 @@ export function CategoryCardGrid({ categories, latestRuns = {}, configMap = {}, 
     );
   }
 
+  // Empty-round info line (S3.3): the active round tab has NO active submodule in this step.
+  const allSubs = Object.values(categories).flat();
+  const roundIsEmpty = cardsEnabled && activeRound > 1 &&
+    !allSubs.some((s) => submoduleActiveInRound(plan, s.id, stepIndex, activeRound));
+
   return (
-    <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
-      {categoryEntries.map(([catKey, submodules]) => {
-        const isExpanded = expandedCategory === catKey;
-
-        return (
-          <div
-            key={catKey}
-            className={`rounded-lg border transition-all ${
-              isExpanded
-                ? 'border-dashed border-2 border-sky-400 bg-white'
-                : 'border-gray-200 bg-white hover:border-gray-300'
-            }`}
-          >
-            {/* Category Header */}
-            <div
-              className="p-3 cursor-pointer"
-              onClick={() => setExpandedCategory(isExpanded ? null : catKey)}
+    <div className="mb-4">
+      {/* Round tabs (S2.1 — fixed 1..4; label is "Round", never "Run" per S3.1) */}
+      {cardsEnabled && (
+        <div className="flex items-center gap-1 mb-3">
+          {ROUND_TABS.map((n) => (
+            <button
+              key={n}
+              onClick={() => setActiveRound(n)}
+              className={`px-3 py-1 text-xs rounded ${activeRound === n ? 'bg-sky-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
             >
-              <div className="flex items-center gap-2">
-                <p className="text-sm font-semibold text-gray-800 capitalize">{catKey}</p>
-              </div>
-              <p className="text-[10px] text-gray-500 mt-1">
-                {submodules.length} submodule{submodules.length !== 1 ? 's' : ''}
-              </p>
-            </div>
+              Round {n}
+            </button>
+          ))}
+          <span className="text-[10px] text-gray-400 ml-2">
+            {activeRound === 1 ? 'first pass (placed)' : 'retry / escalation (routing-only)'}
+          </span>
+        </div>
+      )}
 
-            {/* Inline Submodules (shown when expanded) */}
-            {isExpanded && (
-              <div className="border-t border-gray-200">
-                <p className="text-[10px] text-gray-500 font-medium uppercase px-3 pt-2">
-                  Submodules
-                </p>
-                <div className="p-2 space-y-1">
-                  {submodules.map((sub) => {
-                    const savedOp = configMap[sub.id]?.data_operation;
-                    const currentOp = savedOp || sub.data_operation_default;
-                    const variants = cardsForSubmodule(plan, sub.id);
+      {/* Empty-round info line (S3.3 — verbatim; flag-and-continue, V6-§3) */}
+      {roundIsEmpty && (
+        <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 px-4 py-3 mb-3">
+          <p className="text-xs text-gray-500">
+            No variants run on this pass — entities escalating here are flagged for review and continue.
+          </p>
+        </div>
+      )}
 
-                    return (
-                      <div key={sub.id}>
-                      <SubmoduleRow
-                        submodule={sub}
-                        categoryKey={catKey}
-                        onOpen={openSubmodulePanel}
-                        latestRun={latestRuns[sub.id]}
-                        currentDataOp={currentOp}
-                        docCount={
-                          configMap[sub.id]?.options
-                            ? Object.values(configMap[sub.id].options!).reduce<number>(
-                                (sum, v) => sum + (Array.isArray(v) ? v.length : 0), 0)
-                            : 0
-                        }
-                        onCycleDataOp={
-                          onDataOperationChange
-                            ? () => {
-                                const idx = DATA_OP_OPTIONS.indexOf(currentOp as typeof DATA_OP_OPTIONS[number]);
-                                const next = DATA_OP_OPTIONS[(idx + 1) % DATA_OP_OPTIONS.length];
-                                onDataOperationChange(sub.id, next);
-                              }
-                            : undefined
-                        }
-                      />
-                      {variants.map((v, i) => (
-                        <VariantRow
-                          key={v.cardId}
-                          card={v.card}
-                          version={i + 2}
-                          isRound1={cardIsRound1(plan, v.cardId)}
-                          routing={cardRoutingInfo(plan, v.cardId)}
-                          onOpen={() => openVariantPane(v.cardId)}
-                          onRemove={() => removeVariant(v.cardId)}
-                          removing={cardMutation.isPending}
-                        />
-                      ))}
-                      </div>
-                    );
-                  })}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        {categoryEntries.map(([catKey, submodules]) => {
+          const isExpanded = expandedCategory === catKey;
+
+          return (
+            <div
+              key={catKey}
+              className={`rounded-lg border transition-all ${
+                isExpanded
+                  ? 'border-dashed border-2 border-sky-400 bg-white'
+                  : 'border-gray-200 bg-white hover:border-gray-300'
+              }`}
+            >
+              {/* Category Header */}
+              <div
+                className="p-3 cursor-pointer"
+                onClick={() => setExpandedCategory(isExpanded ? null : catKey)}
+              >
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-semibold text-gray-800 capitalize">{catKey}</p>
                 </div>
+                <p className="text-[10px] text-gray-500 mt-1">
+                  {submodules.length} submodule{submodules.length !== 1 ? 's' : ''}
+                </p>
               </div>
-            )}
-          </div>
-        );
-      })}
+
+              {/* Inline Submodules (shown when expanded) */}
+              {isExpanded && (
+                <div className="border-t border-gray-200">
+                  <p className="text-[10px] text-gray-500 font-medium uppercase px-3 pt-2">
+                    Submodules
+                  </p>
+                  <div className="p-2 space-y-1">
+                    {submodules.map((sub) => {
+                      const savedOp = configMap[sub.id]?.data_operation;
+                      const currentOp = savedOp || sub.data_operation_default;
+                      // Variant rows (named cards) for this submodule at THIS step. Round-1 cards render
+                      // in submodules_per_step array order (INV-ORDER); the rest by round then name.
+                      const variants = cardsEnabled ? orderedVariants(plan, sub.id, stepIndex) : [];
+                      const activeHere = cardsEnabled && submoduleActiveInRound(plan, sub.id, stepIndex, activeRound);
+                      const hasCardHere = cardsEnabled && cardsAt(plan, sub.id, stepIndex, activeRound).length > 0;
+                      const otherRounds = cardsEnabled && !activeHere
+                        ? activeInOtherRounds(plan, sub.id, stepIndex, activeRound)
+                        : [];
+
+                      return (
+                        <div key={sub.id}>
+                        <SubmoduleRow
+                          submodule={sub}
+                          categoryKey={catKey}
+                          onOpen={openSubmodulePanel}
+                          latestRun={latestRuns[sub.id]}
+                          currentDataOp={currentOp}
+                          docCount={
+                            configMap[sub.id]?.options
+                              ? Object.values(configMap[sub.id].options!).reduce<number>(
+                                  (sum, v) => sum + (Array.isArray(v) ? v.length : 0), 0)
+                              : 0
+                          }
+                          onCycleDataOp={
+                            onDataOperationChange
+                              ? () => {
+                                  const idx = DATA_OP_OPTIONS.indexOf(currentOp as typeof DATA_OP_OPTIONS[number]);
+                                  const next = DATA_OP_OPTIONS[(idx + 1) % DATA_OP_OPTIONS.length];
+                                  onDataOperationChange(sub.id, next);
+                                }
+                              : undefined
+                          }
+                          cardsEnabled={cardsEnabled}
+                          activeRound={activeRound}
+                          activeInRound={activeHere}
+                          toggleDisabled={hasCardHere}
+                          activeInOtherRounds={otherRounds}
+                          onToggle={(on) => toggleBase(sub, on)}
+                          onClone={() => openCloneDialog(sub.id, stepIndex, activeRound)}
+                          pending={cardMutation.isPending}
+                        />
+                        {variants.map((v) => (
+                          <VariantRow
+                            key={v.cardId}
+                            plan={plan}
+                            cardId={v.cardId}
+                            card={v.card}
+                            activeRound={activeRound}
+                            isRound1={cardIsRound1(plan, v.cardId)}
+                            routing={cardRoutingInfo(plan, v.cardId)}
+                            dormant={cardIsDormant(plan, v.cardId)}
+                            onOpen={() => openVariantPane(v.cardId)}
+                            onRemove={() => removeVariant(v.cardId)}
+                            onMove={(dir) => moveEntry(v.cardId, dir)}
+                            removing={cardMutation.isPending}
+                          />
+                        ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
+}
+
+/** Variant cards for a submodule at a step, ordered for display: Round-1 placed cards in
+ *  submodules_per_step array order (INV-ORDER, V6-§4 — the two-clones case), then the rest by round
+ *  then card_name. */
+function orderedVariants(
+  plan: TemplateExecutionPlan,
+  submoduleId: string,
+  step: number,
+): Array<{ cardId: string; card: CardDefinition }> {
+  const cards = cardsForSubmodule(plan, submoduleId).filter(({ card }) => card.step === step);
+  const order = placedEntriesForStep(plan, step);
+  return [...cards].sort((a, b) => {
+    const ra = cardRound(a.card), rb = cardRound(b.card);
+    const pa = order.indexOf(a.cardId), pb = order.indexOf(b.cardId);
+    if (pa >= 0 && pb >= 0) return pa - pb;       // both placed → authored array order (INV-ORDER)
+    if (pa >= 0) return -1;                        // placed before unplaced
+    if (pb >= 0) return 1;
+    if (ra !== rb) return ra - rb;                // then by round
+    return (a.card.card_name || '').localeCompare(b.card.card_name || '');
+  });
 }
 
 function SubmoduleRow({
@@ -146,6 +251,14 @@ function SubmoduleRow({
   currentDataOp,
   docCount = 0,
   onCycleDataOp,
+  cardsEnabled,
+  activeRound,
+  activeInRound,
+  toggleDisabled,
+  activeInOtherRounds,
+  onToggle,
+  onClone,
+  pending,
 }: {
   submodule: SubmoduleManifest;
   categoryKey: string;
@@ -154,23 +267,43 @@ function SubmoduleRow({
   currentDataOp: string;
   docCount?: number;
   onCycleDataOp?: () => void;
+  cardsEnabled: boolean;
+  activeRound: number;
+  activeInRound: boolean;
+  toggleDisabled: boolean;
+  activeInOtherRounds: number[];
+  onToggle: (on: boolean) => void;
+  onClone: () => void;
+  pending: boolean;
 }) {
-  const opIcon = DATA_OP_ICONS[currentDataOp] || '\uFF1D';
+  const opIcon = DATA_OP_ICONS[currentDataOp] || '＝';
   const isActive = submodule.active !== false;
+  const greyed = cardsEnabled && !activeInRound;
 
   return (
     <div
       className={`flex items-center justify-between p-2 rounded ${
         isActive
-          ? 'hover:bg-gray-50 cursor-pointer group'
+          ? `hover:bg-gray-50 cursor-pointer group ${greyed ? 'opacity-60' : ''}`
           : 'opacity-40 cursor-default'
       }`}
       onClick={isActive ? () => onOpen(submodule.id, categoryKey) : undefined}
     >
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 min-w-0">
+        {cardsEnabled && isActive && (
+          <input
+            type="checkbox"
+            checked={activeInRound}
+            disabled={pending || toggleDisabled}
+            title={toggleDisabled ? 'Active via the variant below — remove it there' : activeInRound ? `Active in Round ${activeRound}` : `Activate in Round ${activeRound}`}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => onToggle(e.target.checked)}
+            className="accent-sky-600 flex-shrink-0"
+          />
+        )}
         <button
           type="button"
-          className="text-sm w-5 text-center hover:scale-125 transition-transform"
+          className="text-sm w-5 text-center hover:scale-125 transition-transform flex-shrink-0"
           title={`Data operation: ${currentDataOp} (click to change)`}
           onClick={(e) => {
             e.stopPropagation();
@@ -180,12 +313,28 @@ function SubmoduleRow({
         >
           {opIcon}
         </button>
-        <div>
-          <p className="text-sm text-gray-700">{submodule.name}</p>
-          <p className="text-[10px] text-gray-400">{submodule.description}</p>
+        <div className="min-w-0">
+          <p className="text-sm text-gray-700 truncate">{submodule.name}</p>
+          <p className="text-[10px] text-gray-400 truncate">{submodule.description}</p>
         </div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-shrink-0">
+        {/* Cross-round pill (S3.2b): greyed here, but active in another round of this step. */}
+        {activeInOtherRounds.map((n) => (
+          <span key={n} className="text-[10px] bg-sky-50 text-sky-600 px-1.5 py-0.5 rounded" title="This submodule has a card in another round of this step">
+            Active in Round {n}
+          </span>
+        ))}
+        {cardsEnabled && isActive && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onClone(); }}
+            disabled={pending}
+            className="text-[10px] text-gray-400 hover:text-sky-600 disabled:opacity-40"
+            title="Clone as a named variant"
+          >
+            Clone
+          </button>
+        )}
         {isActive ? (
           <>
             {docCount > 0 && (
@@ -215,33 +364,61 @@ function SubmoduleRow({
 }
 
 // Variant (card) row — inset under its parent submodule. Exported so the Step-7 routed-variants
-// list reuses the SAME row (same card, opens the same pane).
-export function VariantRow({ card, version, isRound1, routing, onOpen, onRemove, removing }: {
+// list reuses the SAME row (same card, opens the same pane). Carries the REQUIRED [Round N] chip
+// (S2.2/S3.2a — visible from every tab), the <- signal:fail back-reference, reorder arrows for the
+// two-Round-1-clones case (S2.1), and the D9 [unreachable] amber (S3.4).
+export function VariantRow({ plan, cardId, card, activeRound, isRound1, routing, dormant, onOpen, onRemove, onMove, removing }: {
+  plan: TemplateExecutionPlan;
+  cardId: string;
   card: CardDefinition;
-  version: number;
+  /** The round tab currently selected — this variant renders active only when it matches. Optional
+   *  (the Step-7 routed-variants list passes none → always shown at full strength). */
+  activeRound?: number;
   isRound1: boolean;
   routing: { routed: boolean; failKeys: string[] };
+  dormant: boolean;
   onOpen: () => void;
   onRemove: () => void;
+  /** Reorder within submodules_per_step (INV-ORDER). Omit where reordering doesn't apply. */
+  onMove?: (dir: -1 | 1) => void;
   removing: boolean;
 }) {
+  const round = cardRound(card);
+  const greyed = activeRound !== undefined && round !== activeRound;
+  const canReorder = !!onMove && isRound1; // only placed (Round-1) entries have an array position
+
   return (
     <div
-      className="flex items-center justify-between pl-11 pr-2 py-1.5 rounded bg-[#fcfcfd] hover:bg-gray-50 cursor-pointer group"
+      className={`flex items-center justify-between pl-11 pr-2 py-1.5 rounded bg-[#fcfcfd] hover:bg-gray-50 cursor-pointer group ${greyed ? 'opacity-50' : ''}`}
       onClick={onOpen}
     >
       <div className="flex items-center gap-2 min-w-0">
-        <span className="text-[10px] font-mono bg-gray-100 text-gray-500 px-1 rounded">v{version}</span>
+        {canReorder && (
+          <span className="flex flex-col leading-none" onClick={(e) => e.stopPropagation()}>
+            <button onClick={() => onMove!(-1)} disabled={removing} className="text-[8px] text-gray-300 hover:text-sky-600 disabled:opacity-30" title="Move earlier">▲</button>
+            <button onClick={() => onMove!(1)} disabled={removing} className="text-[8px] text-gray-300 hover:text-sky-600 disabled:opacity-30" title="Move later">▼</button>
+          </span>
+        )}
         <span className="text-xs text-gray-700 truncate">{card.card_name}</span>
+        {/* REQUIRED [Round N] chip — visible from every tab (S3.2a) */}
         <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${isRound1 ? 'bg-sky-50 text-sky-600' : 'bg-gray-100 text-gray-500'}`}>
-          {isRound1 ? 'Round 1' : 'Retry-only'}
+          Round {round}
         </span>
+        {/* Retry-only is optional/redundant (round ≥ 2 implies it) — kept for the mock's parity (S2.2). */}
+        {round > 1 && (
+          <span className="text-[10px] text-gray-400 flex-shrink-0">Retry-only</span>
+        )}
       </div>
       <div className="flex items-center gap-2 flex-shrink-0">
-        {routing.routed ? (
+        {/* <- signal:fail back-reference to the Step-7 routing rule (S2.2) */}
+        {routing.routed && (
           <span className="text-[10px] text-sky-600" title={`routed by ${routing.failKeys.join(', ')}`}>← {routing.failKeys.join(', ')}</span>
-        ) : (
-          <span className="text-[10px] text-amber-600" title="Not routed — wire a QA failure in Step 7">dormant</span>
+        )}
+        {/* D9 [unreachable] amber — scoped to a round ≥ 2 authored escalation card no rule targets (S3.4) */}
+        {dormant && (
+          <span className="text-[10px] bg-amber-100 text-amber-700 border border-amber-300 px-1.5 py-0.5 rounded" title="No routing rule reaches this escalation card — wire a QA failure in Step 7">
+            unreachable
+          </span>
         )}
         <button
           onClick={(e) => { e.stopPropagation(); onRemove(); }}
@@ -297,7 +474,7 @@ function SubmoduleStatusBadge({ latestRun }: { latestRun?: { status: string; res
         </span>
       );
     case 'failed': {
-      const errMsg = latestRun.error ? (latestRun.error.length > 30 ? latestRun.error.slice(0, 30) + '\u2026' : latestRun.error) : 'failed';
+      const errMsg = latestRun.error ? (latestRun.error.length > 30 ? latestRun.error.slice(0, 30) + '…' : latestRun.error) : 'failed';
       return (
         <span className="flex items-center gap-1 text-[10px] font-medium text-red-500" title={latestRun.error || 'Execution failed'}>
           <svg className="w-3 h-3 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">

@@ -25,6 +25,13 @@ interface PanelStore {
   variantPaneOpen: boolean;
   variantCardId: string | null;
 
+  // Clone dialog (S2.3) — name/describe/round-select before creating a card. Carries the submodule +
+  // step it clones and the round tab it was opened from (the preselected round).
+  cloneDialogOpen: boolean;
+  cloneSubmoduleId: string | null;
+  cloneStep: number | null;
+  cloneRound: number;
+
   // Actions
   openSubmodulePanel: (submoduleId: string, categoryKey: string) => void;
   closeSubmodulePanel: () => void;
@@ -32,6 +39,8 @@ interface PanelStore {
   setActiveSubmoduleRunId: (runId: string | null) => void;
   openVariantPane: (cardId: string) => void;
   closeVariantPane: () => void;
+  openCloneDialog: (submoduleId: string, step: number, round: number) => void;
+  closeCloneDialog: () => void;
   resetPanel: () => void;
 }
 
@@ -43,6 +52,10 @@ export const usePanelStore = create<PanelStore>((set) => ({
   panelAccordion: 'input',
   variantPaneOpen: false,
   variantCardId: null,
+  cloneDialogOpen: false,
+  cloneSubmoduleId: null,
+  cloneStep: null,
+  cloneRound: 1,
 
   openSubmodulePanel: (submoduleId, categoryKey) =>
     set({
@@ -66,10 +79,16 @@ export const usePanelStore = create<PanelStore>((set) => ({
     set({ activeSubmoduleRunId: runId }),
 
   openVariantPane: (cardId) =>
-    set({ variantPaneOpen: true, variantCardId: cardId, submodulePanelOpen: false }),
+    set({ variantPaneOpen: true, variantCardId: cardId, submodulePanelOpen: false, cloneDialogOpen: false }),
 
   closeVariantPane: () =>
     set({ variantPaneOpen: false }),
+
+  openCloneDialog: (submoduleId, step, round) =>
+    set({ cloneDialogOpen: true, cloneSubmoduleId: submoduleId, cloneStep: step, cloneRound: round }),
+
+  closeCloneDialog: () =>
+    set({ cloneDialogOpen: false }),
 
   resetPanel: () =>
     set({
@@ -80,5 +99,8 @@ export const usePanelStore = create<PanelStore>((set) => ({
       panelAccordion: 'input',
       variantPaneOpen: false,
       variantCardId: null,
+      cloneDialogOpen: false,
+      cloneSubmoduleId: null,
+      cloneStep: null,
     }),
 }));

@@ -1,18 +1,23 @@
+// cardPlanView — pure scalar-round derivations (v6, unit 2.6). The round-map helpers
+// (roundKeys/nextRoundKey/cardActiveInRun/runEntries) were deleted; every derivation now reads the
+// scalar `card.round`. Run: `npm test` (client) or `npx vitest run`.
 import { describe, it, expect } from 'vitest';
-import { cardsForSubmodule, cardIsRound1, cardRoutingInfo, roundKeys, nextRoundKey, cardActiveInRun, runEntries, availableRuns, routableCardsForSubmodule } from './cardPlanView.ts';
+import {
+  cardsForSubmodule, cardIsRound1, cardRoutingInfo, cardRound, cardsAt, submoduleActiveInRound,
+  activeInOtherRounds, cardIsDormant, routableCardsForSubmodule, deadRungRounds, placedEntriesForStep,
+} from './cardPlanView.ts';
 import { addCard, setRoutingTargets, setCardPlacement } from './cardPlanEditor.ts';
 
-const writer = { card_name: 'content-writer-v2', submodule_id: 'content-writer', step: 5, rounds: { '1': {}, '2': { temperature: 0.3 } } };
-const pse = { card_name: 'pse-directories', submodule_id: 'google-pse-curated-search', step: 1, rounds: { '1': {} } };
+// v6 scalar inputs: a placed round-1 pse; a routing-only round-2 writer; a routing-only round-2 seo.
+const pse = { card_name: 'pse-directories', submodule_id: 'google-pse-curated-search', step: 1, round: 1, overrides: {} };
+const writer2 = { card_name: 'content-writer-v2', submodule_id: 'content-writer', step: 5, round: 2, overrides: { temperature: 0.3 } };
 
 describe('cardsForSubmodule', () => {
   it('returns only the cards whose submodule_id matches, with their ids', () => {
-    let plan = {};
-    const w = addCard(plan, writer, { round1: false }); plan = w.plan;
+    let plan: any = {};
+    const w = addCard(plan, writer2, { round1: false }); plan = w.plan;
     const p = addCard(plan, pse, { round1: true }); plan = p.plan;
-    const forWriter = cardsForSubmodule(plan, 'content-writer');
-    expect(forWriter.map((c) => c.cardId)).toEqual([w.cardId]);
-    expect(forWriter[0].card.card_name).toBe('content-writer-v2');
+    expect(cardsForSubmodule(plan, 'content-writer').map((c) => c.cardId)).toEqual([w.cardId]);
     expect(cardsForSubmodule(plan, 'google-pse-curated-search').map((c) => c.cardId)).toEqual([p.cardId]);
     expect(cardsForSubmodule(plan, 'sitemap-parser')).toEqual([]);
   });
@@ -21,19 +26,22 @@ describe('cardsForSubmodule', () => {
   });
 });
 
+describe('cardRound (scalar authority, D10)', () => {
+  it('reads the scalar round; absent ⇒ 1 (placed first-pass default)', () => {
+    expect(cardRound({ card_name: 'x', submodule_id: 's', step: 1, round: 3 })).toBe(3);
+    expect(cardRound({ card_name: 'x', submodule_id: 's', step: 1 } as any)).toBe(1);
+    expect(cardRound(undefined)).toBe(1);
+  });
+});
+
 describe('cardIsRound1', () => {
-  it('true when the card_id is placed in submodules_per_step[card.step]; false for retry-only', () => {
-    const w = addCard({}, writer, { round1: false });   // retry-only
-    const p = addCard(w.plan, pse, { round1: true });    // round-1 placed
+  it('true when placed in submodules_per_step[card.step]; false for retry-only; follows the toggle', () => {
+    const w = addCard({}, writer2, { round1: false });   // retry-only
+    const p = addCard(w.plan, pse, { round1: true });     // round-1 placed
     expect(cardIsRound1(p.plan, w.cardId)).toBe(false);
     expect(cardIsRound1(p.plan, p.cardId)).toBe(true);
-  });
-  it('follows a setCardPlacement toggle', () => {
-    const w = addCard({}, writer, { round1: false });
     const placed = setCardPlacement(w.plan, w.cardId, { round1: true });
     expect(cardIsRound1(placed, w.cardId)).toBe(true);
-    const unplaced = setCardPlacement(placed, w.cardId, { round1: false });
-    expect(cardIsRound1(unplaced, w.cardId)).toBe(false);
   });
   it('false for an unknown card', () => {
     expect(cardIsRound1({ card_definitions: {} }, 'nope')).toBe(false);
@@ -42,7 +50,7 @@ describe('cardIsRound1', () => {
 
 describe('cardRoutingInfo', () => {
   it('reports the fail keys that route to a card', () => {
-    const w = addCard({}, writer, { round1: false });
+    const w = addCard({}, writer2, { round1: false });
     let plan = setRoutingTargets(w.plan, 'citation:fail', [{ step: 5, card_id: w.cardId }]);
     plan = setRoutingTargets(plan, 'hallucination:fail', [{ step: 5, card_id: w.cardId }]);
     const info = cardRoutingInfo(plan, w.cardId);
@@ -50,76 +58,95 @@ describe('cardRoutingInfo', () => {
     expect(info.failKeys.sort()).toEqual(['citation:fail', 'hallucination:fail']);
   });
   it('routed=false with no fail keys when unrouted', () => {
-    const w = addCard({}, writer, { round1: false });
+    const w = addCard({}, writer2, { round1: false });
     expect(cardRoutingInfo(w.plan, w.cardId)).toEqual({ routed: false, failKeys: [] });
   });
 });
 
-describe('roundKeys / nextRoundKey', () => {
-  it('roundKeys returns sorted 1-4 round keys present', () => {
-    expect(roundKeys({ rounds: { '1': {}, '3': {}, '2': {} } })).toEqual(['1', '2', '3']);
-  });
-  it('nextRoundKey is the next contiguous round, or null at max 4', () => {
-    expect(nextRoundKey({ rounds: { '1': {} } })).toBe('2');
-    expect(nextRoundKey({ rounds: { '1': {}, '2': {} } })).toBe('3');
-    expect(nextRoundKey({ rounds: { '1': {}, '2': {}, '3': {}, '4': {} } })).toBe(null);
+describe('cardsAt — cards at exactly (submodule, step, round)', () => {
+  it('separates a round-1 clone-pair from a round-2 card at the same (submodule, step)', () => {
+    let plan: any = { submodules_per_step: {} };
+    const a = addCard(plan, { card_name: 'writer-a', submodule_id: 'content-writer', step: 5, round: 1, overrides: {} }, { round1: true }); plan = a.plan;
+    const b = addCard(plan, { card_name: 'writer-b', submodule_id: 'content-writer', step: 5, round: 1, overrides: {} }, { round1: true }); plan = b.plan;
+    const r2 = addCard(plan, writer2, { round1: false }); plan = r2.plan;
+    expect(cardsAt(plan, 'content-writer', 5, 1).map((c) => c.cardId).sort()).toEqual([a.cardId, b.cardId].sort());
+    expect(cardsAt(plan, 'content-writer', 5, 2).map((c) => c.cardId)).toEqual([r2.cardId]);
+    expect(cardsAt(plan, 'content-writer', 5, 3)).toEqual([]);
+    expect(cardsAt(plan, 'content-writer', 1, 1)).toEqual([]); // wrong step
   });
 });
 
-describe('run-tab derivation', () => {
-  // Fixture: a legacy string (step1) + a Round-1 card (step1) + a routed retry-only card (step5, rounds{1,2})
-  // + an UNROUTED retry-only card (step5, rounds{1,2}).
-  function mk() {
-    let plan: any = { submodules_per_step: { '1': ['sitemap-parser'] } };
-    const pse = addCard(plan, { card_name: 'pse-dir', submodule_id: 'google-pse-curated-search', step: 1, rounds: { '1': {} } }, { round1: true }); plan = pse.plan;
-    const writer = addCard(plan, { card_name: 'writer-v2', submodule_id: 'content-writer', step: 5, rounds: { '1': {}, '2': {} } }, { round1: false }); plan = writer.plan;
-    const unrouted = addCard(plan, { card_name: 'seo-v2', submodule_id: 'seo-planner', step: 5, rounds: { '1': {}, '2': {} } }, { round1: false }); plan = unrouted.plan;
-    plan = setRoutingTargets(plan, 'citation:fail', [{ step: 5, card_id: writer.cardId }]);
-    return { plan, pse: pse.cardId, writer: writer.cardId, unrouted: unrouted.cardId };
-  }
-
-  it('cardActiveInRun: Run 1 = placement; Run N>1 = routed AND declares round N', () => {
-    const { plan, pse, writer, unrouted } = mk();
-    expect(cardActiveInRun(plan, pse, 1)).toBe(true);        // placed in Round 1
-    expect(cardActiveInRun(plan, writer, 1)).toBe(false);    // retry-only → not Run 1
-    expect(cardActiveInRun(plan, writer, 2)).toBe(true);     // routed + declares round 2
-    expect(cardActiveInRun(plan, writer, 3)).toBe(false);    // no round 3
-    expect(cardActiveInRun(plan, unrouted, 2)).toBe(false);  // declares round 2 but NOT routed
-    expect(cardActiveInRun(plan, 'nope', 2)).toBe(false);    // unknown card
+describe('submoduleActiveInRound — active-vs-greyed (S2.1)', () => {
+  it('a round-2 routing-only card is active in round 2, greyed in round 1', () => {
+    const w = addCard({}, writer2, { round1: false });
+    expect(submoduleActiveInRound(w.plan, 'content-writer', 5, 2)).toBe(true);
+    expect(submoduleActiveInRound(w.plan, 'content-writer', 5, 1)).toBe(false);
   });
-
-  it('runEntries Run 1: card + legacy string, both tagged, in order', () => {
-    const { plan, pse } = mk();
-    const e1 = runEntries(plan, 1);
-    expect(e1).toContainEqual({ kind: 'legacy', submoduleId: 'sitemap-parser' });
-    expect(e1.some((x) => x.kind === 'card' && x.cardId === pse)).toBe(true);
-    expect(e1.every((x) => x.kind === 'legacy' || (x.kind === 'card' && x.cardId === pse))).toBe(true); // no retry-only cards
+  it('a legacy STRING placement makes a base submodule Round-1 active (no card)', () => {
+    const plan = { submodules_per_step: { '3': ['page-scraper'] } };
+    expect(submoduleActiveInRound(plan, 'page-scraper', 3, 1)).toBe(true);
+    expect(submoduleActiveInRound(plan, 'page-scraper', 3, 2)).toBe(false); // strings never imply round 2
   });
+});
 
-  it('runEntries Run 2: only the routed round-2 card (cards only, no legacy, unrouted excluded)', () => {
-    const { plan, writer, unrouted } = mk();
-    const e2 = runEntries(plan, 2);
-    expect(e2.map((x) => (x.kind === 'card' ? x.cardId : x.submoduleId))).toEqual([writer]);
-    expect(e2.some((x) => x.kind === 'card' && x.cardId === unrouted)).toBe(false);
+describe('activeInOtherRounds — the cross-round pill (S3.2b)', () => {
+  it('a round-2-only BASE submodule shows "Active in Round 2" from the Round-1 tab', () => {
+    const w = addCard({}, writer2, { round1: false }); // content-writer active only in round 2 @ step 5
+    // viewing round 1: greyed here, but a card exists in round 2 → pill [2]
+    expect(activeInOtherRounds(w.plan, 'content-writer', 5, 1)).toEqual([2]);
+    // viewing round 2: it IS the current round → no cross-round pill for round 2
+    expect(activeInOtherRounds(w.plan, 'content-writer', 5, 2)).toEqual([]);
+    // a submodule with no card anywhere → no pills
+    expect(activeInOtherRounds(w.plan, 'seo-planner', 5, 1)).toEqual([]);
   });
+});
 
-  it('a card BOTH placed AND routed with round 2 appears in Run 1 AND Run 2', () => {
-    const { plan, writer } = mk();
-    const placed = setCardPlacement(plan, writer, { round1: true });
-    expect(cardActiveInRun(placed, writer, 1)).toBe(true);
-    expect(cardActiveInRun(placed, writer, 2)).toBe(true);
+describe('cardIsDormant — D9 amber, scoped (S3.4)', () => {
+  it('a round≥2 card no rule reaches is dormant; routing it clears it', () => {
+    const w = addCard({}, writer2, { round1: false });
+    expect(cardIsDormant(w.plan, w.cardId)).toBe(true);              // authored escalation, unrouted
+    const routed = setRoutingTargets(w.plan, 'citation:fail', [{ step: 5, card_id: w.cardId }]);
+    expect(cardIsDormant(routed, w.cardId)).toBe(false);            // rule now reaches it
   });
-
-  it('availableRuns: [1] always; adds N only when ≥1 card active; never a zero-card run', () => {
-    expect(availableRuns(undefined)).toEqual([1]);
-    expect(availableRuns({ submodules_per_step: { '1': ['sitemap-parser'] } })).toEqual([1]); // no cards
-    expect(availableRuns(mk().plan)).toEqual([1, 2]); // writer active on run 2, nothing on 3/4
+  it('NEVER dormant for a round-1 (placed) card — amber is escalation-only', () => {
+    const p = addCard({}, pse, { round1: true });                  // round 1, placed, unrouted
+    expect(cardIsDormant(p.plan, p.cardId)).toBe(false);
   });
+});
 
-  it('routableCardsForSubmodule: only cards with a round > 1 (rule 11 gate)', () => {
-    const { plan, writer } = mk();
-    // content-writer has the round-2 writer card → routable; google-pse-curated-search's pse card is round-1-only → not
-    expect(routableCardsForSubmodule(plan, 'content-writer').map((c) => c.cardId)).toEqual([writer]);
+describe('routableCardsForSubmodule — rule-11 gate (scalar round > 1)', () => {
+  it('only cards with round > 1', () => {
+    let plan: any = { submodules_per_step: {} };
+    const p = addCard(plan, pse, { round1: true }); plan = p.plan;          // round 1
+    const w = addCard(plan, writer2, { round1: false }); plan = w.plan;     // round 2
+    expect(routableCardsForSubmodule(plan, 'content-writer').map((c) => c.cardId)).toEqual([w.cardId]);
     expect(routableCardsForSubmodule(plan, 'google-pse-curated-search')).toEqual([]);
+  });
+});
+
+describe('deadRungRounds — dead-rung nudge (S3.6)', () => {
+  it('a round-3 target with no round-2 rung is a dead rung; adding round 2 clears it', () => {
+    let plan: any = { submodules_per_step: {} };
+    const r3 = addCard(plan, { card_name: 'w3', submodule_id: 'content-writer', step: 5, round: 3, overrides: {} }, { round1: false }); plan = r3.plan;
+    plan = setRoutingTargets(plan, 'citation:fail', [{ step: 5, card_id: r3.cardId }]);
+    expect(deadRungRounds(plan, 'citation:fail')).toEqual([3]);           // round 3 targeted, no round-2 rung
+    const r2 = addCard(plan, writer2, { round1: false }); plan = r2.plan; // round 2
+    plan = setRoutingTargets(plan, 'citation:fail', [{ step: 5, card_id: r3.cardId }, { step: 5, card_id: r2.cardId }]);
+    expect(deadRungRounds(plan, 'citation:fail')).toEqual([]);            // rung filled
+  });
+  it('round 2 alone is never a dead rung (round 1 is the placed pass below it)', () => {
+    const w = addCard({}, writer2, { round1: false });
+    const plan = setRoutingTargets(w.plan, 'citation:fail', [{ step: 5, card_id: w.cardId }]);
+    expect(deadRungRounds(plan, 'citation:fail')).toEqual([]);
+  });
+});
+
+describe('placedEntriesForStep — INV-ORDER array read', () => {
+  it('returns submodules_per_step[step] in authored array order (cards + legacy strings)', () => {
+    let plan: any = { submodules_per_step: { '5': ['sitemap-parser'] } };
+    const a = addCard(plan, { card_name: 'writer-a', submodule_id: 'content-writer', step: 5, round: 1, overrides: {} }, { round1: true }); plan = a.plan;
+    const b = addCard(plan, { card_name: 'writer-b', submodule_id: 'content-writer', step: 5, round: 1, overrides: {} }, { round1: true }); plan = b.plan;
+    expect(placedEntriesForStep(plan, 5)).toEqual(['sitemap-parser', a.cardId, b.cardId]);
+    expect(placedEntriesForStep(plan, 9)).toEqual([]);
   });
 });

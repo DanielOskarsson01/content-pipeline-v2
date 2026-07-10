@@ -14,8 +14,6 @@ import { SubmoduleOptions } from '../primitives/SubmoduleOptions';
 import { UrlTextarea, parseTextareaToEntities } from '../primitives/UrlTextarea';
 import { sanitizeFilename } from '../../utils/sanitize';
 import { PanelAccordionItem } from './PanelAccordionItem';
-import { useTemplatePlan, useTemplateCardMutation } from '../../hooks/useTemplatePlan';
-import { addCard } from '../../api/cardPlanEditor';
 
 const DATA_OP_OPTIONS = ['add', 'remove', 'transform'] as const;
 const DATA_OP_ICONS: Record<string, string> = { add: '\u2795', remove: '\u2796', transform: '\uFF1D' };
@@ -64,26 +62,12 @@ export function SubmodulePanel({
     closeSubmodulePanel,
     setPanelAccordion,
     setActiveSubmoduleRunId,
-    openVariantPane,
+    openCloneDialog,
   } = usePanelStore();
 
-  // Clone-as-variant (template-scoped; separate from run-scoped config) ─ one updateTemplate PUT.
-  const { data: cloneTemplate } = useTemplatePlan(templateId);
-  const cloneMutation = useTemplateCardMutation(templateId);
-  const [cloneName, setCloneName] = useState('');
+  // Clone-as-variant opens the shared S2.3 clone dialog (name / describe / single-round select →
+  // full options editor). The dialog owns the plan mutation; the panel just launches it.
   const canClone = !!templateId && projectMode !== 'single_run';
-  const handleCloneAsVariant = () => {
-    if (!submodule || !templateId) return;
-    const basePlan: TemplateExecutionPlan = cloneTemplate?.execution_plan ?? {};
-    const { plan: next, cardId } = addCard(
-      basePlan,
-      { card_name: cloneName.trim(), submodule_id: submodule.id, step: stepIndex, rounds: { '1': {}, '2': {} } },
-      { round1: false },
-    );
-    cloneMutation.mutate(next, {
-      onSuccess: () => { setCloneName(''); showToast('Variant created', 'success'); openVariantPane(cardId); },
-    });
-  };
 
   // Step context (shared CSV data for this step)
   const { data: stepContext } = useStepContext(runId, stepIndex);
@@ -599,27 +583,15 @@ export function SubmodulePanel({
           </button>
         </div>
 
-        {/* Clone as variant (template-scoped) */}
+        {/* Clone as variant (template-scoped) — opens the S2.3 clone dialog */}
         <div className="px-4 py-2 bg-white border-b flex-shrink-0">
           {canClone ? (
-            <>
-              <div className="flex items-center gap-2">
-                <input
-                  value={cloneName}
-                  onChange={(e) => setCloneName(e.target.value)}
-                  placeholder={`${submodule?.id || 'submodule'}-v2`}
-                  className="flex-1 min-w-0 bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
-                />
-                <button
-                  onClick={handleCloneAsVariant}
-                  disabled={!cloneName.trim() || cloneMutation.isPending}
-                  className="px-3 py-1 text-xs bg-sky-600 text-white rounded hover:bg-sky-700 disabled:bg-gray-300 flex-shrink-0"
-                >
-                  {cloneMutation.isPending ? 'Creating…' : 'Clone as variant'}
-                </button>
-              </div>
-              <p className="text-[10px] text-gray-400 mt-1">saves to template — dormant until routed in Step 7</p>
-            </>
+            <button
+              onClick={() => submodule && openCloneDialog(submodule.id, stepIndex, 1)}
+              className="px-3 py-1 text-xs bg-sky-600 text-white rounded hover:bg-sky-700"
+            >
+              Clone as variant…
+            </button>
           ) : (
             <p className="text-[10px] text-gray-400">
               Clone as variant — <span className="text-amber-600">Save as Template first</span>

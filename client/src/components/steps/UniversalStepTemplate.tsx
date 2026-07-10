@@ -10,6 +10,7 @@ import { api } from '../../api/client';
 import { CategoryCardGrid } from '../shared/CategoryCardGrid';
 import { SubmodulePanel } from '../shared/SubmodulePanel';
 import { VariantPane } from '../shared/VariantPane';
+import { CloneVariantDialog } from '../shared/CloneVariantDialog';
 import { Step7RoutingBody } from './Step7RoutingBody';
 import { StepSummary } from '../shared/StepSummary';
 import { StepApprovalFooter } from '../shared/StepApprovalFooter';
@@ -127,6 +128,7 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
           configMap={configMap}
           onDataOperationChange={handleGridDataOpChange}
           templateId={project?.template_id}
+          stepIndex={stage.step_index}
         />
       )}
 
@@ -192,6 +194,9 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
 
       {/* VariantPane — slides from left when a variant row is clicked (or a clone is created) */}
       <VariantPane templateId={project?.template_id} projectId={projectId} />
+
+      {/* CloneVariantDialog — S2.3 clone modal, opened from a submodule row's Clone CTA */}
+      <CloneVariantDialog templateId={project?.template_id} />
     </div>
   );
 }

@@ -99,6 +99,46 @@ export function addCard(
 }
 
 /**
+ * Place / unplace a bare submodule-id STRING in submodules_per_step[step] (a "legacy" entry — runs in
+ * the first pass with its default config, no named card). This is the Round-1 base-row toggle: `on`
+ * adds the id (idempotent), `!on` removes it. Cards (card_ids) are untouched. Immutable.
+ */
+export function setLegacyPlacement(
+  plan: TemplateExecutionPlan,
+  step: number,
+  submoduleId: string,
+  on: boolean,
+): TemplateExecutionPlan {
+  const sps = on
+    ? placeCardId(plan.submodules_per_step, String(step), submoduleId)
+    : unplaceCardId(plan.submodules_per_step, submoduleId);
+  return { ...plan, submodules_per_step: sps };
+}
+
+/**
+ * Reorder a submodules_per_step[step] entry (a card_id OR a legacy submodule-id string) by one slot.
+ * `dir: -1` moves it earlier, `dir: +1` later — this authors INV-ORDER (V6-§4): array position IS
+ * execution order, and it is what makes two Round-1 clones execute in the authored order rather than
+ * collapsing. No-op if the entry is absent or already at the boundary. Immutable.
+ */
+export function moveEntryInStep(
+  plan: TemplateExecutionPlan,
+  step: number,
+  entry: string,
+  dir: -1 | 1,
+): TemplateExecutionPlan {
+  const stepKey = String(step);
+  const list = plan.submodules_per_step?.[stepKey];
+  if (!Array.isArray(list)) return plan;
+  const i = list.indexOf(entry);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= list.length) return plan; // absent or at boundary → no-op
+  const next = [...list];
+  [next[i], next[j]] = [next[j], next[i]];
+  return { ...plan, submodules_per_step: { ...plan.submodules_per_step, [stepKey]: next } };
+}
+
+/**
  * The sixth function — the Round-1 ⇄ retry-only TOGGLE, as an atomic dual-write.
  * `round1: true`  → place the card_id in submodules_per_step[String(card.step)] (idempotent).
  * `round1: false` → remove the card_id from every step list (retry-only).
