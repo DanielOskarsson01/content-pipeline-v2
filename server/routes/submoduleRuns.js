@@ -653,14 +653,16 @@ executeRouter.post('/run', async (req, res) => {
         entity.loop_count = loopMeta.loop_count || 0;
       }
 
-      // Merge card.rounds[N] overrides on top of base options when this batch
-      // is scoped to a card. Without this merge, a routed Round 2 retry runs
-      // BASE options identical to Round 1 — silent no-op (spec §1.2).
+      // Merge this card's round overrides on top of base options when the batch
+      // is scoped to a card. Without this merge, a routed Round 2 retry runs BASE
+      // options identical to Round 1 — silent no-op (spec §1.2).
       let entityOptions = options;
       if (cardId && cardDefinitions[cardId]) {
         const card = cardDefinitions[cardId];
-        // Default: Round 1 horizontal card → rounds["1"]. Override with the
-        // matching pending instruction's card_round when present (retry path).
+        // v6 (unit 2.5): a scalar card IS one round — its FLAT `overrides` are the
+        // config to merge. cardRound below is provenance only (the aggregate log +
+        // the legacy `rounds[N]` fallback for a not-yet-migrated card). Default is
+        // Round 1 ("1"); the matching pending instruction's card_round wins (retry).
         let cardRound = '1';
         for (const record of loopMeta?.card_instructions || []) {
           const match = (record.targets || []).find(t =>
@@ -674,7 +676,9 @@ executeRouter.post('/run', async (req, res) => {
             break;
           }
         }
-        const roundOverrides = card.rounds?.[cardRound] || {};
+        // Prefer the scalar flat `overrides`; fall back to the legacy `rounds[N]`
+        // map (transition-safe, matches resolveStepEntry:50). `rounds` removed at 3.1.
+        const roundOverrides = card.overrides ?? card.rounds?.[cardRound] ?? {};
         entityOptions = { ...options, ...roundOverrides };
         if (Object.keys(roundOverrides).length > 0) {
           cardMergeAggregate.push({ entity: ep.entity_name, round: cardRound, overrides: Object.keys(roundOverrides).length });

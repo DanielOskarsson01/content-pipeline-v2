@@ -340,6 +340,93 @@ console.log('\n--- expandCardGroups: entity missing from entity_run_meta ---');
 })();
 
 // ===========================================================================
+// Test 11 (v6 W3): placement-aware — a non-pending entity groups under the
+// PLACED card_id, not the null default group.
+// ===========================================================================
+console.log('\n--- expandCardGroups: placement-aware default group (W3) ---');
+
+(async function placementAware_nonPendingUnderPlacedCard() {
+  const { db } = buildMockDb({ entityRows: [] }); // round 1: no pending instructions
+  const r = await expandCardGroups(db, RUN_ID, STEP, SUBMODULE, ['A', 'B'], CARD_DEFS, 'card-pse');
+  assert(r.length === 1, 'one group');
+  assert(r[0].card_id === 'card-pse', 'non-pending entities group under the PLACED card_id (card-pse), NOT null');
+  assert(r[0].card_id !== null, 'the default group is no longer the null group when a card is placed');
+  assert(JSON.stringify([...r[0].entities].sort()) === JSON.stringify(['A', 'B']), 'both entities in the placed card group');
+})();
+
+// ===========================================================================
+// Test 12 (v6 W3 / Codex-4 / test #3): TWO ROUND-1 CLONES of the SAME submodule
+// execute as DISTINCT card-scoped batches (the placed loop calls expandCardGroups
+// once per placed entry; here we simulate the two entries).
+// ===========================================================================
+console.log('\n--- expandCardGroups: TWO round-1 clones → distinct batches (test #3) ---');
+
+(async function twoRound1Clones_distinctBatches() {
+  const { db } = buildMockDb({ entityRows: [] }); // round 1: no pending
+  // Entry 1: clone card-pse; Entry 2: clone card-research (both submodule content-writer).
+  const g1 = await expandCardGroups(db, RUN_ID, STEP, SUBMODULE, ['A', 'B'], CARD_DEFS, 'card-pse');
+  const g2 = await expandCardGroups(db, RUN_ID, STEP, SUBMODULE, ['A', 'B'], CARD_DEFS, 'card-research');
+  assert(g1.length === 1 && g1[0].card_id === 'card-pse', 'clone 1 → its own card-scoped group (card-pse)');
+  assert(g2.length === 1 && g2[0].card_id === 'card-research', 'clone 2 → its own card-scoped group (card-research)');
+  assert(g1[0].card_id !== g2[0].card_id, 'the two clones are DISTINCT card-scoped batches, NOT collapsed to one null default group');
+  // Each clone carries its own prompt_overrides (proving they run different configs).
+  assert(g1[0].prompt_overrides.tone === 'analytical' && g2[0].prompt_overrides.tone === 'investigative',
+    'each clone carries its own overrides — distinct configs, not a silent collapse');
+})();
+
+// ===========================================================================
+// Test 13 (v6 §4 INV-ORDER / T-ORDER-2): within ONE call that yields multiple
+// groups, emission order is DETERMINISTIC and entity-permutation-invariant —
+// NOT Array.from(Map).values() entity-insertion order (the :117 hazard).
+// ===========================================================================
+console.log('\n--- expandCardGroups: INV-ORDER / T-ORDER-2 (deterministic, permutation-invariant) ---');
+
+(async function invOrder_permutationInvariant() {
+  // A → pending card-pse, B → pending card-research, C → no pending (placed card-third).
+  const entityRows = [
+    { entity_name: 'A', card_instructions: [{ routing_round: 2, targets: [{ step: STEP, card_id: 'card-pse', status: 'pending', loop_iteration: 2, card_round: 2 }] }] },
+    { entity_name: 'B', card_instructions: [{ routing_round: 2, targets: [{ step: STEP, card_id: 'card-research', status: 'pending', loop_iteration: 2, card_round: 2 }] }] },
+    { entity_name: 'C', card_instructions: [] },
+  ];
+  const seq = async (order) => {
+    const { db } = buildMockDb({ entityRows });
+    const r = await expandCardGroups(db, RUN_ID, STEP, SUBMODULE, order, CARD_DEFS, 'card-third');
+    return r.map(g => g.card_id);
+  };
+  const forward = await seq(['A', 'B', 'C']);
+  const reverse = await seq(['C', 'B', 'A']);
+  assert(JSON.stringify(forward) === JSON.stringify(reverse),
+    `group order byte-identical across entity permutations (${JSON.stringify(forward)} === ${JSON.stringify(reverse)})`);
+  // Deterministic order: placed/default group (card-third) first, then routed cards by card_id.
+  assert(JSON.stringify(forward) === JSON.stringify(['card-third', 'card-pse', 'card-research']),
+    'placed group first, then routed cards by card_id — authored, not entity-emergent');
+})();
+
+// ===========================================================================
+// Test 14: legacy path unchanged — no placedCardId → null default group.
+// ===========================================================================
+console.log('\n--- expandCardGroups: legacy (no placed card) → null default group ---');
+
+(async function legacyNoPlacedCard_nullDefault() {
+  const { db } = buildMockDb({ entityRows: [] });
+  const r = await expandCardGroups(db, RUN_ID, STEP, SUBMODULE, ['A'], CARD_DEFS); // no 7th arg
+  assert(r.length === 1 && r[0].card_id === null, 'legacy submodule-string entry (no card) → null default group (back-compat)');
+})();
+
+// ===========================================================================
+// Test 15 (static): the placed loop FORWARDS entry.card_id into expandCardGroups
+// (the W3 hand-off that was previously dropped at autoExecutor.js:213-220).
+// ===========================================================================
+console.log('\n--- autoExecutor forwards entry.card_id into expandCardGroups (W3 wiring) ---');
+
+(async function autoExecutorForwardsCardId() {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../services/autoExecutor.js', import.meta.url), 'utf8');
+  assert(/expandCardGroups\(\s*db,\s*runId,\s*stepIndex,\s*submoduleId,\s*allEntities,\s*cardDefinitions,\s*entry\.card_id\s*\)/.test(src),
+    'expandCardGroups is called WITH entry.card_id (placement forwarded, W3)');
+})();
+
+// ===========================================================================
 // Wait for all IIFEs to settle, then report
 // ===========================================================================
 setTimeout(() => {

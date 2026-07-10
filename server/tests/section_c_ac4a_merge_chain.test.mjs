@@ -1,13 +1,14 @@
 /**
  * Section C — AC 4a in-memory merge-chain proof (2026-06-04).
  *
- * What this exercises:
- *   1. routingHandler.applyRouting writes a pending instruction targeting
- *      Round 2 of card-A with _placeholder_marker in card.rounds["2"]
+ * What this exercises (v6 scalar model, unit 2.5):
+ *   1. routingHandler.applyRouting writes a pending instruction targeting the
+ *      round-2 card-A whose _placeholder_marker lives in its flat card.overrides
  *   2. The pending instruction lands in entity_run_meta.card_instructions
  *      (we capture the RPC payload — it's the same shape a real DB would store)
  *   3. cardGroups.expandCardGroups reads the pending instructions and emits a
- *      per-card group with round_overrides = card.rounds["2"]
+ *      per-card group with round_overrides = card.overrides (collapse: overrides
+ *      ?? rounds[N] ?? {})
  *   4. The submoduleRuns.js /run merge logic (lines 658-683) is simulated
  *      inline against the group's round_overrides and the pending target's
  *      card_round, producing the merged options that would land in
@@ -48,22 +49,22 @@ const CARD_B_ID = 'card-B-uuid';
 const PLACEHOLDER = 'section-c-AC4-marker-2026-06-04';
 const RUN_ID = 'run-ac4a';
 
-// Card definitions — Round 1 is the "same settings that just failed" baseline.
-// Round 2 carries the marker. If the marker reaches the final merged options,
-// the routed retry is provably running DIFFERENT settings.
+// Card definitions — v6 scalar model (unit 2.5): CARD_A is a round-2 retry variant
+// whose FLAT `overrides` carry the marker + different settings. If the marker reaches
+// the final merged options, the routed retry is provably running DIFFERENT settings.
+// (The base "same settings that just failed" is the batch's base `options`, below.)
 const cardDefinitions = {
   [CARD_A_ID]: {
     submodule_id: 'content-writer',
     step: 5,
-    rounds: {
-      '1': { model: 'haiku', temperature: 0.7 },
-      '2': { model: 'sonnet', temperature: 0.4, _placeholder_marker: PLACEHOLDER },
-    },
+    round: 2,
+    overrides: { model: 'sonnet', temperature: 0.4, _placeholder_marker: PLACEHOLDER },
   },
   [CARD_B_ID]: {
     submodule_id: 'content-writer',
     step: 5,
-    rounds: { '1': {}, '2': {} },
+    round: 2,
+    overrides: {},
   },
 };
 
@@ -265,7 +266,9 @@ if (cardId && cardDefinitions[cardId]) {
       break;
     }
   }
-  const roundOverrides = card.rounds?.[cardRound] || {};
+  // v6 collapse (unit 2.5): prefer the scalar card's flat `overrides`; legacy
+  // `rounds[N]` map is the transition fallback (submoduleRuns.js:677).
+  const roundOverrides = card.overrides ?? card.rounds?.[cardRound] ?? {};
   entityOptions = { ...baseOptions, ...roundOverrides };
 }
 
