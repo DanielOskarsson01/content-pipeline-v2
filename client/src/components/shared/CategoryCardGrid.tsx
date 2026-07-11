@@ -400,14 +400,11 @@ export function VariantRow({ plan, cardId, card, activeRound, isRound1, routing,
           </span>
         )}
         <span className="text-xs text-gray-700 truncate">{card.card_name}</span>
-        {/* REQUIRED [Round N] chip — visible from every tab (S3.2a) */}
+        {/* REQUIRED [Round N] chip — visible from every tab (S3.2a). The optional [Retry-only] chip is
+            dropped per Daniel's build-review call (2026-07-11): [Round N] already carries it (S2.2/S6). */}
         <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${isRound1 ? 'bg-sky-50 text-sky-600' : 'bg-gray-100 text-gray-500'}`}>
           Round {round}
         </span>
-        {/* Retry-only is optional/redundant (round ≥ 2 implies it) — kept for the mock's parity (S2.2). */}
-        {round > 1 && (
-          <span className="text-[10px] text-gray-400 flex-shrink-0">Retry-only</span>
-        )}
       </div>
       <div className="flex items-center gap-2 flex-shrink-0">
         {/* <- signal:fail back-reference to the Step-7 routing rule (S2.2) */}
