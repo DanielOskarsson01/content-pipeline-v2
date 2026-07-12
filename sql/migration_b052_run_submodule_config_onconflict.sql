@@ -60,6 +60,19 @@
 -- card-aware and will see >1 row once card rows exist. The card-UI session must make the
 -- read card-aware as part of enabling card writes.
 --
+-- UPDATE (UNIT #38, 2026-07-12) — CAVEAT WITHDRAWN. The premise above (that card rows
+-- will exist in run_submodule_config) was rejected. run_submodule_config is the SHARED
+-- BASE config layer (data_operation/input_config/options); per-card variation lives in
+-- execution_plan card_definitions and is merged ON TOP of this base at runtime
+-- (submoduleRuns.js:648-671). NO code path writes a non-null card_id here — every write
+-- (buildConfigRowsFromPresetMap, the config-API PUT, the :264 options writeback) lands
+-- card_id NULL — so card rows never exist and the unscoped .maybeSingle() reads can never
+-- see >1 row. DO NOT card-scope these reads: a card batch carries a non-null card_id, and
+-- scoping the read to it strands the batch on manifest defaults, dropping the user's base
+-- options and (worst, at the approval-time data_operation read) reverting to 'add' — the
+-- B054 duplicate-corruption class. The reads were already correct; #38 closed as a
+-- corrected-misdiagnosis (no functional change). See UNIT_38_INVESTIGATION.md.
+--
 -- LOCK NOTE
 -- DROP + CREATE (non-CONCURRENTLY) takes a brief ACCESS EXCLUSIVE lock on
 -- run_submodule_config. The table is small (retention purges it with its run), so
