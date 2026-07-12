@@ -14,6 +14,7 @@ import { Worker } from 'bullmq';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import db from '../services/db.js';
+import { createSupabaseStorage } from '../services/storage.js';
 import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { COST_CONFIG } from '../config/timeouts.js';
@@ -349,7 +350,12 @@ function buildTools(runId, submoduleId) {
     },
   };
 
-  return { logger, http, browser, unlocker, progress, ai, _logs: logs, _partialItems: [] };
+  // Asset persistence seam (Unit #46). Modules never touch a backend — they call
+  // tools.storage.put(bytes, {...}) and get back an opaque { asset_id, url }. The
+  // Supabase Storage backend + stored_assets table live entirely behind this.
+  const storage = createSupabaseStorage(db);
+
+  return { logger, http, browser, unlocker, progress, ai, storage, _logs: logs, _partialItems: [] };
 }
 
 /**
