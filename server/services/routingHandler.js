@@ -23,7 +23,6 @@ import {
   SKIP_REASONS,
   writeInstructions,
   markSkipped,
-  getConsumedRoundsForRun,
   findPendingInstructionsForRun,
 } from './cardInstructions.js';
 
@@ -37,65 +36,119 @@ const DECISION_TARGET_MAP = {
   loop_generation: 5,
 };
 
+// WF-2 (V6-§3, Daniel-confirmed 2026-07-09) — failure_reason → terminal_state.
+// Escalation-overflow reasons FLAG-and-CONTINUE: the entity is NOT stopped at
+// Step 7 — it still flows to steps 8/9 carrying its failure tags, and a human
+// adjudicates at the Step-9 delivery gate (§9.3). Corruption / misconfiguration
+// reasons stay 'failed' (not publishable — must never read as "needs review").
+// The value change is inert against every current terminal_state reader (none
+// branches on the value — 2.3c §3, re-verified in unit 2.5); it becomes
+// meaningful only at the Step-9 exclusion gate (unit 5.x).
+const FLAG_AND_CONTINUE_REASONS = new Set([
+  'rounds_exhausted',
+  'no_card_for_round',
+  'max_loops_exceeded',
+]);
+function terminalStateForReason(reason) {
+  return FLAG_AND_CONTINUE_REASONS.has(reason) ? 'flagged' : 'failed';
+}
+
 // ---------------------------------------------------------------------------
 // Card resolution helpers (Phase 3)
 // ---------------------------------------------------------------------------
 
 /**
+ * INV-ROUND (V6-§1.5, W4) — the loop_count → escalation-round contract.
+ *
+ * An entity's selection round = loop_count + 2. Round 1 is the first pass
+ * (loop_count = 0, executed via placement — no routing instruction). The first
+ * routing pass observes the PRE-BUMP loop_count = 0 and selects round 2; the
+ * atomic loop_count bump (writeInstructions incrementLoopCount) advances it for
+ * the NEXT pass. Reachable rounds are {2,3,4} across the MAX_LOOPS=3 budget,
+ * consistent with MAX_ROUNDS=4. A selection round with no matching card.round
+ * hits the V6-§3 flag-and-continue terminus (no_card_for_round).
+ *
+ * Single NAMED contract (never inline `loop_count + 2` at a call site).
+ *
+ * @param {number} loopCount - the entity's PRE-BUMP loop_count snapshot
+ * @returns {number} the scalar card.round to select this pass
+ */
+function selectionRound(loopCount) {
+  return (Number(loopCount) || 0) + 2;
+}
+
+/**
  * Resolve QA failures into card-based per-entity instructions using routing_rules.
  *
- * @param {object} qaScores - { keyword: 'pass'|'fail'|'missing', ... } from loop-router
- * @param {object} executionPlan - Template execution_plan with cards + routing_rules
- * @param {object} existingLoopConfig - Entity's current loop_config (consumed_cards)
- * @returns {object|null} { active_cards, consumed_cards, triggered_by } or null if no cards resolved
+ * v6 engine inversion (unit 2.5): cards carry a SCALAR `round` (not a `rounds`
+ * map). resolveCards PARTITIONS a failing check's rule targets by `card.round`
+ * and SELECTS the single card whose round matches the entity's escalation round
+ * (INV-ROUND = loop_count + 2). The pre-v6 `nextRound` ascending walk + the
+ * `card.rounds[nextRound]` bound-check are DELETED — selection is a direct
+ * partition-and-match, and card_round becomes fixed = the selected card's round.
+ * (Canonical schema is UUID-keyed `card_definitions` + array-form routing_rules;
+ * the legacy `cards`/`{target_cards}` shape resolves nothing — see routingHandler.test.js.)
+ *
+ * Return contract:
+ *   - null                                          → nothing selectable (no rule
+ *       fired, malformed target, or missing card_id); caller keeps the router decision.
+ *   - { active_cards, triggered_by, missing_reason:null }
+ *                                                   → one or more round-matched cards.
+ *   - { active_cards:{}, triggered_by, missing_reason }
+ *                                                   → an escalation candidate existed but
+ *       produced no round-match: 'card_not_in_definitions' (a target references an absent
+ *       card — corruption → terminal 'failed'), or 'no_card_for_round' (a real card exists
+ *       at the WRONG round — overflow/gap → V6-§3 flag-and-continue 'flagged'). Corruption
+ *       DOMINATES overflow so it is never masked as publishable-needs-review (WF-2).
+ *
+ * @param {object} qaScores      - { <check>: 'pass'|'fail'|'missing', ... } from loop-router
+ * @param {object} executionPlan - Template execution_plan (card_definitions + routing_rules)
+ * @param {number} loopCount     - the entity's PRE-BUMP loop_count (INV-ROUND input)
+ * @returns {object|null} see return contract above
  */
-function resolveCards(qaScores, executionPlan, existingLoopConfig) {
+function resolveCards(qaScores, executionPlan, loopCount = 0) {
   const rules = executionPlan?.routing_rules || {};
-  // Canonical Multi-Card schema (PHASE_3B §1.2 / §2.1): cards are UUID-keyed
-  // under `card_definitions`; each routing_rules["<check>:fail"] is an ARRAY of
-  // { step, card_id } targets. (Pre-2026-06-15 this read the legacy string-keyed
-  // `cards` + `rule.target_cards` shape, which threw a TypeError on a real
-  // card_definitions template — see routingHandler.test.js.)
   const cards = executionPlan?.card_definitions || {};
-  // "consumed" means "assigned to this entity at least once" — NOT "executed."
-  // Cards are marked consumed at routing time (when assigned), not at execution time.
-  // This prevents the same card from being re-assigned on subsequent routing passes.
-  const consumed = existingLoopConfig?.consumed_cards || [];
+  const targetRound = selectionRound(loopCount);
+
   const activeCards = {};  // step → [card_id, ...]
   const triggeredBy = [];
-  const newlyActivated = [];
+  let sawAbsentCard = false;  // a rule target names a card absent from card_definitions (corruption)
+  let sawWrongRound = false;  // a real card exists but at a round ≠ targetRound (overflow / gap)
 
   for (const [check, result] of Object.entries(qaScores || {})) {
     if (result !== 'fail') continue;
     const targets = rules[`${check}:fail`];
-    if (!Array.isArray(targets)) continue;  // tolerate absent / malformed rule
+    if (!Array.isArray(targets) || targets.length === 0) continue;  // no rule → nothing to escalate
     triggeredBy.push(`${check}:fail`);
     for (const target of targets) {
       const cardId = target?.card_id;
-      if (!cardId || consumed.includes(cardId)) continue;
+      if (!cardId) continue;  // malformed target — ignore (never signals overflow)
       const card = cards[cardId];
-      if (!card) continue;  // rule references a card_id absent from card_definitions
-      // The rule target carries the routing step (PHASE_3B §2.1 keeps it equal
-      // to the card's own step); fall back to the card definition's step.
+      if (!card) { sawAbsentCard = true; continue; }  // rule references a card_id absent from card_definitions
+      // INV-ROUND partition-and-match: select this card iff it IS the entity's round.
+      if (Number(card.round) !== targetRound) { sawWrongRound = true; continue; }
+      // The rule target carries the routing step (kept equal to the card's own
+      // step); fall back to the card definition's step.
       const step = String(target.step ?? card.step);
       if (!activeCards[step]) activeCards[step] = [];
-      if (!activeCards[step].includes(cardId)) {
-        activeCards[step].push(cardId);
-        newlyActivated.push(cardId);
-      }
+      if (!activeCards[step].includes(cardId)) activeCards[step].push(cardId);
     }
   }
 
-  // All cards consumed, no new variants available → return null.
-  // Caller keeps decision as flag_manual (needs manual check).
-  // Don't retry with the same consumed card — it already failed.
-  // max_loops backstop also catches this, but this is cleaner.
-  if (!Object.keys(activeCards).length) return null;
-  return {
-    active_cards: activeCards,
-    consumed_cards: [...consumed, ...newlyActivated],
-    triggered_by: triggeredBy,
-  };
+  if (Object.keys(activeCards).length > 0) {
+    return { active_cards: activeCards, triggered_by: triggeredBy, missing_reason: null };
+  }
+  // No round-matched card. Corruption (absent card) DOMINATES overflow so it is
+  // never masked as "publishable-needs-review" (WF-2: card_not_in_definitions → failed).
+  if (sawAbsentCard) {
+    return { active_cards: {}, triggered_by: triggeredBy, missing_reason: 'card_not_in_definitions' };
+  }
+  if (sawWrongRound) {
+    return { active_cards: {}, triggered_by: triggeredBy, missing_reason: 'no_card_for_round' };
+  }
+  // No selectable candidate at all → keep the router decision (existing flag_manual path).
+  return null;
 }
 
 /**
@@ -221,6 +274,107 @@ async function setTerminalState(db, runId, entityName, terminalState, failureRea
       `${entityName} (run ${runId}): ${error.message || error}. Entity may be ` +
       `dropped from the Step-8 forward (runs.js selects terminal_state IS NOT ` +
       `NULL) — investigate.`
+    );
+  }
+}
+
+/**
+ * Persist one entity's QA scores to entity_run_meta:
+ *   - last_qa_scores   ← latest scores object (overwrite)
+ *   - qa_score_history ← APPEND { iteration, scores, timestamp } (never overwrite)
+ *
+ * Restores the write DROPPED when Section C (2026-06-04, commit be07509)
+ * replaced the apply_entity_routing RPC with JS routing. That RPC recorded
+ * exactly this shape (migration_move_routing_to_step7.sql:169-180) for every
+ * decision carrying qa_scores, keyed by the current loop_count. The columns
+ * still exist (migration_routing.sql:18-19); only the writer was lost, so QA
+ * quality history has silently stopped accumulating since that rewrite.
+ *
+ * PURELY ADDITIVE. This records quality history and nothing else — it never
+ * reads or alters terminal_state, the routing decision, target_step, or the
+ * loop_count bump. It is called once per decision at the TOP of the applyRouting
+ * per-entity loop (the same pre-dispatch position the dropped RPC used), so
+ * routed entities accrue per-iteration history, not just terminal ones.
+ *
+ * DEFENSIVE BY CONTRACT (this fix must never destabilise routing):
+ *   - a missing / null / malformed score is a no-op (no partial or garbage row);
+ *   - no failure here — a read {error}, a write {error}, or a thrown exception —
+ *     is allowed to abort the routing batch. Quality history is a side-record,
+ *     never load-bearing the way the terminal_state write is.
+ *
+ * supabase-js has no server-side JSONB `||` append, and this file's persistence
+ * idiom is select + update (not raw SQL), so history is appended read-modify-
+ * write. Safe here: each entity is processed exactly once per applyRouting pass,
+ * sequentially, and only this function writes these two columns.
+ *
+ * @param {object} db - Supabase client
+ * @param {string} runId - The run UUID
+ * @param {string} entityName - Entity whose scores to record
+ * @param {*} qaScores - Scores object from loop-router output (e.g. { citation: 0.72 })
+ * @param {number} iteration - Current loop_count (the round these scores rate)
+ */
+async function recordQaScores(db, runId, entityName, qaScores, iteration) {
+  // Only a non-null, non-array object with at least one key is a valid score
+  // set. null / undefined / string / number / array / {} → skip. (The dropped
+  // RPC gated on `qa_scores IS NOT NULL`; we additionally reject shapes that
+  // would write garbage into the history array.)
+  if (
+    !qaScores ||
+    typeof qaScores !== 'object' ||
+    Array.isArray(qaScores) ||
+    Object.keys(qaScores).length === 0
+  ) {
+    return;
+  }
+
+  try {
+    const { data: current, error: readErr } = await db
+      .from('entity_run_meta')
+      .select('qa_score_history')
+      .eq('run_id', runId)
+      .eq('entity_name', entityName)
+      .maybeSingle();
+
+    if (readErr) {
+      console.error(
+        `[routingHandler] FAILED to read qa_score_history for ${entityName} ` +
+        `(run ${runId}): ${readErr.message || readErr}. Skipping QA-score ` +
+        `record for this round (non-fatal).`
+      );
+      return;
+    }
+
+    const history = Array.isArray(current?.qa_score_history)
+      ? current.qa_score_history
+      : [];
+    history.push({
+      iteration: iteration ?? 0,
+      scores: qaScores,
+      timestamp: new Date().toISOString(),
+    });
+
+    const { error: writeErr } = await db
+      .from('entity_run_meta')
+      .update({
+        last_qa_scores: qaScores,
+        qa_score_history: history,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('run_id', runId)
+      .eq('entity_name', entityName);
+
+    if (writeErr) {
+      console.error(
+        `[routingHandler] FAILED to persist qa_score_history for ${entityName} ` +
+        `(run ${runId}): ${writeErr.message || writeErr}. Quality history not ` +
+        `updated for this round (non-fatal).`
+      );
+    }
+  } catch (err) {
+    // A quality-history write must never abort the routing batch.
+    console.error(
+      `[routingHandler] Unexpected error recording QA scores for ${entityName} ` +
+      `(run ${runId}): ${err?.message || err}. Non-fatal.`
     );
   }
 }
@@ -355,13 +509,31 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
       if (!routerItem?.qa_scores) continue;
 
       const meta = metaByName.get(d.entity_name);
-      const cardResult = resolveCards(routerItem.qa_scores, executionPlan, meta?.loop_config);
+      const loopCount = meta?.loop_count || 0;  // PRE-BUMP snapshot (INV-ROUND)
+      const cardResult = resolveCards(routerItem.qa_scores, executionPlan, loopCount);
       if (!cardResult) continue;
 
       d.config_overrides = cardResult;
 
-      // Compute target_step from earliest card step
+      // No round-matched card (INV-ROUND = loop_count+2): escalation overflow or
+      // template corruption. Route into the terminal write (§3/W5) rather than a
+      // silent continue. Corruption → 'card_not_in_definitions' (→ 'failed') ALWAYS;
+      // overflow → 'no_card_for_round' (→ flag-and-continue 'flagged') UNLESS the
+      // loop budget is already spent, in which case the MAX_LOOPS backstop below
+      // owns the terminus (max_loops_exceeded) so the loop-ceiling reason is kept.
       const cardSteps = Object.keys(cardResult.active_cards).map(Number);
+      if (cardSteps.length === 0) {
+        if (cardResult.missing_reason === 'card_not_in_definitions') {
+          d.card_terminus = 'card_not_in_definitions';
+          delete d.target_step;
+        } else if (loopCount < MAX_LOOPS) {
+          d.card_terminus = 'no_card_for_round';
+          delete d.target_step;
+        }
+        continue;
+      }
+
+      // Compute target_step from earliest card step
       d.target_step = Math.min(...cardSteps);
 
       // Upgrade flag_manual → loop_* when cards resolved
@@ -403,7 +575,6 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
   // others. The failure-isolation property is the whole point of this rewrite
   // (closes BACKLOG #7 partial-state-on-RPC-failure damage class).
   const writeResults = [];
-  const consumedRoundsByEntity = await getConsumedRoundsForRun(db, runId);
 
   // Pre-load pending instructions for the QA-passed cleanup branch.
   // stepIndex=null means "all steps" — Section C extension of the helper
@@ -414,6 +585,34 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
   );
 
   for (const d of decisions) {
+    // Persist QA scores BEFORE dispatch (restores the Section-C-dropped RPC
+    // write). Additive only — never touches terminal_state/routing. Done here,
+    // once per decision, so routed AND terminal entities accrue per-iteration
+    // history; iteration = current loop_count (the round these scores rate),
+    // matching the dropped RPC. Awaited but self-guarded to never throw.
+    await recordQaScores(db, runId, d.entity_name, d.qa_scores, loopCounts.get(d.entity_name) || 0);
+
+    // Escalation-overflow / corruption terminus (V6-§3 flag-and-continue / WF-2).
+    // resolveCards found no card at the entity's round (INV-ROUND). Reuse the
+    // existing setTerminalState write and BRANCH THE VALUE on the reason:
+    //   no_card_for_round        → 'flagged' (routing-terminal; entity CONTINUES to steps 8/9)
+    //   card_not_in_definitions  → 'failed'  (template corruption; not publishable)
+    // Reached ONLY for a genuine round overflow/gap or a corrupt card reference —
+    // never as a silent no-op (V6-§1.5 makes dispatch real, so this is not masking
+    // an un-run escalation the way B1 did).
+    if (d.card_terminus) {
+      const terminal = terminalStateForReason(d.card_terminus);
+      await setTerminalState(db, runId, d.entity_name, terminal, d.card_terminus);
+      writeResults.push({
+        entity_name: d.entity_name,
+        decision: d.decision,
+        terminal,
+        instructions_written: 0,
+        failure_reason: d.card_terminus,
+      });
+      continue;
+    }
+
     if (d.decision === 'completed' || d.decision === 'approve') {
       // Terminal success. loop-router emits 'approve' on the all-pass path (it
       // never emits 'completed'); both are terminal-success. The dropped
@@ -454,8 +653,13 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
       // Terminal non-success. Must set terminal_state or these vanish from the
       // runs.js:494 Step-8 forward exactly as approved entities did before the
       // fix (decision='failed' is emitted for dead_site / max_loops_exceeded;
-      // flag_manual needs human review).
-      const terminal = d.decision === 'failed' ? 'failed' : 'flagged';
+      // flag_manual needs human review). flag_manual → 'flagged'; a 'failed'
+      // decision's terminal_state is branched on its reason (WF-2): the
+      // escalation-overflow reason max_loops_exceeded FLAGS-and-continues, while
+      // genuine failures (e.g. dead_site) stay 'failed'.
+      const terminal = d.decision === 'flag_manual'
+        ? 'flagged'
+        : terminalStateForReason(d.failure_reason);
       await setTerminalState(db, runId, d.entity_name, terminal, d.failure_reason || null);
       writeResults.push({
         entity_name: d.entity_name,
@@ -477,78 +681,37 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
       continue;
     }
 
-    // Build pending targets. For each active card, derive nextRound from
-    // consumed rounds, then BOUND-CHECK card.rounds[String(nextRound)] before
-    // emitting the target. Without the bound check, validateCardInstructions
-    // would accept the write but the B.5 merge in submoduleRuns.js would
-    // silently fall back to base options for the missing round.
+    // Build pending targets. v6 inversion: card_round is FIXED = the selected
+    // card's scalar `round` (resolveCards already partitioned by round via
+    // INV-ROUND). The pre-v6 nextRound walk + card.rounds bound-check, and the
+    // exhaustion terminus + markSkipped they fed, are GONE — overflow / corruption
+    // is detected upstream by resolveCards' missing_reason (d.card_terminus,
+    // handled above) before we reach here.
     const targets = [];
     const activeCards = d.config_overrides?.active_cards || {};
-    const consumedRounds = consumedRoundsByEntity[d.entity_name] || {};
-    const exhaustedCards = []; // {step, card_id, reason} triples
-
     for (const [stepStr, cardIds] of Object.entries(activeCards)) {
       const step = Number(stepStr);
       for (const cardId of cardIds) {
         const card = cardDefinitions[cardId];
-        if (!card) {
-          exhaustedCards.push({ step, card_id: cardId, reason: 'card_not_in_definitions' });
-          continue;
-        }
-        const alreadyConsumed = new Set((consumedRounds[cardId] || []).map(Number));
-        let nextRound = 2;
-        while (alreadyConsumed.has(nextRound)) nextRound++;
-
-        // Bound check — required for the B.5 merge contract. Without it,
-        // routedHandler would emit a target with card_round=N where
-        // card.rounds[String(N)] is undefined, and submoduleRuns.js would
-        // silently merge the base options (the "same settings that just
-        // failed" silent no-op the Multi-Card Pattern exists to eliminate).
-        if (!card.rounds || !card.rounds[String(nextRound)]) {
-          exhaustedCards.push({ step, card_id: cardId, reason: 'rounds_exhausted' });
-          continue;
-        }
-
+        if (!card) continue;  // defensive — resolveCards only emits present, round-matched cards
         targets.push({
           step,
           card_id: cardId,
-          card_round: nextRound,
+          card_round: Number(card.round),
         });
       }
     }
 
-    // markSkipped each exhausted (step, card_id) pair with the appropriate
-    // reason. Loop on real (step, card_id) pairs — no placeholder iteration.
-    for (const { step, card_id, reason } of exhaustedCards) {
-      try {
-        const skipReason = reason === 'card_not_in_definitions'
-          ? SKIP_REASONS.CARD_DELETED
-          : SKIP_REASONS.ROUNDS_EXHAUSTED;
-        await markSkipped(db, runId, d.entity_name, step, card_id, skipReason);
-      } catch (err) {
-        console.error(
-          `[routingHandler] markSkipped exhausted failed for ${d.entity_name} ` +
-          `step=${step} card=${card_id}: ${err.message}`
-        );
-      }
-    }
-
-    // If NO viable targets remain after the bound check, the entity is
-    // exhausted at the cards level. Flip to terminal_state='failed' with the
-    // most informative failure_reason and skip the writeInstructions call.
+    // Defensive: active_cards was non-empty but nothing resolved (should not
+    // happen — resolveCards only emits present, round-matched cards).
     if (targets.length === 0) {
-      await setTerminalState(
-        db, runId, d.entity_name, 'failed',
-        exhaustedCards.some(e => e.reason === 'card_not_in_definitions')
-          ? 'card_not_in_definitions'
-          : 'rounds_exhausted'
-      );
+      await setTerminalState(db, runId, d.entity_name, 'failed', 'routing_no_target_step');
       writeResults.push({
         entity_name: d.entity_name,
         decision: d.decision,
         terminal: 'failed',
         instructions_written: 0,
-        exhausted_cards: exhaustedCards.length,
+        error: 'no_resolved_targets',
       });
       continue;
     }
@@ -638,4 +801,4 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
   };
 }
 
-export { validateCards, resolveCards };
+export { validateCards, resolveCards, recordQaScores };

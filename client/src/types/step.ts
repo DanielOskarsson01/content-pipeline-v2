@@ -51,7 +51,13 @@ export interface AutoExecuteStepResult {
   status: string;
   completed: number;
   failed: number;
+  /** Entities skipped (e.g. no input). Part of the real persisted per_step_results shape —
+   *  added in unit 2.4 (2.3 §5b drift W2: step.ts omitted it). */
+  skipped: number;
   total: number;
+  /** total minus skipped — the denominator the failure rate is actually computed against
+   *  (autoExecutor.js). Added in unit 2.4 (2.3 §5b drift W2: step.ts omitted it). */
+  effectiveTotal: number;
   failureRate: number;
   duration_ms: number;
   errorSummary: Record<string, number>;
@@ -200,16 +206,64 @@ export interface TemplatePresetMapEntry {
 }
 export type TemplatePresetMap = Record<string, TemplatePresetMapEntry>;
 
+// ── Multi-Card Pattern (PHASE_3B) — canonical card config ─────────────────────
+// Runtime-faithful shapes. Source of truth: server routingHandler.js + executionPlanUtils.js
+// + the live 30-april template (verified 2026-06-30). These intentionally DIVERGE from
+// PHASE_3B's abstract §1 schema (no separate options_overrides/prompt_overrides object;
+// routing_rules is array-form, not {target_cards}); the deployed runtime wins.
+// The dead CardsSection/RoutingRulesSection textareas + their legacy types were deleted (item 9);
+// cards + routing are edited in the run view (Step-7 routing body + variant panes).
+
+/** Sparse per-round option overrides. Any submodule option (prompt, ai_model, temperature,
+ *  curated_list, max_results, …) is just a key here — there is NO separate options_overrides
+ *  object; overrides are spread shallowly over base options at execution ({ ...base, ...rounds[N] }). */
+export type CardRoundOverrides = Record<string, unknown>;
+
+/** Round overrides keyed by the STRING digits "1".."4" (NOT an array, NOT numeric keys).
+ *  Round "1" is always present (validator rule 5); max 4 rounds (rule 7). For a Round-1 card
+ *  "1" carries its differentiating config; for a retry-only card "1" is typically {} and
+ *  "2"/"3"/"4" carry escalation overrides. */
+export interface CardRounds {
+  '1': CardRoundOverrides;
+  '2'?: CardRoundOverrides;
+  '3'?: CardRoundOverrides;
+  '4'?: CardRoundOverrides;
+}
+
+/** A card = a named, configured instance of a submodule. Stored UUID-keyed in
+ *  execution_plan.card_definitions; the map key is the card_id (stable, never changes on rename).
+ *
+ *  v6 (unit 2.4): the per-round `rounds` MAP is dropped in favour of a SCALAR `round` + a single
+ *  FLAT `overrides` object — one card IS exactly one round (D10). `round === 1` ⇒ a first-pass
+ *  (placed) variant; `round > 1` ⇒ a retry/escalation variant (routing-only). Multiple cards
+ *  sharing (submodule, step) — one per round — is the normal, valid shape (D8). */
 export interface CardDefinition {
+  /** Display name. Cosmetic only — identity is always the card_id (the map key). The runtime
+   *  tolerates its absence (validator does not require it), but the UI should always set it. */
+  card_name: string;
+  /** Which submodule this card invokes. Must be a registered submodule. */
   submodule_id: string;
+  /** Which pipeline step the card executes at. Must equal its submodules_per_step placement. */
   step: number;
-  options_overrides: Record<string, unknown>;
+  /** v6 CANONICAL — the scalar round this card is (integer 1..4). round===1 ⇒ placed first-pass;
+   *  round>1 ⇒ routing-only retry. Validator (executionPlanUtils.validateExecutionPlan) enforces it. */
+  round?: number;
+  /** v6 CANONICAL — this round's FLAT option overrides (no `rounds[N]` nesting). */
+  overrides?: CardRoundOverrides;
+  /** @deprecated v6 (unit 2.4): superseded by scalar `round` + flat `overrides`. NOT removed here —
+   *  the 2.5 engine (submoduleRuns.js / routingHandler.js / cardInstructions.js) still reads
+   *  `rounds` at runtime, and the 30-april prod fixture is still map-shaped until unit 2.7. Removed
+   *  together with the 2.5 engine reshape + 2.6 UI rewrite at the atomic 3.1 deploy. */
+  rounds?: CardRounds;
+  /** Optional operator note. */
   description?: string;
 }
 
-export interface RoutingRule {
-  target_cards: string[];
-  description?: string;
+/** One routing target: run `card_id` at `step` when a QA check fails. `step` is optional at
+ *  runtime (falls back to the card's own step) but the UI should set it = card.step. */
+export interface RoutingTarget {
+  step: number;
+  card_id: string;
 }
 
 export interface EscalationRule {
@@ -226,8 +280,11 @@ export interface TemplateExecutionPlan {
   pause_before_steps?: number[];
   pause_after_submodules?: string[];
   failure_thresholds?: Record<string, number>;
-  cards?: Record<string, CardDefinition>;
-  routing_rules?: Record<string, RoutingRule>;
+  /** Canonical card config — UUID-keyed. Round-1 cards ALSO appear (by card_id) in
+   *  submodules_per_step; retry-only cards appear here only. */
+  card_definitions?: Record<string, CardDefinition>;
+  /** Canonical routing — keyed by "{qa_check}:fail"; each value is the target array. */
+  routing_rules?: Record<string, RoutingTarget[]>;
   escalation_rules?: Record<string, EscalationRule>;
 }
 

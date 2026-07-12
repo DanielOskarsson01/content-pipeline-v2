@@ -1,0 +1,41 @@
+{
+  "_fixture_doc": {
+    "purpose": "PRE-DEPLOY FLAGSHIP-CAPABILITY FUNCTIONAL GATE (CONTENT_PIPELINE_MASTER_PLAN.md:297). Unit 2.7 proved the 30-april fixture exercises NEITHER flagship capability; this purpose-built fixture exercises BOTH in one execution_plan.",
+    "capability_A": "Placed round-1 override merge via card_id. Card A (content-writer, round 1) is PLACED in submodules_per_step[5] by its UUID, carrying flat `overrides`. On the FIRST pass (no pending instructions) its overrides still merge because autoExecutor forwards entry.card_id to expandCardGroups (autoExecutor.js:226) and submoduleRuns merges card.overrides (submoduleRuns.js:659-686). Correct-v6, inert-legacy, flagged by 2.5 /code-review, never tested e2e until this fixture.",
+    "capability_B": "V6-§1.5 different-submodule dispatch. Card B (deep-research-writer, round 2) is a DIFFERENT submodule that exists ONLY as a routing-only round-2 card — not in submodules_per_step — targeted by the citation:fail routing rule. On QA failure its pending instruction is collected by the WF-1 second dispatch pass (collectUnplacedDispatchGroups) and the different submodule ACTUALLY EXECUTES with its card's round-2 overrides + advanced loop_iteration. The instruction-written proxy is rejected: writing the instruction is B1's failure mode; DISPATCH is the discriminator.",
+    "overflow_tail": "Only round 2 is authored for deep-research-writer. At loop_count 1 (selection round 3) resolveCards returns no_card_for_round → applyRouting sets terminal_state='flagged' (flag-and-continue, V6-§3), entity continues to steps 8/9.",
+    "note": "Both cards live at step 5 to keep this a tight single-step proof; the load-bearing property for capability B is different-submodule + unplaced + round>1, not the specific step. The `_fixture_doc` key is inert — validateExecutionPlan ignores unknown keys (T-VALID proves the plan validates clean with this key present)."
+  },
+  "submodules_per_step": {
+    "5": ["d1a1c0de-0001-4001-8001-000000000a01"]
+  },
+  "card_definitions": {
+    "d1a1c0de-0001-4001-8001-000000000a01": {
+      "submodule_id": "content-writer",
+      "card_name": "cap-A placed round-1 (cheap generator)",
+      "step": 5,
+      "round": 1,
+      "overrides": {
+        "model": "haiku",
+        "temperature": 0.7,
+        "_cap_a_marker": "placed-round-1-override-merged-on-first-pass"
+      }
+    },
+    "d1a1c0de-0002-4002-8002-000000000b02": {
+      "submodule_id": "deep-research-writer",
+      "card_name": "cap-B routing-only round-2 (different, expensive submodule)",
+      "step": 5,
+      "round": 2,
+      "overrides": {
+        "model": "sonnet",
+        "temperature": 0.4,
+        "_cap_b_marker": "unplaced-round-2-different-submodule-dispatched"
+      }
+    }
+  },
+  "routing_rules": {
+    "citation:fail": [
+      { "step": 5, "card_id": "d1a1c0de-0002-4002-8002-000000000b02" }
+    ]
+  }
+}

@@ -44,7 +44,10 @@ export function resolveStepEntry(entry, cardDefinitions) {
       submodule_id: card.submodule_id,
       card_id: entry,
       card_name: card.card_name || card.name || null,
-      round_1_overrides: card.rounds?.['1'] || {},
+      // v6 scalar model: a placed card is Round-1 (placement === round-1 membership, D6), so its
+      // flat `overrides` ARE the round-1 overrides. Fall back to the legacy `rounds["1"]` shape so
+      // a not-yet-migrated card (e.g. the 30-april prod fixture, flipped in unit 2.7) still resolves.
+      round_1_overrides: card.overrides ?? card.rounds?.['1'] ?? {},
     };
   }
 
@@ -84,6 +87,227 @@ export function resolveStepEntries(stepEntries, cardDefinitions) {
   return (stepEntries || []).map(e => resolveStepEntry(e, cardDefinitions));
 }
 
+// v6 scalar-round bound: a card's `round` is an integer in [1, MAX_ROUNDS].
+// (Was VALID_ROUND_KEYS/MAX_ROUNDS_PER_CARD for the dropped `rounds` MAP.)
+const MAX_ROUNDS = 4;
+
+/**
+ * Validate an execution_plan's card config at TEMPLATE SAVE time (PHASE_3B §9
+ * acceptance table). Pure + registry-injected so it is testable and fully
+ * pipeline-agnostic (structural validation only — no content-type assumptions).
+ *
+ * Fail-loud-before-UI contract: the save path calls this and rejects (HTTP 400)
+ * any malformed card config before it can be persisted, so the card-stacking UI
+ * (#16) and routing-rules UI (#17) build on a save path that cannot store a
+ * corrupt execution_plan.
+ *
+ * Rules (all → errors[], HTTP 400):
+ *   1  card_id (map key) is a valid UUID                         (§9)
+ *   2  submodule_id present AND registered                      (§1.2)
+ *   3  step present AND integer                                 (§1.2)
+ *   4  round present AND an integer ≥ 1        [v6 scalar; the `rounds` MAP shape check is DELETED]
+ *  4b  overrides (if present) is a plain object [v6 scalar; the single flat overrides]
+ *   6  round ≤ MAX_ROUNDS (4)                  [v6 scalar bound; rule 7 map-size bound DELETED]
+ *   8  every UUID entry in submodules_per_step ∈ card_definitions (§9)
+ *   9  card.step matches its submodules_per_step placement step (§9)
+ *  10  every routing_rules card_id ∈ card_definitions           (§9)
+ *  11  every routing_rules-referenced card has round > 1        [v6 scalar: card.round > 1]
+ *  12  legacy `cards` key (string-keyed) is rejected — card UI must emit card_definitions
+ *  13  routing_rules values must be arrays of {step, card_id}  (legacy {target_cards} rejected)
+ *  GROUP (D7/D8, Q3 option (e)): per (submodule,step) — retry rounds (round>1) UNIQUE; Round-1
+ *      clones allowed; PLACED groups contiguous-from-1 (was rule 5); ROUTING-ONLY groups may
+ *      start at round 2 (gaps there defer to the V6-§3 run-time terminus).
+ *
+ * Rules 12-13 (card-write enablement gap close): the dead CardsSection/RoutingRulesSection
+ * emitted `cards` + object-form routing_rules that this validator previously passed clean,
+ * so the save gate did not gate what the card UI produced. These rules close that gap.
+ *
+ * DEFERRED (returned in warnings[] only once buildable): QA-check-name →
+ * manifest `qa_outputs` matching (§2.2, non-blocking warning). No manifest
+ * declares `qa_outputs` yet (§6.6 not built), so there is nothing to match
+ * against — implementing it now would be a no-op. Wire it when qa_outputs ships.
+ *
+ * A plain card-less legacy pipeline plan (kebab-case submodules_per_step entries, no
+ * `cards`, no `card_definitions`, no `routing_rules`) still validates clean — only the
+ * legacy CARD-authoring shapes (rules 12-13) are rejected.
+ *
+ * @param {object} executionPlan  the execution_plan being saved
+ * @param {object} deps
+ * @param {(submoduleId: string) => boolean} [deps.isRegisteredSubmodule]
+ *        registry lookup; when omitted, the registration check (rule 2b) is skipped
+ * @returns {{ errors: string[], warnings: string[] }}
+ */
+export function validateExecutionPlan(executionPlan, { isRegisteredSubmodule } = {}) {
+  const errors = [];
+  const warnings = [];
+  if (!executionPlan || typeof executionPlan !== 'object' || Array.isArray(executionPlan)) {
+    return { errors, warnings };
+  }
+
+  // Gap close (card-write enablement): reject the LEGACY card-authoring shapes the
+  // dead CardsSection/RoutingRulesSection emit so the save gate actually gates what the
+  // card UI produces. Before this, a legacy `cards` (string-keyed) plan + object-form
+  // routing_rules ({target_cards}) validated with ZERO errors — dead data the runtime
+  // ignores sailed through. The canonical shape is `card_definitions` (UUID-keyed) +
+  // array-form routing_rules. Migration surface is empty: verified 2026-06-30 that 0
+  // production templates carry `cards`, and the only card template (30-april) is already
+  // canonical — so this rejection breaks no existing template.
+  // NOTE: a plain card-less legacy pipeline plan (kebab `submodules_per_step`, no `cards`,
+  // no `routing_rules`) is NOT a card plan and still validates clean — only the legacy
+  // CARD shapes are rejected here.
+  const legacyCards = executionPlan.cards;
+  if (legacyCards && typeof legacyCards === 'object' && !Array.isArray(legacyCards) && Object.keys(legacyCards).length > 0) {
+    errors.push('legacy `cards` key is not supported — use `card_definitions` (UUID-keyed). The card UI must emit card_definitions.');
+  }
+
+  const cardDefs = executionPlan.card_definitions;
+  // card_definitions, if present at all, must be a plain object keyed by card_id.
+  // (Without this, an array/scalar shape would silently skip rules 1–7.)
+  if (cardDefs !== undefined && cardDefs !== null && (typeof cardDefs !== 'object' || Array.isArray(cardDefs))) {
+    errors.push('card_definitions must be an object keyed by card_id');
+  }
+  const hasCards = cardDefs && typeof cardDefs === 'object' && !Array.isArray(cardDefs) && Object.keys(cardDefs).length > 0;
+
+  // Rules 1–7: per-card shape
+  if (hasCards) {
+    for (const [cardId, card] of Object.entries(cardDefs)) {
+      const at = `card_definitions["${cardId}"]`;
+      if (!UUID_REGEX.test(cardId)) {                                    // 1
+        errors.push(`${at}: card_id is not a valid UUID`);
+      }
+      if (!card || typeof card !== 'object' || Array.isArray(card)) {
+        errors.push(`${at}: card definition must be an object`);
+        continue;
+      }
+      if (!card.submodule_id || typeof card.submodule_id !== 'string') { // 2a
+        errors.push(`${at}: submodule_id is required`);
+      } else if (typeof isRegisteredSubmodule === 'function' && !isRegisteredSubmodule(card.submodule_id)) { // 2b
+        errors.push(`${at}: submodule_id "${card.submodule_id}" is not a registered submodule`);
+      }
+      if (!Number.isInteger(card.step)) {                               // 3
+        errors.push(`${at}: step is required and must be an integer`);
+      }
+      // Rule 4 (v6 scalar) — `round` is required and an integer ≥ 1 (the `rounds`-MAP shape check
+      // is DELETED). Rule 6 (scalar bound) — round ≤ MAX_ROUNDS. Rule 7 (map-size bound) — DELETED.
+      if (!Number.isInteger(card.round) || card.round < 1) {           // 4
+        errors.push(`${at}: round is required and must be an integer ≥ 1`);
+      } else if (card.round > MAX_ROUNDS) {                            // 6
+        errors.push(`${at}: round must be ≤ ${MAX_ROUNDS} (got ${card.round})`);
+      }
+      // Rule 4b (v6 scalar) — the single flat `overrides`, if present, must be a plain object.
+      if (card.overrides !== undefined &&
+          (card.overrides === null || typeof card.overrides !== 'object' || Array.isArray(card.overrides))) { // 4b
+        errors.push(`${at}: overrides must be an object`);
+      }
+      // Rule 5 (round-1 presence) is now the PLACED-group contiguity rule below (scoped to placed
+      // cards per Q3 option (e)) — a routing-only card may start at round 2 with no round-1 sibling.
+    }
+  }
+
+  // GROUP RULE (D7/D8, Q3 option (e)) — group cards by (submodule_id, step):
+  //   • Multiple Round-1 clones (round === 1) are VALID (D8); RETRY rounds (round > 1) must be UNIQUE.
+  //   • A PLACED group (≥1 of its cards is in submodules_per_step) must be CONTIGUOUS FROM 1
+  //     (round 1 present, no interior gap) — this is rule 5 scoped to placed cards.
+  //   • A ROUTING-ONLY group (no placed card) MAY START AT ROUND 2 (option (e)); an interior gap
+  //     there is NOT an author-time error — it hits the V6-§3 run-time flag-and-continue terminus.
+  if (hasCards) {
+    const placedCardIds = new Set();
+    const sps = executionPlan.submodules_per_step;
+    if (sps && typeof sps === 'object' && !Array.isArray(sps)) {
+      for (const entries of Object.values(sps)) {
+        if (Array.isArray(entries)) {
+          for (const e of entries) if (typeof e === 'string' && UUID_REGEX.test(e)) placedCardIds.add(e);
+        }
+      }
+    }
+    const SEP = '␟'; // unit-separator: safe group key join (submodule_id ␟ step)
+    const groups = new Map();
+    for (const [cardId, card] of Object.entries(cardDefs)) {
+      if (!card || typeof card !== 'object' || Array.isArray(card)) continue;
+      if (!Number.isInteger(card.round)) continue; // rule 4 already errored; don't double-report
+      if (typeof card.submodule_id !== 'string' || !Number.isInteger(card.step)) continue; // rules 2a/3 already errored
+      const key = `${card.submodule_id}${SEP}${card.step}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ cardId, round: card.round });
+    }
+    for (const [key, members] of groups) {
+      const [submoduleId, stepStr] = key.split(SEP);
+      const gat = `group (submodule "${submoduleId}", step ${stepStr})`;
+      const isPlaced = members.some((m) => placedCardIds.has(m.cardId));
+      // duplicate RETRY round (round > 1) — Round-1 clones are allowed (D8), so skip round 1
+      const retryCounts = new Map();
+      for (const m of members) if (m.round > 1) retryCounts.set(m.round, (retryCounts.get(m.round) || 0) + 1);
+      for (const [r, count] of retryCounts) {
+        if (count > 1) errors.push(`${gat}: duplicate retry round ${r} (retry rounds must be unique)`);
+      }
+      if (isPlaced) {
+        const distinct = [...new Set(members.map((m) => m.round))].sort((a, b) => a - b);
+        if (!distinct.includes(1)) {
+          errors.push(`${gat}: a PLACED group must include round 1 (round-1 membership is placement — D6/D7)`);
+        } else {
+          for (let i = 0; i < distinct.length; i++) {
+            if (distinct[i] !== i + 1) {
+              errors.push(`${gat}: rounds must be contiguous from 1 (gap before round ${distinct[i]})`);
+              break;
+            }
+          }
+        }
+      }
+      // ROUTING-ONLY groups: no round-1 requirement (option (e)); interior gaps deferred to the
+      // V6-§3 run-time terminus. Retry-round uniqueness (above) still applies.
+    }
+  }
+
+  // Rules 8–9: submodules_per_step ↔ card_definitions consistency
+  const sps = executionPlan.submodules_per_step;
+  if (sps && typeof sps === 'object' && !Array.isArray(sps)) {
+    for (const [stepKey, entries] of Object.entries(sps)) {
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        if (typeof entry !== 'string' || !UUID_REGEX.test(entry)) continue; // legacy string entries untouched
+        const card = hasCards ? cardDefs[entry] : undefined;
+        if (!card) {                                                    // 8
+          errors.push(`submodules_per_step["${stepKey}"]: card_id ${entry} not found in card_definitions`);
+        } else if (Number.isInteger(card.step) && card.step !== Number(stepKey)) { // 9
+          errors.push(`submodules_per_step["${stepKey}"]: card ${entry} has step ${card.step}, does not match placement step ${stepKey}`);
+        }
+      }
+    }
+  }
+
+  // Rules 10–11: routing_rules integrity
+  const rr = executionPlan.routing_rules;
+  if (rr && typeof rr === 'object' && !Array.isArray(rr)) {
+    for (const [ruleKey, targets] of Object.entries(rr)) {
+      if (!Array.isArray(targets)) {
+        // Gap close: the dead RoutingRulesSection's legacy {target_cards: [...]} object
+        // form must be rejected (the runtime reads each value as the target array directly).
+        errors.push(`routing_rules["${ruleKey}"]: must be an array of {step, card_id} targets (legacy {target_cards} object form is not supported)`);
+        continue;
+      }
+      for (const target of targets) {
+        const cid = target?.card_id;
+        if (!cid) {                                                     // routing target must name a card
+          errors.push(`routing_rules["${ruleKey}"]: target is missing card_id`);
+          continue;
+        }
+        const card = hasCards ? cardDefs[cid] : undefined;
+        if (!card) {                                                    // 10
+          errors.push(`routing_rules["${ruleKey}"]: card_id ${cid} not found in card_definitions`);
+        } else {
+          // Rule 11 (v6 scalar): a routing-referenced card must be a retry variant (round > 1),
+          // else routing to it can never escalate.
+          if (!(Number.isInteger(card.round) && card.round > 1)) {      // 11
+            errors.push(`routing_rules["${ruleKey}"]: card ${cid} has no round > 1 (routing can never escalate)`);
+          }
+        }
+      }
+    }
+  }
+
+  return { errors, warnings };
+}
+
 /**
  * Detect whether an execution_plan uses card_definitions (new format)
  * or only string-keyed `cards` (legacy format).
@@ -102,4 +326,80 @@ export function detectExecutionPlanFormat(executionPlan) {
     return 'legacy';
   }
   return 'empty';
+}
+
+/**
+ * mergeCardWorkFromSourcePlan — from-run "item 3" fix (pure).
+ *
+ * The from-run handler (templates.js POST /from-run/:runId) rebuilds submodules_per_step from
+ * run_submodule_config (submodule-id STRINGS) and drops everything else the source template's
+ * execution_plan carried. This helper merges that dropped card work + structural config from the
+ * SOURCE template plan back into the rebuilt TARGET plan:
+ *   • carries card_definitions, routing_rules, escalation_rules, skip_steps, failure_thresholds
+ *   • NEVER re-emits the legacy `cards` key
+ *   • reconciles submodules_per_step: restores placed card UUIDs (source running order), drops
+ *     dangling UUIDs (not in carried card_definitions), keeps still-present strings, appends new
+ *     target strings (B046 order), and dedupes a restored card's own submodule-id string (no
+ *     double-run of the card + its plain submodule)
+ *   • gates the merged output through the SAME §9 validator as the PUT save path
+ *
+ * B046 order semantics are unchanged for non-card (string) entries: preserved strings keep source
+ * order; genuinely-new strings keep the target's (already-B046-sorted) order.
+ *
+ * @param {object} targetPlan   the from-run-rebuilt plan (submodules_per_step of strings)
+ * @param {object} sourcePlan   the source template's execution_plan
+ * @param {object} deps
+ * @param {(id:string)=>boolean} [deps.isRegisteredSubmodule]  same registry the PUT handler injects
+ * @returns {{ executionPlan: object, errors: string[] }}
+ */
+export function mergeCardWorkFromSourcePlan(targetPlan, sourcePlan, { isRegisteredSubmodule } = {}) {
+  const target = (targetPlan && typeof targetPlan === 'object' && !Array.isArray(targetPlan)) ? targetPlan : {};
+  const source = (sourcePlan && typeof sourcePlan === 'object' && !Array.isArray(sourcePlan)) ? sourcePlan : {};
+
+  // Start from target (keeps its submodules_per_step + any unknown/forward-compat keys). `cards` is
+  // intentionally never copied from source.
+  const merged = { ...target };
+  // Deep-copy carried source fields so the returned plan never aliases the (persisted, possibly
+  // reused) source plan — a caller mutating the output can't corrupt the source template.
+  for (const key of ['card_definitions', 'routing_rules', 'escalation_rules', 'skip_steps', 'failure_thresholds']) {
+    if (source[key] !== undefined) merged[key] = structuredClone(source[key]);
+  }
+
+  const cardDefs = (source.card_definitions && typeof source.card_definitions === 'object' && !Array.isArray(source.card_definitions))
+    ? source.card_definitions : {};
+
+  const srcSps = (source.submodules_per_step && typeof source.submodules_per_step === 'object' && !Array.isArray(source.submodules_per_step)) ? source.submodules_per_step : {};
+  const tgtSps = (target.submodules_per_step && typeof target.submodules_per_step === 'object' && !Array.isArray(target.submodules_per_step)) ? target.submodules_per_step : {};
+  const reconciled = {};
+  for (const stepKey of new Set([...Object.keys(srcSps), ...Object.keys(tgtSps)])) {
+    const sourceEntries = Array.isArray(srcSps[stepKey]) ? srcSps[stepKey] : [];
+    const targetStrings = Array.isArray(tgtSps[stepKey]) ? tgtSps[stepKey] : [];
+    const targetSet = new Set(targetStrings);
+    const out = [];
+    const seen = new Set();
+    const restoredSubmoduleIds = new Set();
+    // 1. Walk source in running order: keep placed cards (in defs) + still-present strings.
+    for (const entry of sourceEntries) {
+      if (typeof entry !== 'string' || seen.has(entry)) continue;
+      if (UUID_REGEX.test(entry)) {
+        const card = cardDefs[entry];
+        if (card) {                                   // placed card resolves → keep in running order
+          out.push(entry); seen.add(entry);
+          if (card.submodule_id) restoredSubmoduleIds.add(card.submodule_id);
+        }                                             // else: dangling UUID → drop
+      } else if (targetSet.has(entry)) {
+        out.push(entry); seen.add(entry);             // still-configured string → keep, source order
+      }                                               // else: string removed in the run → drop
+    }
+    // 2. Append genuinely-new target strings (B046 order), minus any already placed OR superseded
+    //    by a restored card's own submodule-id (avoids double-running the card + its plain entry).
+    for (const s of targetStrings) {
+      if (!seen.has(s) && !restoredSubmoduleIds.has(s)) { out.push(s); seen.add(s); }
+    }
+    reconciled[stepKey] = out;
+  }
+  merged.submodules_per_step = reconciled;
+
+  const { errors } = validateExecutionPlan(merged, { isRegisteredSubmodule });
+  return { executionPlan: merged, errors };
 }

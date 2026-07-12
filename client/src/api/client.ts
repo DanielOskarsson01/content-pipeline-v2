@@ -39,10 +39,21 @@ export async function apiFetch<T>(
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `HTTP ${response.status}`);
+    // Preserve the server's structured details (e.g. §9 validation details[]) + status on the Error
+    // so callers can surface them inline; the global toast still reads `.message`.
+    const err = new Error(errorData.error || `HTTP ${response.status}`) as ApiError;
+    if (Array.isArray(errorData.details)) err.details = errorData.details;
+    err.status = response.status;
+    throw err;
   }
 
   return response.json();
+}
+
+/** Error thrown by apiFetch on a non-2xx response, carrying the server's structured extras. */
+export interface ApiError extends Error {
+  details?: string[];
+  status?: number;
 }
 
 // API methods

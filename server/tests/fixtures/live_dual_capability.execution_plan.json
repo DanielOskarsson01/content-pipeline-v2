@@ -1,0 +1,44 @@
+{
+  "_fixture_doc": {
+    "purpose": "LIVE END-TO-END sibling of dual_capability.execution_plan.json (seam fixture, 43584f9). Same two flagship capabilities (A: placed round-1 override merge via card_id; B: V6-§1.5 different-submodule dispatch), but built to run against REAL modules on a throwaway Supabase branch with only the LLM provider stubbed. The seam fixture is UNTOUCHED — this is a separate file for the live gate.",
+    "why_module_differs_from_seam_fixture": "The seam fixture (43584f9) names 'deep-research-writer' as capability B's different/unplaced round-2 submodule. That submodule has NO code in content-pipeline-modules-v2 (verified: no dir, no manifest) — the seam test faked it with a string registry, which is legal in-memory. The LIVE gate stubs at the PROVIDER boundary so real module code must load and execute; a phantom module would fail at module load and never write the round-2 row that capability B's assertion requires. So this live fixture swaps card B's submodule_id to 'tone-seo-editor' — a REAL step-5 generation module (execute.js present, item_key entity_name, LLM-backed → stub-compatible). Capability B's LOAD-BEARING property is different + unplaced (∉ submodules_per_step) + round>1 + dispatched → real entity_submodule_run row → pooled output read by next-QA. The module's NAME was never the property; the shape is fully preserved (Daniel decision, this session).",
+    "capability_A": "Card A (content-writer, round 1) is PLACED in submodules_per_step[5] by its UUID, carrying flat `overrides`. On the FIRST pass its overrides merge via forwarded card_id (autoExecutor → expandCardGroups → submoduleRuns merge). Assert: _cap_a_marker + model=haiku appear in the ACTUAL entity_submodule_runs.options JSONB written by the batch worker.",
+    "capability_B": "Card B (tone-seo-editor, round 2) exists ONLY as a routing-only round-2 card — NOT in submodules_per_step — targeted by the citation:fail routing rule, distinct card_id. On QA citation:fail its pending instruction is collected by the WF-1 unplaced dispatch pass (collectUnplacedDispatchGroups) and the DIFFERENT submodule ACTUALLY EXECUTES with its round-2 overrides + advanced loop_iteration. Assert: a REAL entity_submodule_runs row for tone-seo-editor (card ...0b02, loop_iteration 1), and its pooled output is what the next QA physically reads.",
+    "overflow_tail": "Only round 2 is authored for tone-seo-editor. At loop_count 1 (selection round 3) resolveCards returns no_card_for_round → applyRouting sets terminal_state='flagged' (flag-and-continue, V6-§3); entity continues to steps 8/9. Assert in the DB, not memory."
+  },
+  "_live_note": "submodules_per_step adds step 6 (citation-coverage-checker QA) + step 7 (loop-router) beyond the seam fixture — the live routing loop needs them to physically run (QA fail → loop-router decision → applyRouting). tone-seo-editor (card B) stays OUT of submodules_per_step: its 'unplaced/routing-only' property is preserved.",
+  "submodules_per_step": {
+    "5": ["d1a1c0de-0001-4001-8001-000000000a01"],
+    "6": ["citation-coverage-checker"],
+    "7": ["loop-router"]
+  },
+  "card_definitions": {
+    "d1a1c0de-0001-4001-8001-000000000a01": {
+      "submodule_id": "content-writer",
+      "card_name": "cap-A placed round-1 (cheap generator)",
+      "step": 5,
+      "round": 1,
+      "overrides": {
+        "model": "haiku",
+        "temperature": 0.7,
+        "_cap_a_marker": "placed-round-1-override-merged-on-first-pass"
+      }
+    },
+    "d1a1c0de-0002-4002-8002-000000000b02": {
+      "submodule_id": "tone-seo-editor",
+      "card_name": "cap-B routing-only round-2 (different, real, unplaced submodule)",
+      "step": 5,
+      "round": 2,
+      "overrides": {
+        "model": "sonnet",
+        "temperature": 0.4,
+        "_cap_b_marker": "unplaced-round-2-different-submodule-dispatched"
+      }
+    }
+  },
+  "routing_rules": {
+    "citation:fail": [
+      { "step": 5, "card_id": "d1a1c0de-0002-4002-8002-000000000b02" }
+    ]
+  }
+}

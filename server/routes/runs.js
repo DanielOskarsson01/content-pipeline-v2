@@ -1205,8 +1205,11 @@ router.post('/:runId/auto-execute', async (req, res, next) => {
       pauseAfterSubmodules: executionPlan.pause_after_submodules || [],
       submodulesPerStep,
       // Multi-Card Pattern: UUID-keyed card_definitions feed autoExecutor's
-      // expandCardGroups + the card.rounds[N] options merge in submoduleRuns.js.
+      // expandCardGroups + the card override merge in submoduleRuns.js.
       cardDefinitions: executionPlan.card_definitions || {},
+      // v6 WF-1 (V6-§1.5): routing_rules feeds INV-DISPATCH-ORDER in the
+      // unplaced routing-only dispatch pass (collectUnplacedDispatchGroups).
+      routingRules: executionPlan.routing_rules || {},
       failure_thresholds: { ...(executionPlan.failure_thresholds || {}), ...(req.body?.failure_thresholds || {}) },
       escalationRules: executionPlan.escalation_rules || {},
     };
@@ -1282,6 +1285,8 @@ router.post('/:runId/auto-execute/resume', async (req, res, next) => {
       pauseAfterSubmodules: executionPlan.pause_after_submodules || [],
       submodulesPerStep: executionPlan.submodules_per_step || {},
       cardDefinitions: executionPlan.card_definitions || {},
+      // v6 WF-1 (V6-§1.5): routing_rules feeds INV-DISPATCH-ORDER (see auto-execute start).
+      routingRules: executionPlan.routing_rules || {},
       failure_thresholds: mergedThresholds,
       escalationRules: executionPlan.escalation_rules || {},
     };

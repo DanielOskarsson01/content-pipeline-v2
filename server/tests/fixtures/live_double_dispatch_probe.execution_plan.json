@@ -1,0 +1,43 @@
+{
+  "_fixture_doc": {
+    "purpose": "LIVE D-PROBE for the cardGroups.js:202 type-mismatch. A round-1 card is PLACED in submodules_per_step BY ITS UUID on submodule X (content-writer); a routing-only round-2 card targets the SAME submodule X. On QA citation:fail the round-2 instruction is written for X. The probe: does X execute EXACTLY ONCE at round 2, or TWICE (double-dispatch)?",
+    "the_defect_under_test": "collectUnplacedDispatchGroups (cardGroups.js:202) skips a pending instruction when `placed.has(p.submodule_id)`. `placed` is the Set of raw submodules_per_step ENTRIES — here the round-1 card's UUID, NOT the string 'content-writer'. So placed.has('content-writer') is FALSE, and the round-2 instruction for X is treated as UNPLACED → dispatched by the WF-1 pass. Meanwhile the PLACED loop's expandCardGroups ALSO matches it (p.submodule_id === submoduleId at cardGroups.js:94) → a second dispatch. If both fire and nothing dedups at the row layer, X runs TWICE at round 2.",
+    "verdict_rule": "Count entity_submodule_runs rows for content-writer at round 2 (loop_iteration 1) for the failing entity. TWO rows ⇒ live :202 defect CONFIRMED — capture both rows verbatim, STOP AND REPORT (Daniel decides the fix before any flip). ONE row ⇒ report WHICH mechanism deduped (checkExistingSubmoduleRun key? the card_id-inclusive unique index on entity_submodule_runs from the 2026-06-03 Multi-Card migration?) with evidence — 'worked by coincidence' vs 'worked by design' matters for the manifest.",
+    "X": "content-writer — a REAL step-5 module (same submodule on both rounds; the point is SAME submodule, placed-by-UUID + routing-only-round-2, which is what trips the :202 name/uuid type mismatch)."
+  },
+  "_live_note": "step 6 (citation-coverage-checker) + step 7 (loop-router) added so the live QA→routing loop runs and writes the round-2 instruction for X. The round-2 card (…c02) stays OUT of submodules_per_step (routing-only) — that plus the round-1 card placed BY UUID at step 5 is what trips cardGroups.js:202.",
+  "submodules_per_step": {
+    "5": ["d2b2c0de-0001-4001-8001-000000000c01"],
+    "6": ["citation-coverage-checker"],
+    "7": ["loop-router"]
+  },
+  "card_definitions": {
+    "d2b2c0de-0001-4001-8001-000000000c01": {
+      "submodule_id": "content-writer",
+      "card_name": "D-probe round-1 placed-by-UUID on X",
+      "step": 5,
+      "round": 1,
+      "overrides": {
+        "model": "haiku",
+        "temperature": 0.7,
+        "_dprobe_marker": "round-1-placed-by-uuid"
+      }
+    },
+    "d2b2c0de-0002-4002-8002-000000000c02": {
+      "submodule_id": "content-writer",
+      "card_name": "D-probe routing-only round-2 on SAME X",
+      "step": 5,
+      "round": 2,
+      "overrides": {
+        "model": "sonnet",
+        "temperature": 0.4,
+        "_dprobe_marker": "round-2-routing-only-same-submodule"
+      }
+    }
+  },
+  "routing_rules": {
+    "citation:fail": [
+      { "step": 5, "card_id": "d2b2c0de-0002-4002-8002-000000000c02" }
+    ]
+  }
+}

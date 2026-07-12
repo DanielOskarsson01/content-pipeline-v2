@@ -158,13 +158,16 @@ function buildMockDb({ tables = {}, rpcOverrides = {} } = {}) {
 const CARD_A_ID = 'card-A-uuid';
 const CARD_B_ID = 'card-B-uuid';
 
+// Canonical execution_plan (post-be07509): card_definitions (not `cards`) and
+// routing_rules[key] = [{ step, card_id }] (not `{ target_cards: [...] }`).
 function buildExecutionPlan({
-  cardA = { submodule_id: 'pse', step: 5, rounds: { '1': {}, '2': { _marker: 'A-R2' } } },
-  cardB = { submodule_id: 'writer', step: 5, rounds: { '1': {}, '2': { _marker: 'B-R2' } } },
-  rules = { 'citation:fail': { target_cards: [CARD_A_ID] } },
+  // v6 scalar cards: round-2 retry variants (round===1 would be a placed first-pass card).
+  cardA = { card_name: 'card-A', submodule_id: 'pse', step: 5, round: 2, overrides: { _marker: 'A-R2' } },
+  cardB = { card_name: 'card-B', submodule_id: 'writer', step: 5, round: 2, overrides: { _marker: 'B-R2' } },
+  rules = { 'citation:fail': [{ step: 5, card_id: CARD_A_ID }] },
 } = {}) {
   return {
-    cards: {
+    card_definitions: {
       [CARD_A_ID]: cardA,
       [CARD_B_ID]: cardB,
     },
@@ -215,42 +218,50 @@ await (async function group1_happyPath() {
 })();
 
 // ===========================================================================
-// Group 2 — card_round contract: exhausted card → markSkipped, not write
+// Group 2 — T-OVERFLOW (GEM-2 / V6-§3): no card for the entity's round → FLAG-and-CONTINUE
+// (Replaces the pre-v6 "exhausted card → markSkipped → failed" behavior: v6 deletes
+//  the exhaustion/markSkipped machinery and flag-and-continues instead of failing.)
 // ===========================================================================
-console.log('\n--- Group 2: card_round contract (exhausted card → markSkipped) ---');
+console.log("\n--- Group 2: T-OVERFLOW (GEM-2 / V6-§3) — no card for the entity's round → FLAG-and-CONTINUE ---");
 
-await (async function group2_exhaustedCardSkipped() {
-  // card-A only has rounds["1"]; nextRound=2 has no override → exhausted
-  const executionPlan = buildExecutionPlan({
-    cardA: { submodule_id: 'pse', step: 5, rounds: { '1': {} } }, // NO round 2
-  });
+await (async function group2_overflowFlagAndContinue() {
+  // Only a round-2 card exists (citation:fail → cardA, round 2). The entity is at
+  // loop_count=1 → INV-ROUND targetRound = 3 → no round-3 card → OVERFLOW.
+  // Per V6-§3: terminal_state='flagged', failure_reason='no_card_for_round'; the
+  // entity NEVER orphans, NEVER crashes the loop, NEVER is discarded, and continues
+  // (terminal_state IS NOT NULL → runs.js:494 forwards it to Step 8).
+  const executionPlan = buildExecutionPlan();
   const tables = {
     entity_submodule_runs: [buildRouterRun([
       { entity_name: 'Wazdan', decision: 'loop_generation', qa_scores: { citation: 'fail' } },
     ])],
     entity_run_meta: [
-      { entity_name: 'Wazdan', loop_count: 0, terminal_state: null, loop_config: {}, card_instructions: [] },
+      { entity_name: 'Wazdan', loop_count: 1, terminal_state: null, loop_config: {}, card_instructions: [] },
     ],
   };
+  let threw = false;
   const { db, capturedRpc, capturedUpdate } = buildMockDb({ tables });
-  await applyRouting(db, 'run-1', 10, executionPlan);
+  try {
+    await applyRouting(db, 'run-1', 10, executionPlan);
+  } catch { threw = true; }
+
+  assert(!threw, 'overflow NEVER crashes the routing loop');
 
   const writeCall = capturedRpc.find(r => r.name === 'append_card_instruction');
-  assert(writeCall === undefined, 'NO append_card_instruction call for exhausted-only entity');
+  assert(writeCall === undefined, 'NO instruction written on overflow (no card at the round)');
 
   const skipCall = capturedRpc.find(r => r.name === 'mark_card_instruction_skipped');
-  assert(skipCall !== undefined, 'mark_card_instruction_skipped called for exhausted card');
-  assert(skipCall?.args.p_skip_reason === 'rounds_exhausted', 'skip reason is rounds_exhausted');
-  assert(skipCall?.args.p_card_id === CARD_A_ID, 'skipped card_id is card-A');
-  assert(skipCall?.args.p_step === 5, 'skipped step matches card.step');
+  assert(skipCall === undefined, 'NO markSkipped on overflow (the pre-v6 exhaustion machinery is gone)');
 
-  // All active cards exhausted → terminal_state='failed' with reason='rounds_exhausted'
-  const terminalUpdate = capturedUpdate.find(u =>
+  const flaggedUpdate = capturedUpdate.find(u =>
     u.table === 'entity_run_meta' &&
-    u.patch?.terminal_state === 'failed' &&
-    u.patch?.failure_reason === 'rounds_exhausted'
+    u.patch?.terminal_state === 'flagged' &&
+    u.patch?.failure_reason === 'no_card_for_round'
   );
-  assert(terminalUpdate !== undefined, 'entity_run_meta.terminal_state=failed, failure_reason=rounds_exhausted');
+  assert(flaggedUpdate !== undefined, "overflow → terminal_state='flagged', failure_reason='no_card_for_round' (flag-and-continue)");
+
+  const failedUpdate = capturedUpdate.find(u => u.patch?.terminal_state === 'failed');
+  assert(failedUpdate === undefined, 'overflow is FLAGGED, never failed — content may still be publishable; never discard');
 })();
 
 // ===========================================================================
@@ -378,110 +389,106 @@ await (async function group4_maxLoopsBackstop() {
       { entity_name: 'Wazdan', loop_count: 3, terminal_state: null, loop_config: {}, card_instructions: [] },
     ],
   };
-  const { db, capturedRpc } = buildMockDb({ tables });
+  const { db, capturedRpc, capturedUpdate } = buildMockDb({ tables });
   await applyRouting(db, 'run-1', 10, executionPlan);
 
   const writeCall = capturedRpc.find(r => r.name === 'append_card_instruction');
   assert(writeCall === undefined, 'NO instruction written when loop_count >= MAX_LOOPS');
+
+  // WF-2: max_loops_exceeded is an escalation-overflow class → FLAG-and-CONTINUE
+  // (was 'failed' pre-2.5). At loop_count >= MAX_LOOPS the backstop OWNS the terminus,
+  // so the loop-ceiling reason wins over the round-overflow reason.
+  const flaggedUpdate = capturedUpdate.find(u =>
+    u.patch?.terminal_state === 'flagged' && u.patch?.failure_reason === 'max_loops_exceeded');
+  assert(flaggedUpdate !== undefined, "max_loops backstop → terminal_state='flagged', failure_reason='max_loops_exceeded' (WF-2)");
 })();
 
 // ===========================================================================
-// Group 5 — rounds_exhausted (partial): one exhausted, one available
+// Group 5 — INV-ROUND ladder selection: loop_count picks exactly ONE rung
+// (Replaces the pre-v6 consumed-rounds "partial exhaustion" walk: round selection
+//  is now driven by loop_count, not by consumed-round tracking.)
 // ===========================================================================
-console.log('\n--- Group 5: rounds_exhausted partial (skip A, write B) ---');
+console.log('\n--- Group 5: INV-ROUND ladder selection (loop_count picks one rung; card_round = card.round) ---');
 
-await (async function group5_partialExhaustion() {
-  // card-A has rounds 1,2,3 but consumed = [2,3] so nextRound=4 → no rounds["4"] → exhausted
-  // card-B has rounds 1,2 and consumed = [] so nextRound=2 → write target
-  const executionPlan = buildExecutionPlan({
-    cardA: { submodule_id: 'pse', step: 5, rounds: { '1': {}, '2': {}, '3': {} } },
-    cardB: { submodule_id: 'writer', step: 5, rounds: { '1': {}, '2': { _marker: 'B-R2' } } },
-    rules: {
-      'citation:fail':     { target_cards: [CARD_A_ID] },
-      'hallucination:fail': { target_cards: [CARD_B_ID] },
+await (async function group5_ladderSelection() {
+  // citation:fail routes to a same-submodule ladder: cardA(round 2) + cardA3(round 3).
+  // At loop_count=1 → targetRound=3 → ONLY the round-3 rung is selected/written; the
+  // round-2 rung is neither selected nor markSkipped (no exhaustion machinery in v6).
+  const CARD_A3_ID = 'card-A3-uuid';
+  const executionPlan = {
+    card_definitions: {
+      [CARD_A_ID]:  { card_name: 'card-A',  submodule_id: 'pse', step: 5, round: 2, overrides: {} },
+      [CARD_A3_ID]: { card_name: 'card-A3', submodule_id: 'pse', step: 5, round: 3, overrides: { _marker: 'A-R3' } },
     },
-  });
-  // entity_run_meta has card_instructions showing card-A rounds 2 + 3 already consumed
-  const consumed_history = [{
-    routing_round: 1,
-    targets: [
-      { step: 5, card_id: CARD_A_ID, status: 'consumed', loop_iteration: 1, card_round: 2 },
-      { step: 5, card_id: CARD_A_ID, status: 'consumed', loop_iteration: 2, card_round: 3 },
-    ],
-  }];
+    routing_rules: {
+      'citation:fail': [
+        { step: 5, card_id: CARD_A_ID },   // round 2
+        { step: 5, card_id: CARD_A3_ID },  // round 3
+      ],
+    },
+  };
   const tables = {
     entity_submodule_runs: [buildRouterRun([
-      { entity_name: 'Wazdan', decision: 'loop_generation',
-        qa_scores: { citation: 'fail', hallucination: 'fail' } },
+      { entity_name: 'Wazdan', decision: 'loop_generation', qa_scores: { citation: 'fail' } },
     ])],
     entity_run_meta: [
-      { entity_name: 'Wazdan', loop_count: 2, terminal_state: null, loop_config: {},
-        card_instructions: consumed_history },
+      { entity_name: 'Wazdan', loop_count: 1, terminal_state: null, loop_config: {}, card_instructions: [] },
     ],
   };
   const { db, capturedRpc } = buildMockDb({ tables });
   await applyRouting(db, 'run-1', 10, executionPlan);
 
-  const skipCalls = capturedRpc.filter(r => r.name === 'mark_card_instruction_skipped');
-  const skippedCardA = skipCalls.find(c => c.args.p_card_id === CARD_A_ID);
-  assert(skippedCardA !== undefined, 'card-A markSkipped called (exhausted)');
-  assert(skippedCardA?.args.p_skip_reason === 'rounds_exhausted', 'card-A reason: rounds_exhausted');
-
   const writeCalls = capturedRpc.filter(r => r.name === 'append_card_instruction');
-  assert(writeCalls.length === 1, 'one writeInstructions call (for the remaining card-B)');
+  assert(writeCalls.length === 1, 'exactly one write (one rung selected per pass)');
   const targets = writeCalls[0]?.args.p_instruction.targets || [];
   assert(targets.length === 1, 'one target written');
-  assert(targets[0]?.card_id === CARD_B_ID, 'target is card-B');
-  assert(targets[0]?.card_round === 2, 'card_round = 2 (B has rounds[2])');
+  assert(targets[0]?.card_id === CARD_A3_ID, 'the ROUND-3 rung is selected at loop_count=1 (INV-ROUND), NOT round 2');
+  assert(targets[0]?.card_round === 3, 'card_round === 3 (FIXED = selected card.round; no walk)');
+
+  const skipCall = capturedRpc.find(r => r.name === 'mark_card_instruction_skipped');
+  assert(skipCall === undefined, 'the non-selected round-2 rung is NOT markSkipped (v6 has no exhaustion machinery)');
 })();
 
 // ===========================================================================
-// Group 6 — ALL active cards exhausted → terminal_state=failed
+// Group 6 — CORRUPTION: rule targets an absent card → terminal_state=failed (NOT flagged)
+// (WF-2: corruption must never read as "publishable, needs review".)
 // ===========================================================================
-console.log('\n--- Group 6: ALL cards exhausted → terminal_state=failed ---');
+console.log('\n--- Group 6: CORRUPTION (absent card) → terminal_state=failed/card_not_in_definitions (NOT flagged) ---');
 
-await (async function group6_allExhausted() {
-  // Both cards have rounds 1, 2 only. Consumed history shows both already at round 2.
-  const executionPlan = buildExecutionPlan({
-    cardA: { submodule_id: 'pse', step: 5, rounds: { '1': {}, '2': {} } },
-    cardB: { submodule_id: 'writer', step: 5, rounds: { '1': {}, '2': {} } },
-    rules: {
-      'citation:fail':     { target_cards: [CARD_A_ID] },
-      'hallucination:fail': { target_cards: [CARD_B_ID] },
+await (async function group6_corruptionFailed() {
+  // A routing rule targets a card_id absent from card_definitions (corrupt reference).
+  // Per WF-2 this is 'failed'/'card_not_in_definitions' — distinct from overflow's 'flagged'.
+  const executionPlan = {
+    card_definitions: {
+      [CARD_A_ID]: { card_name: 'card-A', submodule_id: 'pse', step: 5, round: 2, overrides: {} },
     },
-  });
-  const consumed_history = [{
-    routing_round: 1,
-    targets: [
-      { step: 5, card_id: CARD_A_ID, status: 'consumed', loop_iteration: 1, card_round: 2 },
-      { step: 5, card_id: CARD_B_ID, status: 'consumed', loop_iteration: 1, card_round: 2 },
-    ],
-  }];
+    routing_rules: {
+      'citation:fail': [{ step: 5, card_id: 'ffffffff-0000-0000-0000-000000000000' }], // absent
+    },
+  };
   const tables = {
     entity_submodule_runs: [buildRouterRun([
-      { entity_name: 'Wazdan', decision: 'loop_generation',
-        qa_scores: { citation: 'fail', hallucination: 'fail' } },
+      { entity_name: 'Wazdan', decision: 'loop_generation', qa_scores: { citation: 'fail' } },
     ])],
     entity_run_meta: [
-      { entity_name: 'Wazdan', loop_count: 1, terminal_state: null, loop_config: {},
-        card_instructions: consumed_history },
+      { entity_name: 'Wazdan', loop_count: 0, terminal_state: null, loop_config: {}, card_instructions: [] },
     ],
   };
   const { db, capturedRpc, capturedUpdate } = buildMockDb({ tables });
   await applyRouting(db, 'run-1', 10, executionPlan);
 
-  const skipCalls = capturedRpc.filter(r => r.name === 'mark_card_instruction_skipped');
-  assert(skipCalls.length === 2, 'markSkipped called for both exhausted (step, card) pairs');
-
   const writeCall = capturedRpc.find(r => r.name === 'append_card_instruction');
-  assert(writeCall === undefined, 'NO writeInstructions call (all cards exhausted)');
+  assert(writeCall === undefined, 'NO instruction written for a corrupt card reference');
 
-  const terminalUpdate = capturedUpdate.find(u =>
+  const failedUpdate = capturedUpdate.find(u =>
     u.table === 'entity_run_meta' &&
     u.patch?.terminal_state === 'failed' &&
-    u.patch?.failure_reason === 'rounds_exhausted'
+    u.patch?.failure_reason === 'card_not_in_definitions'
   );
-  assert(terminalUpdate !== undefined, 'entity_run_meta.terminal_state=failed, failure_reason=rounds_exhausted');
+  assert(failedUpdate !== undefined, "corruption → terminal_state='failed', failure_reason='card_not_in_definitions'");
+
+  const flaggedUpdate = capturedUpdate.find(u => u.patch?.terminal_state === 'flagged');
+  assert(flaggedUpdate === undefined, 'corruption is NOT flagged (must not read as publishable-needs-review)');
 })();
 
 // ===========================================================================
@@ -612,9 +619,9 @@ console.log('\n--- Group 9: validateCards cardId-step-uniqueness warning ---');
 
 await (async function group9_crossStepWarning() {
   const executionPlan = {
-    cards: {
-      'shared-card': { submodule_id: 'pse', step: 1 },
-      'other-card':  { submodule_id: 'writer', step: 5 },
+    card_definitions: {
+      'shared-card': { card_name: 'shared-card', submodule_id: 'pse', step: 1 },
+      'other-card':  { card_name: 'other-card', submodule_id: 'writer', step: 5 },
     },
     routing_rules: {},
   };
@@ -754,6 +761,66 @@ await (async function group10c_mixedApproveAndRouted() {
   assert(result.approved_count === 1, 'mixed: approved_count === 1');
   const approvedUpdate = capturedUpdate.find(u => u.patch?.terminal_state === 'approved' && u.eqs.some(e => e.col === 'entity_name' && e.val === 'Approved1'));
   assert(approvedUpdate !== undefined, 'mixed: approved entity still gets terminal_state=approved');
+})();
+
+// ===========================================================================
+// Group 11 — MULTI-ENTITY CONCURRENT routing (BC2-3): pre-bump snapshot, no
+// cross-entity contamination.
+//
+// FLOOR, not a proof (W8). This exercises the per-entity round partition + the
+// PRE-BUMP loop_count snapshot invariant deterministically: N entities route in
+// ONE applyRouting pass, each at a DIFFERENT loop_count, and each must select its
+// OWN round (INV-ROUND = loop_count+2) from the snapshot read once at
+// applyRouting (:400-402) — never another entity's round.
+//
+// What it does NOT prove (remains for the live pre-deploy T-CONCURRENCY, 3.x):
+// real DB-level concurrent transactions, interleaved atomic loop_count RPC bumps
+// across passes, and row-lock ordering under genuine parallelism. autoExecutor
+// has no functional test harness today; this floor is a mock-db unit test.
+// ===========================================================================
+console.log('\n--- Group 11: MULTI-ENTITY CONCURRENT routing (BC2-3) — pre-bump snapshot, no cross-contamination [FLOOR] ---');
+
+await (async function group11_concurrentRouting() {
+  const CARD_R2 = 'card-r2-uuid', CARD_R3 = 'card-r3-uuid', CARD_R4 = 'card-r4-uuid';
+  const executionPlan = {
+    card_definitions: {
+      [CARD_R2]: { card_name: 'r2', submodule_id: 'writer', step: 5, round: 2, overrides: {} },
+      [CARD_R3]: { card_name: 'r3', submodule_id: 'writer', step: 5, round: 3, overrides: {} },
+      [CARD_R4]: { card_name: 'r4', submodule_id: 'writer', step: 5, round: 4, overrides: {} },
+    },
+    routing_rules: {
+      'citation:fail': [
+        { step: 5, card_id: CARD_R2 },
+        { step: 5, card_id: CARD_R3 },
+        { step: 5, card_id: CARD_R4 },
+      ],
+    },
+  };
+  // E0@loop0 → round2, E1@loop1 → round3, E2@loop2 → round4 (all fail the same check).
+  const tables = {
+    entity_submodule_runs: [buildRouterRun([
+      { entity_name: 'E0', decision: 'loop_generation', qa_scores: { citation: 'fail' } },
+      { entity_name: 'E1', decision: 'loop_generation', qa_scores: { citation: 'fail' } },
+      { entity_name: 'E2', decision: 'loop_generation', qa_scores: { citation: 'fail' } },
+    ])],
+    entity_run_meta: [
+      { entity_name: 'E0', loop_count: 0, terminal_state: null, loop_config: {}, card_instructions: [] },
+      { entity_name: 'E1', loop_count: 1, terminal_state: null, loop_config: {}, card_instructions: [] },
+      { entity_name: 'E2', loop_count: 2, terminal_state: null, loop_config: {}, card_instructions: [] },
+    ],
+  };
+  const { db, capturedRpc } = buildMockDb({ tables });
+  await applyRouting(db, 'run-1', 10, executionPlan);
+
+  const writes = capturedRpc.filter(r => r.name === 'append_card_instruction');
+  const cardFor = (name) => writes.find(x => x.args.p_entity_name === name)?.args.p_instruction.targets?.[0]?.card_id;
+
+  assert(cardFor('E0') === CARD_R2, 'E0 (loop_count 0) → round-2 card (its OWN pre-bump snapshot)');
+  assert(cardFor('E1') === CARD_R3, 'E1 (loop_count 1) → round-3 card (no contamination from E0/E2)');
+  assert(cardFor('E2') === CARD_R4, 'E2 (loop_count 2) → round-4 card');
+  assert(writes.length === 3, 'exactly three writes — one per entity, no orphaned/duplicated instruction');
+  const rounds = writes.map(w => w.args.p_instruction.targets?.[0]?.card_round).sort();
+  assert(JSON.stringify(rounds) === JSON.stringify([2, 3, 4]), 'the three selected rounds are exactly {2,3,4} — no cross-assignment');
 })();
 
 // ---------------------------------------------------------------------------

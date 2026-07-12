@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Template Editor — visual reference (existing UI) for the card-UI design pass</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background:#f9fafb; color:#111827; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; -webkit-font-smoothing:antialiased; }
+  /* annotation labels (NOT part of the app — they mark what Step 2 does) */
+  .anno { font: 600 10px/1.4 system-ui; letter-spacing:.03em; text-transform:uppercase; padding:2px 6px; border-radius:4px; }
+  .anno-target { background:#fee2e2; color:#b91c1c; }   /* repoint target */
+  .anno-gold   { background:#dcfce7; color:#15803d; }   /* gold pattern to extend */
+  .anno-keep   { background:#dbeafe; color:#1d4ed8; }   /* keep / out of scope */
+</style>
+</head>
+<body class="p-6">
+<div class="max-w-2xl mx-auto">
+
+  <p class="text-[11px] text-gray-500 mb-4 border border-gray-200 bg-white rounded-lg p-3">
+    <strong>Visual reference of the EXISTING template editor</strong> (reproduced with the app's exact Tailwind classes).
+    Coloured tags are annotations, not part of the app:
+    <span class="anno anno-target">repoint target</span> = Step 2 rewrites ·
+    <span class="anno anno-gold">gold pattern</span> = extend its structure ·
+    <span class="anno anno-keep">keep</span> = leave unchanged.
+  </p>
+
+  <!-- Page title row -->
+  <div class="flex items-center justify-between mb-6">
+    <h2 class="text-lg font-semibold text-gray-900">Edit Template</h2>
+    <button class="text-sm text-gray-500 hover:text-gray-700">Back to Templates</button>
+  </div>
+
+  <!-- Name + Description -->
+  <div class="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+    <div class="space-y-3">
+      <div>
+        <label class="block text-xs text-gray-600 mb-1 font-medium">Name <span class="text-red-500">*</span></label>
+        <input type="text" value="Company Profiles — Standard" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500" />
+      </div>
+      <div>
+        <label class="block text-xs text-gray-600 mb-1 font-medium">Description</label>
+        <textarea rows="2" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-gray-900 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500">B2B iGaming company profiles.</textarea>
+      </div>
+      <button class="px-4 py-2 rounded-lg text-sm font-medium bg-sky-600 hover:bg-sky-700 text-white">Update</button>
+    </div>
+  </div>
+
+  <!-- Preset Map (GOLD: expandable entry hosting SubmoduleOptions) -->
+  <div class="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+    <h3 class="text-sm font-semibold text-gray-900 mb-3">Preset Map
+      <span class="text-gray-400 font-normal ml-1 text-xs">(2 submodules)</span>
+      <span class="anno anno-gold ml-2">gold pattern → a card row extends this</span>
+    </h3>
+    <div class="space-y-3">
+      <!-- collapsed entry -->
+      <div class="border border-gray-200 rounded-lg">
+        <div class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-gray-50">
+          <div>
+            <span class="text-xs font-medium text-gray-800">SEO Planner</span>
+            <span class="text-[10px] text-gray-400 ml-2">6 options</span>
+            <span class="text-[10px] text-sky-600 ml-2">preset: igaming</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <button class="text-[10px] text-gray-400 hover:text-red-500">Remove</button>
+            <span class="text-gray-400 text-xs">▶</span>
+          </div>
+        </div>
+      </div>
+      <!-- expanded entry (shows SubmoduleOptions inputs + dirty Save) -->
+      <div class="border border-gray-200 rounded-lg">
+        <div class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-gray-50">
+          <div>
+            <span class="text-xs font-medium text-gray-800">Content Writer</span>
+            <span class="text-[10px] text-gray-400 ml-2">5 options</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <button class="text-[10px] text-gray-400 hover:text-red-500">Remove</button>
+            <span class="text-gray-400 text-xs">▼</span>
+          </div>
+        </div>
+        <div class="border-t border-gray-200 px-3 py-2 space-y-2">
+          <!-- SubmoduleOptions render: select / number / boolean / textarea -->
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">Model</label>
+              <select class="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 text-sm focus:outline-none focus:border-[#0891B2]">
+                <option>haiku</option><option>sonnet</option><option>opus</option>
+              </select>
+              <p class="text-[10px] text-gray-400 mt-1">Which model writes the draft.</p>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">Temperature</label>
+              <input type="number" value="0.7" class="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 text-sm focus:outline-none focus:border-[#0891B2]" />
+              <p class="text-[10px] text-gray-400 mt-1">0.0–1.0 <span class="ml-1">(default 0.7)</span></p>
+            </div>
+            <label class="flex items-start gap-2 text-xs">
+              <input type="checkbox" checked class="mt-0.5 rounded border-gray-300 text-[#0891B2] focus:ring-[#0891B2]" />
+              <span class="text-gray-700">Citation required<span class="block text-[10px] text-gray-400 mt-0.5">Every claim cites a source.</span></span>
+            </label>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">Prompt</label>
+              <textarea rows="3" class="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 text-sm focus:outline-none focus:border-[#0891B2] resize-y">You are writing a B2B company profile…</textarea>
+            </div>
+          </div>
+          <button class="px-3 py-1 text-[10px] bg-sky-600 text-white rounded hover:bg-sky-700">Save Changes</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Execution Plan (GOLD: per-step chips + dropdown-add; checkboxes; threshold inputs) -->
+  <div class="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+    <h3 class="text-sm font-semibold text-gray-900 mb-3">Execution Plan
+      <span class="anno anno-gold ml-2">gold pattern → chips + “+ add…” = card add/place + routing targets</span>
+    </h3>
+    <p class="text-[10px] text-gray-400 mb-2">Select which submodules run at each step</p>
+    <div class="space-y-1 mb-4">
+      <div class="flex items-start gap-2 bg-gray-50 rounded px-3 py-1.5">
+        <span class="text-[10px] text-gray-500 font-medium w-28 shrink-0 pt-0.5">1. Discovery</span>
+        <div class="flex flex-wrap items-center gap-1 flex-1 min-w-0">
+          <span class="inline-flex items-center gap-0.5 text-[10px] bg-white border border-gray-200 rounded px-1.5 py-0.5 text-gray-600">Sitemap Parser<button class="text-gray-400 hover:text-red-500 ml-0.5">&times;</button></span>
+          <span class="inline-flex items-center gap-0.5 text-[10px] bg-white border border-gray-200 rounded px-1.5 py-0.5 text-gray-600">Page Links<button class="text-gray-400 hover:text-red-500 ml-0.5">&times;</button></span>
+          <span class="inline-flex items-center gap-1">
+            <select class="text-[10px] border border-gray-200 rounded px-1 py-0.5 text-gray-500 bg-white"><option>+ add…</option><option>Browser Crawler</option></select>
+          </span>
+        </div>
+      </div>
+      <div class="flex items-start gap-2 bg-gray-50 rounded px-3 py-1.5">
+        <span class="text-[10px] text-gray-500 font-medium w-28 shrink-0 pt-0.5">5. Generation</span>
+        <div class="flex flex-wrap items-center gap-1 flex-1 min-w-0">
+          <span class="inline-flex items-center gap-0.5 text-[10px] bg-white border border-gray-200 rounded px-1.5 py-0.5 text-gray-600">Content Writer<button class="text-gray-400 hover:text-red-500 ml-0.5">&times;</button></span>
+          <span class="inline-flex items-center gap-1">
+            <select class="text-[10px] border border-gray-200 rounded px-1 py-0.5 text-gray-500 bg-white"><option>+ add…</option></select>
+            <button class="text-[10px] px-1.5 py-0.5 bg-sky-600 text-white rounded hover:bg-sky-700">Add</button>
+          </span>
+        </div>
+      </div>
+    </div>
+    <div class="pt-3 border-t border-gray-100">
+      <h4 class="text-xs font-medium text-gray-700 mb-2">Pause after submodule</h4>
+      <div class="flex flex-wrap gap-1.5 mb-2">
+        <span class="inline-flex items-center gap-1 text-[10px] bg-blue-50 border border-blue-200 rounded px-2 py-0.5 text-blue-700">Content Writer<button class="text-blue-400 hover:text-red-500 ml-0.5">&times;</button></span>
+      </div>
+    </div>
+    <div class="mt-4 pt-3 border-t border-gray-100">
+      <h4 class="text-xs font-medium text-gray-700 mb-2">Skip steps</h4>
+      <div class="flex flex-wrap gap-3">
+        <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" class="accent-sky-600" /><span class="text-[10px] text-gray-600">Step 2</span></label>
+        <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" class="accent-sky-600" /><span class="text-[10px] text-gray-600">Step 4</span></label>
+      </div>
+    </div>
+    <div class="mt-4 pt-3 border-t border-gray-100">
+      <h4 class="text-xs font-medium text-gray-700 mb-2">Failure thresholds</h4>
+      <div class="space-y-1">
+        <div class="flex items-center gap-2">
+          <span class="text-[10px] text-gray-500 w-16 shrink-0">Step 5</span>
+          <input type="number" placeholder="default" class="w-24 bg-white border border-gray-200 rounded px-2 py-1 text-[10px] text-gray-700 focus:outline-none focus:ring-1 focus:ring-sky-500" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cards (REPOINT TARGET — currently a raw JSON textarea) -->
+  <div class="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+    <h3 class="text-sm font-semibold text-gray-900 mb-1">Cards
+      <span class="text-gray-400 font-normal ml-1 text-xs">(1 card)</span>
+      <span class="anno anno-target ml-2">repoint target → structured per-card editor (extend Preset Map row)</span>
+    </h3>
+    <p class="text-[10px] text-gray-400 mb-2">Named option overrides activated on routing loops. Each card targets a submodule at a specific step.</p>
+    <textarea rows="10" spellcheck="false" class="w-full bg-gray-50 border border-gray-200 rounded px-3 py-2 text-[11px] font-mono text-gray-700 focus:outline-none focus:ring-2 focus:ring-sky-500">{
+  "writer-v2": {
+    "submodule_id": "content-writer",
+    "step": 5,
+    "options_overrides": { "temperature": 0.3 }
+  }
+}  ← LEGACY shape (string-keyed, options_overrides). Runtime ignores it.</textarea>
+    <button class="mt-2 px-3 py-1.5 text-xs bg-sky-600 text-white rounded hover:bg-sky-700">Save Cards</button>
+  </div>
+
+  <!-- Routing Rules (REPOINT TARGET — raw JSON textarea + FAILURE_TYPES chips) -->
+  <div class="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+    <h3 class="text-sm font-semibold text-gray-900 mb-1">Routing Rules
+      <span class="text-gray-400 font-normal ml-1 text-xs">(1 rule)</span>
+      <span class="anno anno-target ml-2">repoint target → “&lt;check&gt;:fail → card(s)” mapper, array form</span>
+    </h3>
+    <p class="text-[10px] text-gray-400 mb-1">Map QA failure types to target cards. Available failure types:</p>
+    <div class="flex flex-wrap gap-1 mb-2">
+      <span class="text-[10px] bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5 text-gray-500 font-mono">hallucination:fail</span>
+      <span class="text-[10px] bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5 text-gray-500 font-mono">citation:fail</span>
+      <span class="text-[10px] bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5 text-gray-500 font-mono">keyword:fail</span>
+      <span class="text-[10px] bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5 text-gray-500 font-mono">meta:fail</span>
+      <span class="text-[10px] bg-gray-100 border border-gray-200 rounded px-1.5 py-0.5 text-gray-500 font-mono">structural:fail</span>
+    </div>
+    <textarea rows="6" spellcheck="false" class="w-full bg-gray-50 border border-gray-200 rounded px-3 py-2 text-[11px] font-mono text-gray-700 focus:outline-none focus:ring-2 focus:ring-sky-500">{
+  "citation:fail": { "target_cards": ["writer-v2"] }  ← LEGACY object form. Runtime wants [ {step,card_id} ].
+}</textarea>
+    <button class="mt-2 px-3 py-1.5 text-xs bg-sky-600 text-white rounded hover:bg-sky-700">Save Routing Rules</button>
+  </div>
+
+  <!-- Escalation Rules (KEEP) -->
+  <div class="bg-white border border-gray-200 rounded-lg p-4 mb-4">
+    <h3 class="text-sm font-semibold text-gray-900 mb-1">Escalation Rules
+      <span class="anno anno-keep ml-2">keep — live/correct, out of scope</span>
+    </h3>
+    <textarea rows="5" spellcheck="false" class="w-full bg-gray-50 border border-gray-200 rounded px-3 py-2 text-[11px] font-mono text-gray-700 focus:outline-none focus:ring-2 focus:ring-sky-500">{
+  "2": { "volume_threshold": 10, "fail_threshold": 3, "escalation_submodules": [] }
+}</textarea>
+  </div>
+
+</div>
+</body>
+</html>

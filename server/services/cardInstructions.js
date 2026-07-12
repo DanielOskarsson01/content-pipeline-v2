@@ -142,7 +142,11 @@ export async function findPendingInstructions(db, runId, entityName, stepIndex, 
             card_name: target.card_name,
             submodule_id: card.submodule_id,
             card_round: target.card_round,
-            round_overrides: card.rounds?.[String(target.card_round)] || {},
+            // v6 collapse (unit 2.5): a scalar card's flat `overrides` ARE this
+            // round's config; fall back to the legacy `rounds[N]` map for a
+            // not-yet-migrated card (30-april fixture, flipped in 2.7). Matches
+            // executionPlanUtils.resolveStepEntry:50. `rounds` removed at 3.1.
+            round_overrides: card.overrides ?? card.rounds?.[String(target.card_round)] ?? {},
             loop_iteration: target.loop_iteration,
             instruction_round: record.routing_round,
           });
@@ -214,7 +218,10 @@ export async function findPendingInstructionsForRun(db, runId, stepIndex, cardDe
               card_name: target.card_name,
               submodule_id: card.submodule_id,
               card_round: target.card_round,
-              round_overrides: card.rounds?.[String(target.card_round)] || {},
+              // v6 collapse (unit 2.5): prefer the scalar card's flat `overrides`;
+              // legacy `rounds[N]` map is the transition fallback (see :145 twin +
+              // executionPlanUtils.resolveStepEntry:50). `rounds` removed at 3.1.
+              round_overrides: card.overrides ?? card.rounds?.[String(target.card_round)] ?? {},
               loop_iteration: target.loop_iteration,
               instruction_round: record.routing_round,
             });
