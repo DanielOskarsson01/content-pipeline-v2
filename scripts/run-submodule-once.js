@@ -39,8 +39,8 @@ import { applyPromptOverride } from '../server/utils/promptOverrides.js';
 // Mirror of stageWorker.MODEL_MAP — keep in sync (adding a model is one line).
 const MODEL_MAP = {
   haiku: 'claude-haiku-4-5-20251001',
-  sonnet: 'claude-sonnet-4-5-20250929',
-  opus: 'claude-opus-4-6',
+  sonnet: 'claude-sonnet-5',
+  opus: 'claude-opus-4-8',
   'gpt-4o-mini': 'gpt-4o-mini',
   'gpt-4o': 'gpt-4o',
   sonar: 'sonar',
