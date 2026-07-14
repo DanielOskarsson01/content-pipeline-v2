@@ -33,7 +33,7 @@
  *     non-Anthropic generation path needs the same protection.
  *
  * @param {{items?:any[], meta?:object}} result  per-entity module result
- * @param {Array<{provider?:string, model?:string, tokens_in?:number, tokens_out?:number, stop_reason?:string}>} aiCalls
+ * @param {Array<{provider?:string, model?:string, tokens_in?:number, tokens_out?:number, cache_write_tokens?:number, cache_read_tokens?:number, stop_reason?:string}>} aiCalls
  * @returns {object} the same `result`, mutated
  */
 export function applyAiCallMeta(result, aiCalls) {
@@ -49,10 +49,18 @@ export function applyAiCallMeta(result, aiCalls) {
       model: c.model ?? null,
       tokens_in: c.tokens_in || 0,
       tokens_out: c.tokens_out || 0,
+      // For a CACHED call tokens_in is only the UNCACHED remainder — true input
+      // volume = tokens_in + cache_write + cache_read. Carry both so cost math
+      // doesn't silently undercount cached modules (content-analyzer today,
+      // content-writer once it adopts prompt caching).
+      cache_write_tokens: c.cache_write_tokens || 0,
+      cache_read_tokens: c.cache_read_tokens || 0,
       stop_reason: c.stop_reason ?? null,
     })),
     tokens_in_total: calls.reduce((s, c) => s + (c.tokens_in || 0), 0),
     tokens_out_total: calls.reduce((s, c) => s + (c.tokens_out || 0), 0),
+    cache_write_tokens_total: calls.reduce((s, c) => s + (c.cache_write_tokens || 0), 0),
+    cache_read_tokens_total: calls.reduce((s, c) => s + (c.cache_read_tokens || 0), 0),
   };
 
   const truncated = calls.find(c => c.stop_reason === 'max_tokens');

@@ -331,6 +331,8 @@ function buildTools(runId, submoduleId) {
             model: res.model,
             tokens_in: res.tokens_in || 0,
             tokens_out: res.tokens_out || 0,
+            cache_write_tokens: res.cache_write_tokens || 0,
+            cache_read_tokens: res.cache_read_tokens || 0,
             stop_reason: res.stop_reason ?? null,
           });
           return res;
