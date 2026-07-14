@@ -13,7 +13,7 @@ import { randomUUID } from 'crypto';
 import db from '../services/db.js';
 import { getSubmoduleById, getSubmodules } from '../services/moduleLoader.js';
 import { enqueueEntityBatch, redis } from '../services/queue.js';
-import { applyDataOperation } from '../lib/applyDataOperation.js';
+import { applyDataOperation, isFailedRun } from '../lib/applyDataOperation.js';
 import { resolveBatchLoopIteration } from '../utils/loopIteration.js';
 
 // --- Execute router (mounted at /api/runs/:runId/steps/:stepIndex/submodules/:submoduleId) ---
@@ -1258,6 +1258,26 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
           console.log(`[approve:entity_production] ${entityName}: produced ${producedEntities.length} entities at step ${targetStep}`);
 
+        } else if (isFailedRun(entityRun.output_data)) {
+          // ── PRESERVE-ON-FAILURE ──
+          // Replace-on-success, preserve-on-failure. A module-level execution
+          // failure (e.g. a round-2 content-writer Anthropic 400) emits a
+          // contentless placeholder item with meta.status='error'. Under `add`
+          // (keyed by entity+source_submodule) that placeholder would EVICT the
+          // prior round's good content, leaving the bundler with nothing. Skip
+          // the supersede: poolMap already holds the prior pool for this entity,
+          // so leaving it untouched keeps the good content.
+          //
+          // REACHABILITY: deriveEntityRunStatus marks a meta.status='error' run
+          // as 'failed', which the bulk-load filter (`status in completed/approved`,
+          // ~line 1145) would exclude — EXCEPT autoExecutor.autoApproveSingleSubmodule
+          // has a rescue block that re-marks failed-with-output rows back to
+          // 'completed' so they reach this endpoint. That rescue flips row status
+          // but NOT output_data.meta.status, so a failed run arrives here as
+          // 'completed' with meta.status still 'error'. This branch is that case.
+          // (meta.status='error' fires only on genuine module failure — QA-fail
+          // verdicts and normal outputs leave it unset, so routing is untouched.)
+          console.log(`[preserve-on-failure] ${entityName}: ${subRun.submodule_id} run failed (meta.status=error) — keeping prior pool content, not superseding`);
         } else {
           // ── NORMAL MODE ──
           // Update entity pool based on data_operation

@@ -36,6 +36,20 @@
  *     Filed as B054. Fix: add a `seen` Set tracking which itemKey values have
  *     already been kept; drop subsequent items with the same key.
  */
+/**
+ * Whether a submodule's per-entity output represents a module-level execution
+ * failure. Modules that catch an internal error (e.g. content-writer on an
+ * Anthropic 400) emit a contentless placeholder item and set
+ * `output_data.meta.status = 'error'`. Under `add` (keyed by entity+source)
+ * that placeholder would EVICT the prior round's good content and yield an
+ * empty bundle — so the approval merge must preserve-on-failure and skip the
+ * supersede for such runs. `meta.status === 'error'` fires only on genuine
+ * module failure; QA-fail verdicts and normal outputs leave it unset.
+ */
+export function isFailedRun(outputData) {
+  return outputData?.meta?.status === 'error';
+}
+
 export function applyDataOperation(entityPool, approvedItems, dataOperation, itemKey, approvedKeySet) {
   const ops = { added: 0, kept: 0, removed: 0, replaced: 0 };
 

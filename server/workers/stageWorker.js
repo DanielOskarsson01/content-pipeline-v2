@@ -17,6 +17,7 @@ import db from '../services/db.js';
 import { createSupabaseStorage } from '../services/storage.js';
 import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
+import { anthropicAcceptsTemperature } from '../lib/aiModelParams.js';
 import { COST_CONFIG } from '../config/timeouts.js';
 import { hydrateItems } from '../services/poolBlobs.js';
 import { convertXlsxInDir } from '../utils/xlsxConverter.js';
@@ -185,7 +186,9 @@ function buildTools(runId, submoduleId) {
                 // the API caches it (~10% input cost on re-read within 5 min).
                 // No cache_prefix → plain string content, unchanged from before.
                 messages: [{ role: 'user', content: buildCachedUserContent(prompt, cache_prefix) }],
-                ...(temperature != null && { temperature }),
+                // Claude-5 models (sonnet-5, opus-4-8, …) 400 on `temperature`;
+                // haiku-4-5 and older still accept it. Omit for the 5-gen ids.
+                ...(temperature != null && anthropicAcceptsTemperature(modelId) && { temperature }),
               }),
             });
             if (res.status !== 200) {
