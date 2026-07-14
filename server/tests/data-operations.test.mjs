@@ -5,7 +5,7 @@
  *
  * Run: node server/tests/data-operations.test.mjs
  */
-import { applyDataOperation } from '../lib/applyDataOperation.js';
+import { applyDataOperation, isFailedRun } from '../lib/applyDataOperation.js';
 import { validateManifest } from '../services/moduleLoader.js';
 
 let passed = 0, failed = 0;
@@ -268,6 +268,44 @@ function assert(condition, label) {
     threw = e.message.includes('invalid data_operation_default');
   }
   assert(threw, 'invalid data_operation_default → throws');
+})();
+
+// --- FIX B: preserve-on-failure supersede gate (isFailedRun) ---
+
+(function isFailedRun_metaError_true() {
+  assert(isFailedRun({ meta: { status: 'error' }, items: [] }) === true, 'meta.status=error → isFailedRun true');
+})();
+
+(function isFailedRun_success_and_unset_false() {
+  assert(isFailedRun({ meta: { status: 'success' }, items: [{}] }) === false, 'meta.status=success → isFailedRun false');
+  assert(isFailedRun({ items: [] }) === false, 'no meta.status (QA fails / normal outputs) → isFailedRun false');
+  assert(isFailedRun(undefined) === false, 'undefined output → isFailedRun false');
+})();
+
+(function preserveOnFailure_failedRetryDoesNotEvictPriorContent() {
+  // Round-1 good content-writer item in the pool (keyed by entity_name + source).
+  const prior = [{ entity_name: 'Slotmill', source_submodule: 'content-writer', content_markdown: '# real content', status: 'written' }];
+  // Round-2 FAILED output: contentless error item, same composite key.
+  const failedOut = { meta: { status: 'error' }, items: [{ entity_name: 'Slotmill', status: 'error', content_markdown: '' }] };
+  const failedApproved = failedOut.items.map(it => ({ ...it, source_submodule: 'content-writer' }));
+
+  // Gate: failed run → caller skips applyDataOperation → prior pool preserved.
+  assert(isFailedRun(failedOut) === true, 'failed retry classified as failure → supersede skipped');
+
+  // Proof of the bug the gate prevents: WITHOUT the gate, `add` evicts the prior
+  // item (same composite key) and leaves only the contentless placeholder →
+  // bundler finds no content_markdown → empty bundle.
+  const { pool: bugged } = applyDataOperation([...prior], failedApproved, 'add', 'entity_name', new Set(['Slotmill']));
+  assert(bugged.length === 1 && bugged[0].content_markdown === '', 'ungated add would evict prior content (the bug)');
+})();
+
+(function replaceOnSuccess_goodRetrySupersedes() {
+  const prior = [{ entity_name: 'Slotmill', source_submodule: 'content-writer', content_markdown: '# haiku', status: 'written' }];
+  const goodOut = { meta: { status: 'success' }, items: [{ entity_name: 'Slotmill', status: 'written', content_markdown: '# sonnet' }] };
+  const goodApproved = goodOut.items.map(it => ({ ...it, source_submodule: 'content-writer' }));
+  assert(isFailedRun(goodOut) === false, 'successful retry → not a failed run (supersede proceeds)');
+  const { pool } = applyDataOperation([...prior], goodApproved, 'add', 'entity_name', new Set(['Slotmill']));
+  assert(pool.length === 1 && pool[0].content_markdown === '# sonnet', 'successful retry supersedes prior content');
 })();
 
 console.log(`\n  ${passed} passed, ${failed} failed`);
