@@ -24,6 +24,7 @@ import { convertXlsxInDir } from '../utils/xlsxConverter.js';
 import { parseAnthropicSSE } from '../services/aiStream.js';
 import { buildCachedUserContent } from '../services/promptCache.js';
 import { deriveEntityRunStatus } from '../utils/entityRunStatus.js';
+import { applyAiCallMeta } from '../utils/aiCallMeta.js';
 
 // Load submodule manifests (worker is a separate process from server.js)
 loadModules();
@@ -149,6 +150,13 @@ function buildTools(runId, submoduleId) {
   // Retry config for transient failures
   const AI_MAX_RETRIES = 3;
   const AI_BASE_DELAY_MS = 2000; // 2s → 4s → 8s exponential backoff
+
+  // Per-entity AI-call ledger. Every successful ai.complete() pushes its token
+  // usage + stop_reason here. Read after the module's execute() returns to
+  // (a) fail-closed when any call truncated (stop_reason==='max_tokens') and
+  // (b) persist per-entity usage into output meta. Fresh per entity because
+  // buildTools runs once per entity.
+  const aiCalls = [];
 
   const ai = {
     complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens, cache_prefix }) => {
@@ -317,7 +325,17 @@ function buildTools(runId, submoduleId) {
       let lastError;
       for (let attempt = 1; attempt <= AI_MAX_RETRIES; attempt++) {
         try {
-          return await callProvider(attempt);
+          const res = await callProvider(attempt);
+          aiCalls.push({
+            provider: res.provider,
+            model: res.model,
+            tokens_in: res.tokens_in || 0,
+            tokens_out: res.tokens_out || 0,
+            cache_write_tokens: res.cache_write_tokens || 0,
+            cache_read_tokens: res.cache_read_tokens || 0,
+            stop_reason: res.stop_reason ?? null,
+          });
+          return res;
         } catch (err) {
           lastError = err;
           const isTransient = !err.isTimeout && (                       // duration-driven timeout: a retry just re-hits the same wall
@@ -358,7 +376,7 @@ function buildTools(runId, submoduleId) {
   // Supabase Storage backend + stored_assets table live entirely behind this.
   const storage = createSupabaseStorage(db);
 
-  return { logger, http, browser, unlocker, progress, ai, storage, _logs: logs, _partialItems: [] };
+  return { logger, http, browser, unlocker, progress, ai, storage, _logs: logs, _partialItems: [], _aiCalls: aiCalls };
 }
 
 /**
@@ -853,7 +871,15 @@ async function handleEntityJob(job) {
     console.log(`[worker:entity] ${submodule_id}/${entity_name} was aborted during execution — saving results anyway`);
   }
 
-  // 11. Write result to entity_submodule_runs
+  // 11. Fail-closed on truncated LLM output + persist per-entity AI usage.
+  //     If any ai.complete() call for this entity hit max_tokens, the output is
+  //     amputated — stamp meta.status='error' so deriveEntityRunStatus marks it
+  //     'failed' and the supersede gate preserves the prior round's content
+  //     instead of letting a truncated retry evict it. Also folds token totals +
+  //     stop reasons into meta.ai_usage for cost/truncation observability.
+  applyAiCallMeta(result, tools._aiCalls);
+
+  // 12. Write result to entity_submodule_runs
   //     Sanitize: PostgreSQL JSONB rejects \u0000 (null bytes) in text.
   //     Scraped HTML/content may contain them. Strip before writing.
   const sanitizedResult = JSON.parse(JSON.stringify(result).replace(/\\u0000/g, ''));
