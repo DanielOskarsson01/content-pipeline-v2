@@ -26,24 +26,32 @@ import {
 
 const GOOD_BASE = 'https://cdn.example.com/assets';
 const NATIVE_BASE = 'https://abcdproj.supabase.co/storage/v1/object/public/assets';
+const NATIVE_CLOUDINARY_BASE = 'https://res.cloudinary.com/dj39tfdpt/image/upload';
 
 // ── in-memory fakes (no network, no db) ───────────────────────────────────
-function fakeBackend() {
-  const blobs = new Map(); // `${bucket}/${key}` -> Buffer
+// Fake CLOUDINARY backend: implements the widened bytes-backend interface (name,
+// upload→{public_id}, row-addressed download/remove) and keys blobs by the returned
+// public_id, exactly as the real adapter does. The real SDK adapter is proven live in
+// storageCloudinary.integration.mjs; this fake proves the seam logic with no network.
+function fakeCloudinaryBackend() {
+  const blobs = new Map(); // cloudinary public_id -> Buffer
   return {
+    name: 'cloudinary',
     calls: [],
-    async upload(bucket, key, bytes) {
-      this.calls.push({ op: 'upload', bucket, key });
-      blobs.set(`${bucket}/${key}`, Buffer.from(bytes));
+    async upload(bucket, objectKey, bytes /* , contentType */) {
+      const public_id = `pipline/${objectKey}`; // mimic folder=pipline + our object_key stem
+      this.calls.push({ op: 'upload', public_id });
+      blobs.set(public_id, Buffer.from(bytes));
+      return { public_id };
     },
-    async download(bucket, key) {
-      const b = blobs.get(`${bucket}/${key}`);
-      if (!b) throw new Error(`fake backend: no object ${bucket}/${key}`);
+    async download(row) {
+      const b = blobs.get(row.cloudinary_public_id);
+      if (!b) throw new Error(`fake cloudinary: no object ${row.cloudinary_public_id}`);
       return Buffer.from(b);
     },
-    async remove(bucket, key) {
-      this.calls.push({ op: 'remove', bucket, key });
-      blobs.delete(`${bucket}/${key}`);
+    async remove(row) {
+      this.calls.push({ op: 'remove', public_id: row.cloudinary_public_id });
+      blobs.delete(row.cloudinary_public_id);
     },
   };
 }
@@ -76,7 +84,7 @@ function withBase(v, fn) {
 function makeStorage(over = {}) {
   let n = 0;
   return createStorage({
-    backend: over.backend || fakeBackend(),
+    backend: over.backend || fakeCloudinaryBackend(),
     store: over.store || fakeStore(),
     genId: over.genId || (() => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`),
     now: () => '2026-07-12T00:00:00.000Z',
@@ -112,17 +120,26 @@ test('F1: assetPublicUrl returns stable base + key when configured', () =>
       'https://cdn.example.com/assets/asset/wazdan/r/image/u.png');
   }));
 
-test('F1: put().url is on ASSET_PUBLIC_BASE and never contains supabase.co', () =>
+// RED-AGAINST-NAIVE: the naive Cloudinary impl returns the SDK's secure_url
+// (https://res.cloudinary.com/<cloud>/...). This test FAILS against that impl (url would
+// contain cloudinary.com) and passes ONLY when put() builds the url from ASSET_PUBLIC_BASE.
+test('F1: put().url is on ASSET_PUBLIC_BASE and never contains supabase.co or cloudinary.com', () =>
   withBase(GOOD_BASE, async () => {
     const s = makeStorage();
     const { url } = await s.put(Buffer.from('img-bytes'), putArgs());
     assert.ok(url.startsWith(GOOD_BASE), `url should start with base: ${url}`);
     assert.ok(!/supabase\.co/i.test(url), `url must not contain supabase.co: ${url}`);
+    assert.ok(!/cloudinary\.com/i.test(url), `url must not contain a Cloudinary native host: ${url}`);
+  }));
+
+test('F1: assetPublicUrl throws when base is a Cloudinary-native host (res.cloudinary.com)', () =>
+  withBase(NATIVE_CLOUDINARY_BASE, () => {
+    assert.throws(() => assetPublicUrl('asset/w/r/image/u.png'), /cloudinary\.com|native/i);
   }));
 
 test('F1: put() THROWS fail-closed when ASSET_PUBLIC_BASE is unset — and uploads NOTHING', () =>
   withBase(undefined, async () => {
-    const backend = fakeBackend();
+    const backend = fakeCloudinaryBackend();
     const s = makeStorage({ backend });
     await assert.rejects(s.put(Buffer.from('x'), putArgs()), /ASSET_PUBLIC_BASE/);
     assert.equal(backend.calls.length, 0, 'no bytes may be uploaded when the URL is unserveable');
@@ -130,9 +147,19 @@ test('F1: put() THROWS fail-closed when ASSET_PUBLIC_BASE is unset — and uploa
 
 test('F1: put() THROWS fail-closed when ASSET_PUBLIC_BASE is a supabase.co host — and uploads NOTHING', () =>
   withBase(NATIVE_BASE, async () => {
-    const backend = fakeBackend();
+    const backend = fakeCloudinaryBackend();
     const s = makeStorage({ backend });
     await assert.rejects(s.put(Buffer.from('x'), putArgs()), /supabase\.co|native/i);
+    assert.equal(backend.calls.length, 0, 'no bytes may be uploaded when the host is native');
+  }));
+
+// Fail-closed for the Cloudinary native host too — the swap must not open a hole where a
+// misconfigured base publishes res.cloudinary.com and uploads bytes anyway.
+test('F1: put() THROWS fail-closed when ASSET_PUBLIC_BASE is a cloudinary.com host — and uploads NOTHING', () =>
+  withBase(NATIVE_CLOUDINARY_BASE, async () => {
+    const backend = fakeCloudinaryBackend();
+    const s = makeStorage({ backend });
+    await assert.rejects(s.put(Buffer.from('x'), putArgs()), /cloudinary\.com|native/i);
     assert.equal(backend.calls.length, 0, 'no bytes may be uploaded when the host is native');
   }));
 
@@ -157,7 +184,9 @@ test('metadata row is correct (backend/bucket/visibility/keys/size/type)', () =>
     const { asset_id } = await s.put(bytes, putArgs());
     const row = await store.getById(asset_id);
     assert.equal(row.source, 'asset');
-    assert.equal(row.backend, 'supabase');
+    assert.equal(row.backend, 'cloudinary');
+    assert.ok(row.cloudinary_public_id && row.cloudinary_public_id.startsWith('pipline/'),
+      `cloudinary_public_id must be set under pipline/: ${row.cloudinary_public_id}`);
     assert.equal(row.bucket, 'assets');
     assert.equal(row.visibility, 'public');
     assert.equal(row.entity_name, 'Wazdan');
@@ -197,7 +226,7 @@ test('list filters by entity_name and by run_id', () =>
 
 test('delete removes both the bytes and the metadata row', () =>
   withBase(GOOD_BASE, async () => {
-    const backend = fakeBackend();
+    const backend = fakeCloudinaryBackend();
     const s = makeStorage({ backend });
     const { asset_id } = await s.put(Buffer.from('x'), putArgs());
     assert.deepEqual(await s.delete(asset_id), { deleted: true });
@@ -208,7 +237,7 @@ test('delete removes both the bytes and the metadata row', () =>
 
 test('put() removes the uploaded bytes if the metadata insert fails (no invisible orphan)', () =>
   withBase(GOOD_BASE, async () => {
-    const backend = fakeBackend();
+    const backend = fakeCloudinaryBackend();
     const store = { insert: async () => { throw new Error('db down'); },
       getById: async () => null, deleteById: async () => {}, list: async () => [] };
     const s = makeStorage({ backend, store });
@@ -277,8 +306,21 @@ function* walkJs(dir) {
   }
 }
 const MODULES_DIR = resolveModulesDir();
+// Extended for the Cloudinary swap: `cloudinary` catches the SDK import (import/require) and
+// `res\.cloudinary\.com` catches hand-built delivery URLs — otherwise a module could bypass
+// the seam via the Cloudinary SDK the same way the Supabase/R2/S3 tokens already prevent (scope §8.8).
 const SEAM_FORBIDDEN =
-  /@supabase\/supabase-js|storage\.from\(|S3Client|@aws-sdk|ASSET_PUBLIC_BASE|\.supabase\.co\/storage|r2\.cloudflarestorage\.com/;
+  /@supabase\/supabase-js|storage\.from\(|S3Client|@aws-sdk|ASSET_PUBLIC_BASE|\.supabase\.co\/storage|r2\.cloudflarestorage\.com|cloudinary|res\.cloudinary\.com/;
+
+// Proves the SEAM regex actually bites the new tokens even when the modules repo isn't present
+// (the grep test below skips without it, so without this the extension could silently no-op).
+test('SEAM regex forbids the Cloudinary SDK import and native delivery host', () => {
+  assert.ok(SEAM_FORBIDDEN.test("import { v2 as cloudinary } from 'cloudinary'"), 'must forbid the cloudinary import');
+  assert.ok(SEAM_FORBIDDEN.test("const c = require('cloudinary')"), 'must forbid require(cloudinary)');
+  assert.ok(SEAM_FORBIDDEN.test('const u = `https://res.cloudinary.com/${cloud}/image/upload/${id}`'), 'must forbid res.cloudinary.com URLs');
+  // sanity: an ordinary module line is not falsely flagged
+  assert.ok(!SEAM_FORBIDDEN.test("const items = input.entity.urls.map(u => u.trim());"));
+});
 
 test('SEAM: modules import only tools.storage, never a backend SDK or URL (design #7)',
   { skip: MODULES_DIR ? false : 'modules repo not present in this environment' },

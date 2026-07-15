@@ -43,6 +43,25 @@ function extFor(contentType, filename) {
   return m ? m[1].toLowerCase() : 'bin';
 }
 
+// Cloudinary folder ALL pipeline assets live under. Bojan's spelling — "pipline" (sic),
+// accepted as-is so the account namespace matches what he set up.
+const CLOUDINARY_FOLDER = 'pipline';
+
+// EVERY asset is stored as resource_type='raw'. tools.storage is a BYTE-IDENTITY store
+// (checksum-based dedup/versioning, design F2; getBytes = "the exact bytes"), and Cloudinary's
+// image/video pipelines process on ingest and re-encode on delivery — a PNG stored as 'image'
+// round-trips with a DIFFERENT checksum (proven live 2026-07-15); stored as 'raw' it is
+// byte-exact. No account-setting-independent flag forces the byte-exact original back for an
+// image resource, so 'raw' is the only mechanism that preserves the seam's contract.
+//
+// This deviates from UNIT_D12_CLOUDINARY_SWAP_SCOPE §3's per-type mapping, which assumed
+// R2-like fidelity — the seam's byte-identity contract wins. Trade-off (decided): we forgo
+// Cloudinary's on-delivery image/video transforms; this seam is durable storage, not a
+// transform CDN. The stable-host Worker (later unit) sets Content-Type from stored content_type,
+// so delivery is unaffected. On-the-fly transforms, if ever wanted, are a separate contract-
+// changing unit that would consciously accept non-identity.
+const CLOUDINARY_RESOURCE_TYPE = 'raw';
+
 /**
  * Backend-portable object key: <source>/<entity_key>/<run|corpus>/<type>/<uuid><ext>.
  * lowercase, charset [a-z0-9-_/.], random uuid stem => not enumerable, byte-identical on R2.
@@ -70,37 +89,87 @@ export function assetPublicUrl(objectKey) {
       'asset (design §4-flag / §5, review F1). There is no dev fallback: a native ' +
       'host baked into published content is unrecoverable on R2 migration.');
   }
-  if (/(^|\/\/|\.)supabase\.co([:/]|$)/i.test(base)) {
+  if (/(^|\/\/|\.)(supabase\.co|cloudinary\.com)([:/]|$)/i.test(base)) {
     throw new Error(
-      `ASSET_PUBLIC_BASE ("${base}") resolves to a Supabase-native host. Publishing the ` +
-      'native host forfeits the zero-re-author guarantee on R2 migration (review F1). ' +
-      'Point ASSET_PUBLIC_BASE at a custom domain / CDN you control.');
+      `ASSET_PUBLIC_BASE ("${base}") resolves to a backend-native host (Supabase / Cloudinary). ` +
+      'Publishing the native host forfeits the zero-re-author guarantee on a backend migration ' +
+      '(review F1). Point ASSET_PUBLIC_BASE at a custom domain / CDN you control.');
   }
   return `${base}/${objectKey}`;
 }
 
-// ── real Supabase adapters (bytes + metadata). Injected into createStorage. ──
+// ── bytes-backend interface (below the seam, injected into createStorage) ──
+// name                                → written to stored_assets.backend
+// upload(bucket, key, bytes, ct)      → { public_id }  (null for key-addressed backends)
+// download(row) / remove(row)         → take the full metadata row (Cloudinary needs
+//                                        cloudinary_public_id, which (bucket,key) can't carry).
+// get()/list() never touch the backend — they are Postgres-only (scope §2).
+
+// ── real Supabase adapter (dormant fallback once the call site swaps to Cloudinary). ──
 export function createSupabaseBackend(db) {
   return {
+    name: 'supabase',
     async upload(bucket, key, bytes, contentType) {
       const { error } = await db.storage.from(bucket).upload(key, bytes, { contentType, upsert: false });
       if (error) throw new Error(`tools.storage: upload to ${bucket}/${key} failed: ${error.message}`);
+      return { public_id: null }; // Supabase is key-addressed; object_key is the physical handle.
     },
-    async download(bucket, key) {
-      const { data, error } = await db.storage.from(bucket).download(key);
-      if (error) throw new Error(`tools.storage: download of ${bucket}/${key} failed: ${error.message}`);
+    async download(row) {
+      const { data, error } = await db.storage.from(row.bucket).download(row.object_key);
+      if (error) throw new Error(`tools.storage: download of ${row.bucket}/${row.object_key} failed: ${error.message}`);
       return Buffer.from(await data.arrayBuffer());
     },
-    async remove(bucket, key) {
-      const { error } = await db.storage.from(bucket).remove([key]);
-      if (error) throw new Error(`tools.storage: remove of ${bucket}/${key} failed: ${error.message}`);
+    async remove(row) {
+      const { error } = await db.storage.from(row.bucket).remove([row.object_key]);
+      if (error) throw new Error(`tools.storage: remove of ${row.bucket}/${row.object_key} failed: ${error.message}`);
+    },
+  };
+}
+
+// ── real Cloudinary adapter (the swapped-in bytes backend). `cloudinary` = a configured
+// v2 client, injected (createCloudinaryStorage / tests), so this file never hard-imports
+// the SDK — the seam stays dependency-injection-pure, exactly like the Supabase side. ──
+export function createCloudinaryBackend(cloudinary) {
+  return {
+    name: 'cloudinary',
+    async upload(bucket, objectKey, bytes /* , contentType */) {
+      // bucket is ignored (Cloudinary has no buckets); the row keeps ASSET_BUCKET as a cosmetic
+      // NOT-NULL sentinel (scope §4). All assets go under folder CLOUDINARY_FOLDER as raw.
+      // raw keeps the full name, so public_id = object_key WITH its extension. We STORE whatever
+      // upload returns (result.public_id) and NEVER re-derive it later (scope §3/§4).
+      const result = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_stream(
+          { resource_type: CLOUDINARY_RESOURCE_TYPE, folder: CLOUDINARY_FOLDER, public_id: objectKey,
+            overwrite: false, use_filename: false, unique_filename: false },
+          (err, res) => (err
+            ? reject(new Error(`tools.storage: cloudinary upload of ${objectKey} failed: ${err.message}`))
+            : resolve(res)),
+        ).end(bytes);
+      });
+      return { public_id: result.public_id };
+    },
+    async download(row) {
+      // ponytail: Admin API resource() returns Cloudinary's own secure_url — robust vs
+      // hand-rebuilding the raw delivery URL. Rate-limited (Admin API); a cloudinary.url()
+      // fast-path is the upgrade if getBytes ever gets hot. Public assets → no signing.
+      const info = await cloudinary.api.resource(row.cloudinary_public_id, { resource_type: CLOUDINARY_RESOURCE_TYPE });
+      const res = await fetch(info.secure_url);
+      if (!res.ok) throw new Error(`tools.storage: cloudinary download of ${row.cloudinary_public_id} failed: HTTP ${res.status}`);
+      return Buffer.from(await res.arrayBuffer());
+    },
+    async remove(row) {
+      const res = await cloudinary.uploader.destroy(row.cloudinary_public_id, { resource_type: CLOUDINARY_RESOURCE_TYPE, invalidate: true });
+      // 'ok' = deleted; 'not found' = already gone (idempotent). Anything else is a real failure.
+      if (res.result !== 'ok' && res.result !== 'not found') {
+        throw new Error(`tools.storage: cloudinary destroy of ${row.cloudinary_public_id} failed: ${res.result}`);
+      }
     },
   };
 }
 
 const STORE_COLUMNS =
   'id, source, entity_name, entity_key, run_id, asset_type, backend, bucket, object_key, url, ' +
-  'visibility, content_type, size_bytes, checksum, source_url, dedup_key, created_at';
+  'visibility, content_type, size_bytes, checksum, source_url, dedup_key, cloudinary_public_id, created_at';
 
 export function createSupabaseStore(db) {
   return {
@@ -161,13 +230,16 @@ export function createStorage({ backend, store, genId = randomUUID, now = () => 
     const bucket = ASSET_BUCKET;
     const checksum = opts.checksum || createHash('sha256').update(bytes).digest('hex');
 
-    await backend.upload(bucket, object_key, bytes, content_type);
+    // The backend returns its physical handle: Cloudinary's public_id (authoritative for
+    // destroy/download, not re-derivable from object_key), null for key-addressed backends.
+    const { public_id = null } = (await backend.upload(bucket, object_key, bytes, content_type)) || {};
 
     const row = {
       id, source, entity_name, entity_key, run_id, asset_type,
-      backend: 'supabase', bucket, object_key, url, visibility,
+      backend: backend.name || 'supabase', bucket, object_key, url, visibility,
       content_type, size_bytes: bytes.length, checksum,
       source_url: opts.source_url || null, dedup_key: null,
+      cloudinary_public_id: public_id,
       created_at: now(),
     };
     try {
@@ -177,7 +249,7 @@ export function createStorage({ backend, store, genId = randomUUID, now = () => 
       // upload leaves bytes with no metadata row — invisible to any row-driven
       // retention sweeper (M1), so this is the only place they can be reclaimed.
       // Best-effort, not transactional: swallow the secondary error, rethrow the real one.
-      try { await backend.remove(bucket, object_key); } catch { /* ignore */ }
+      try { await backend.remove(row); } catch { /* ignore */ }
       throw err;
     }
     return { asset_id: id, url };
@@ -196,13 +268,13 @@ export function createStorage({ backend, store, genId = randomUUID, now = () => 
   async function getBytes(asset_id) {
     const row = await store.getById(asset_id);
     if (!row) throw new Error(`tools.storage.getBytes: unknown asset ${asset_id}`);
-    return backend.download(row.bucket, row.object_key);
+    return backend.download(row);
   }
 
   async function del(asset_id) {
     const row = await store.getById(asset_id);
     if (!row) throw new Error(`tools.storage.delete: unknown asset ${asset_id}`);
-    await backend.remove(row.bucket, row.object_key);
+    await backend.remove(row);
     await store.deleteById(asset_id);
     return { deleted: true };
   }
@@ -221,7 +293,14 @@ export function createStorage({ backend, store, genId = randomUUID, now = () => 
   return { put, get, getBytes, delete: del, list };
 }
 
-/** Convenience wiring: the live Supabase-backed seam (used by buildTools). */
+/** Convenience wiring: the Supabase-backed seam (dormant fallback; still buildTools' wiring
+ *  until the call site swaps to Cloudinary in the later Path-B deploy). */
 export function createSupabaseStorage(db) {
   return createStorage({ backend: createSupabaseBackend(db), store: createSupabaseStore(db) });
+}
+
+/** Convenience wiring: the live Cloudinary-backed seam. Bytes live in Cloudinary; the
+ *  metadata store stays Postgres (`db`), so both are injected (scope §8.6). */
+export function createCloudinaryStorage(cloudinary, db) {
+  return createStorage({ backend: createCloudinaryBackend(cloudinary), store: createSupabaseStore(db) });
 }
