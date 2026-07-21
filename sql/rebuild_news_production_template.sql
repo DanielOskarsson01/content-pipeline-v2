@@ -38,12 +38,12 @@ VALUES (
   -- ---------------- execution_plan ----------------
   jsonb_build_object(
     'submodules_per_step', jsonb_build_object(
-      -- csv-discovery is the PRIMARY entry: the external news-planner agent drops the seed CSV
-      -- (see F-build/orchestrator/seed_csv_contract.md) into its watched folder. The other discovery
-      -- modules stay available for self-discovery runs without the planner. NB rss-feeds discovers
-      -- feed ENDPOINTS only, not items — item-level discovery is the planner's job.
-      '1', jsonb_build_array('csv-discovery','rss-feeds','sitemap-parser','page-links','api-search','search-discovery'),
-      '2', jsonb_build_array('url-canonicalizer','url-dedup','url-filter','url-heuristics'),
+      -- AUDIT (TEMPLATE_CONFIG_AUDIT.md): csv-discovery is the ONLY step-1 card — Production is
+      -- planner-fed. rss-feeds/sitemap/page-links/api-search/search-discovery REMOVED: they belong to
+      -- the Planner; api-search's defaults are recruiting keywords and rss-feeds finds endpoints, not
+      -- articles. Array order is cosmetic (sort_order governs); kept in execution order.
+      '1', jsonb_build_array('csv-discovery'),
+      '2', jsonb_build_array('url-dedup','url-canonicalizer','url-filter','url-heuristics'),
       '3', jsonb_build_array('page-scraper','browser-scraper'),
       -- No quota-ranker here: the Planner already selected the batch (see ARCHITECTURE.md). Production
       -- writes what it is seeded; selection is the Planner's job.
@@ -51,7 +51,9 @@ VALUES (
       '5', jsonb_build_array('content-analyzer','seo-planner','content-writer','tone-seo-editor'),
       '6', jsonb_build_array('keyword-sufficiency-checker','meta-compliance-checker','qa-structural','citation-coverage-checker','hallucination-detector','originality-checker'),
       '7', jsonb_build_array('loop-router'),
-      '8', jsonb_build_array('meta-output','html-output','markdown-output','schema-org-injector','json-output')
+      -- AUDIT: schema-org-injector REMOVED — it hardcodes Organization/Product/FAQPage (company-profile
+      -- schema), wrong on an article page; the live site emits NewsArticle itself from the payload data.
+      '8', jsonb_build_array('meta-output','html-output','markdown-output','json-output')
     ),
     -- one QA-retry card: a failed article re-writes once with the failure visible.
     'card_definitions', jsonb_build_object(
@@ -79,6 +81,25 @@ VALUES (
   -- ---------------- preset_map (per-module option overrides) ----------------
   -- Shape: { submodule_id: { preset_name, fallback_values: { option: value } } }
   jsonb_build_object(
+
+    -- csv-discovery configured for the planner seed CSV (AUDIT: defaults are job-board-shaped).
+    'csv-discovery', jsonb_build_object('preset_name','news-seed', 'fallback_values', jsonb_build_object(
+      'source_label','news-planner',
+      'entity_production', true,
+      -- one entity per STORY: multi-source rows share a story_cluster_id (human-readable slug, e.g.
+      -- cl-ukgc-petfre-fine). VERIFY csv-discovery merges same-name rows into one entity before relying
+      -- on multi-source grouping; fallback = single row per story + corroborating_urls column.
+      'entity_name_template','{story_cluster_id}',
+      'file_pattern','news_seed_*.csv',
+      'column_map', jsonb_build_object(
+        'url','url','title','title','publisher','company','published_at','posted_date',
+        'external_id','externalId','story_cluster_id','story_cluster_id',
+        'coverage_owner_theme','coverage_owner_theme',
+        'proposed_primary_news_category','proposed_primary_news_category',
+        'proposed_primary_dir_category','proposed_primary_dir_category',
+        'source_type','source_type','rights_status','rights_status','planning_reason','planning_reason'
+      )
+    )),
 
     'content-analyzer', jsonb_build_object('preset_name','news', 'fallback_values', jsonb_build_object(
       'ai_model','sonnet',                              -- haiku fabricates categories (below floor)
@@ -112,8 +133,33 @@ VALUES (
     'tone-seo-editor', jsonb_build_object('preset_name','news', 'fallback_values', jsonb_build_object(
       'reference_docs', jsonb_build_array(':DOC_TONE_GUIDE_NEWS'),
       -- 2026-07-21 test run: with the default prompt the editor STRIPPED the mandatory pillar link +
-      -- company links from all 3 drafts. The news override makes links inviolable. Required.
-      'prompt', '<<PASTE tone_seo_editor_news_prompt.md prompt block>>'
+      -- company links from all 3 drafts. The news override makes links inviolable AND carries the
+      -- {doc:tone_guide_news.md} token — without a {doc:} token in the prompt, reference_docs is a
+      -- silent no-op (code strips unreplaced tokens). Required.
+      'prompt', '<<PASTE tone_seo_editor_news_prompt.md prompt block>>',
+      -- AUDIT trap (manifest): editor max_tokens "should match or exceed content-writer max_tokens";
+      -- default 16384 is half the writer's and a truncation risk.
+      'max_tokens', 32768
+    )),
+
+    -- qa-structural: defaults assume long-form (min 1500 words, 5 H2s, FAQ required) — every news
+    -- draft (350–600w) would fail. Tuned to the news format spec.
+    'qa-structural', jsonb_build_object('preset_name','news', 'fallback_values', jsonb_build_object(
+      'min_total_words', 300,
+      'min_sections', 2,
+      'require_faq', false,
+      'min_words_per_section', 40
+    )),
+
+    -- html-output: default injects Organization-only JSON-LD (company shape) — wrong on articles;
+    -- the site emits NewsArticle itself. Sources section kept (good for news).
+    'html-output', jsonb_build_object('preset_name','news', 'fallback_values', jsonb_build_object(
+      'include_schema_org', false
+    )),
+
+    -- meta-output: news gets shared — emit Twitter cards too.
+    'meta-output', jsonb_build_object('preset_name','news', 'fallback_values', jsonb_build_object(
+      'include_twitter_tags', true
     ))
     -- NOTE: quota-ranker is NOT configured here — it lives in the News PLANNER template (its selection
     -- step), not Production. Its news config (bucket_field=news_tags, bucket_config=theme_config.json,
