@@ -110,9 +110,10 @@ VALUES (
     )),
 
     'tone-seo-editor', jsonb_build_object('preset_name','news', 'fallback_values', jsonb_build_object(
-      'reference_docs', jsonb_build_array(':DOC_TONE_GUIDE_NEWS')
-      -- reuse as-is (the "gentle finish"); it re-renders keyword_distribution and preserves the
-      -- pillar-link anchor verbatim per tone_guide_news.md. Add a `prompt` override only if needed.
+      'reference_docs', jsonb_build_array(':DOC_TONE_GUIDE_NEWS'),
+      -- 2026-07-21 test run: with the default prompt the editor STRIPPED the mandatory pillar link +
+      -- company links from all 3 drafts. The news override makes links inviolable. Required.
+      'prompt', '<<PASTE tone_seo_editor_news_prompt.md prompt block>>'
     ))
     -- NOTE: quota-ranker is NOT configured here — it lives in the News PLANNER template (its selection
     -- step), not Production. Its news config (bucket_field=news_tags, bucket_config=theme_config.json,
