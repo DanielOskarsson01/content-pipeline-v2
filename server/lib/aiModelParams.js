@@ -24,3 +24,27 @@ const CLAUDE_TEMPERATURE_UNSUPPORTED = /^claude-(sonnet-5|fable-5|mythos-5|opus-
 export function anthropicAcceptsTemperature(modelId) {
   return !CLAUDE_TEMPERATURE_UNSUPPORTED.test(String(modelId ?? ''));
 }
+
+// BACKLOG #53: explicit thinking control (`thinking: {type: "disabled"}` etc.)
+// is a Claude-4.6+/5-gen request surface. Fable/Mythos 5 are EXCLUDED: thinking
+// is always on there and an explicit "disabled" is rejected with 400 — omitting
+// the param is the only valid shape for them. Unlike the temperature gate this
+// is an ALLOW-list: unknown/older ids → omit, which is always safe.
+// Probe 2026-07-24 on claude-sonnet-5 (run cb49ef80 tone-editor payload):
+// disabled cut output_tokens 24592→8212 with visible text unchanged.
+const CLAUDE_THINKING_CONTROL = /^claude-(sonnet-5|sonnet-4-6|opus-4-[6789])/;
+
+/** Whether a resolved Anthropic model id accepts an explicit `thinking` config. */
+export function anthropicAcceptsThinking(modelId) {
+  return CLAUDE_THINKING_CONTROL.test(String(modelId ?? ''));
+}
+
+// `output_config.effort` — supported on Opus 4.5+, Sonnet 4.6+, Fable/Mythos 5.
+// Haiku 4.5 rejects it. Allow-list for the same fail-safe reason as above.
+// Probe 2026-07-24: output_config {effort:"low"} accepted on claude-sonnet-5.
+const CLAUDE_EFFORT = /^claude-(sonnet-5|sonnet-4-6|fable-5|mythos-5|opus-4-[56789])/;
+
+/** Whether a resolved Anthropic model id accepts `output_config: {effort}`. */
+export function anthropicAcceptsEffort(modelId) {
+  return CLAUDE_EFFORT.test(String(modelId ?? ''));
+}

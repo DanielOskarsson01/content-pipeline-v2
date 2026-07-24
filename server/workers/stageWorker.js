@@ -17,7 +17,7 @@ import db from '../services/db.js';
 import { createSupabaseStorage } from '../services/storage.js';
 import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
-import { anthropicAcceptsTemperature } from '../lib/aiModelParams.js';
+import { anthropicAcceptsTemperature, anthropicAcceptsThinking, anthropicAcceptsEffort } from '../lib/aiModelParams.js';
 import { COST_CONFIG } from '../config/timeouts.js';
 import { hydrateItems } from '../services/poolBlobs.js';
 import { convertXlsxInDir } from '../utils/xlsxConverter.js';
@@ -159,9 +159,17 @@ function buildTools(runId, submoduleId) {
   const aiCalls = [];
 
   const ai = {
-    complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens, cache_prefix }) => {
+    complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens, cache_prefix, thinking, effort }) => {
       const startTime = Date.now();
       const modelId = MODEL_MAP[model] || model;
+
+      // BACKLOG #53: caller asked for a control the model family doesn't
+      // accept → omit it silently (never 400), but leave a trace. (This logger
+      // has no debug level; info is the lowest.)
+      if (provider === 'anthropic') {
+        if (thinking != null && !anthropicAcceptsThinking(modelId)) logger.info(`[ai] thinking control omitted — ${modelId} does not accept an explicit thinking config`);
+        if (effort != null && !anthropicAcceptsEffort(modelId)) logger.info(`[ai] effort control omitted — ${modelId} does not accept output_config.effort`);
+      }
 
       // Inner function that makes a single API call with timeout
       async function callProvider(attempt) {
@@ -197,6 +205,11 @@ function buildTools(runId, submoduleId) {
                 // Claude-5 models (sonnet-5, opus-4-8, …) 400 on `temperature`;
                 // haiku-4-5 and older still accept it. Omit for the 5-gen ids.
                 ...(temperature != null && anthropicAcceptsTemperature(modelId) && { temperature }),
+                // BACKLOG #53: optional thinking/effort control — sent only
+                // when the caller supplies it AND the family accepts it. A
+                // call passing neither yields a byte-identical body to before.
+                ...(thinking != null && anthropicAcceptsThinking(modelId) && { thinking }),
+                ...(effort != null && anthropicAcceptsEffort(modelId) && { output_config: { effort } }),
               }),
             });
             if (res.status !== 200) {
