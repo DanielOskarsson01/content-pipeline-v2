@@ -65,6 +65,7 @@ import type {
   ApproveSubmoduleRunResponse, ApproveSubmoduleRunPerEntityResponse,
   EntityRunDetail, ExecuteSubmoduleResponse,
   DecisionLogEntry, OptionPreset, RunReport,
+  WorkbenchSourceRun, WorkbenchRunTree, WorkbenchExperimentResponse, CreateWorkbenchExperimentInput,
   Template, TemplateDetail, TemplatePresetMap, TemplateExecutionPlan, TemplateSeedConfig,
   SeedPreviewResult,
 } from '../types/step';
@@ -301,5 +302,27 @@ export const api = {
   abortAutoExecute: (runId: string) =>
     apiFetch<{ aborted: boolean }>(`/api/runs/${runId}/auto-execute/abort`, {
       method: 'POST',
+    }),
+
+  // Workbench (U6)
+  getWorkbenchSourceRuns: () =>
+    apiFetch<WorkbenchSourceRun[]>('/api/workbench/source-runs'),
+  getWorkbenchSourceRun: (runId: string) =>
+    apiFetch<WorkbenchRunTree>(`/api/workbench/source-runs/${runId}`),
+  /**
+   * Raw fetch (launchTemplate precedent): the endpoint records an experiment
+   * row even on 500/504 (harness error / execution ceiling) and returns it in
+   * the error body — apiFetch would discard it. Any response carrying an
+   * `experiment` resolves so the UI can render the failed arm as a result.
+   */
+  createWorkbenchExperiment: (data: CreateWorkbenchExperimentInput) =>
+    fetch(`${API_BASE}/api/workbench/experiments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok && !body.experiment) throw new Error(body.error || `HTTP ${r.status}`);
+      return body as WorkbenchExperimentResponse;
     }),
 };

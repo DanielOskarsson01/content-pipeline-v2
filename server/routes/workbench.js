@@ -68,6 +68,106 @@ export function createWorkbenchRouter(deps) {
     }
   });
 
+  // ---- U6 read-only browse endpoints (GET only, zero writes) ----
+  // The existing step-detail GET (runs.js) lazy-populates input_data back into
+  // pipeline_stages — a write. The workbench browse must not mutate real-run
+  // rows, hence these dedicated read-only routes.
+
+  /**
+   * GET /api/workbench/source-runs
+   * Terminal (replayable) runs, newest first, with project name + entity names.
+   */
+  router.get('/source-runs', async (req, res) => {
+    try {
+      const { data: runs, error } = await db
+        .from('pipeline_runs')
+        .select('id, status, project_id, started_at, completed_at')
+        .in('status', PINNABLE_STATUSES)
+        .order('started_at', { ascending: false })
+        .limit(50);
+      if (error) return res.status(500).json({ error: error.message });
+
+      const projectIds = [...new Set((runs || []).map(r => r.project_id).filter(Boolean))];
+      let projectNames = {};
+      if (projectIds.length > 0) {
+        const { data: projects } = await db.from('projects').select('id, name').in('id', projectIds);
+        projectNames = Object.fromEntries((projects || []).map(p => [p.id, p.name]));
+      }
+
+      const runIds = (runs || []).map(r => r.id);
+      const entityNamesByRun = {};
+      if (runIds.length > 0) {
+        const { data: pools } = await db
+          .from('entity_stage_pool').select('run_id, entity_name').in('run_id', runIds);
+        for (const p of pools || []) {
+          (entityNamesByRun[p.run_id] ||= new Set()).add(p.entity_name);
+        }
+      }
+
+      res.json((runs || []).map(r => ({
+        ...r,
+        project_name: projectNames[r.project_id] || null,
+        entity_names: [...(entityNamesByRun[r.id] || [])].sort(),
+      })));
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * GET /api/workbench/source-runs/:runId
+   * Picker tree for one run: steps → submodules (historical options from
+   * run_submodule_config, ran-flag from submodule_runs) + entities per step
+   * (entity_stage_pool = exactly what an experiment can replay against).
+   */
+  router.get('/source-runs/:runId', async (req, res) => {
+    try {
+      const { runId } = req.params;
+      const { data: run, error: runErr } = await db
+        .from('pipeline_runs').select('id, status, project_id').eq('id', runId).maybeSingle();
+      if (runErr) return res.status(500).json({ error: runErr.message });
+      if (!run) return res.status(404).json({ error: `run ${runId} not found` });
+
+      const { data: cfgs } = await db
+        .from('run_submodule_config').select('step_index, submodule_id, options').eq('run_id', runId);
+      const { data: subRuns } = await db
+        .from('submodule_runs').select('step_index, submodule_id').eq('run_id', runId);
+      const { data: pools } = await db
+        .from('entity_stage_pool').select('step_index, entity_name').eq('run_id', runId);
+
+      const steps = new Map();
+      const step = (i) => {
+        if (!steps.has(i)) steps.set(i, { step_index: i, submodules: new Map(), entities: new Set() });
+        return steps.get(i);
+      };
+      for (const c of cfgs || []) {
+        step(c.step_index).submodules.set(c.submodule_id, { submodule_id: c.submodule_id, options: c.options || {}, ran: false });
+      }
+      for (const s of subRuns || []) {
+        const st = step(s.step_index);
+        const existing = st.submodules.get(s.submodule_id);
+        if (existing) existing.ran = true;
+        else st.submodules.set(s.submodule_id, { submodule_id: s.submodule_id, options: {}, ran: true });
+      }
+      for (const p of pools || []) step(p.step_index).entities.add(p.entity_name);
+
+      res.json({
+        run_id: run.id,
+        status: run.status,
+        project_id: run.project_id,
+        steps: [...steps.values()]
+          .sort((a, b) => a.step_index - b.step_index)
+          .map(s => ({
+            step_index: s.step_index,
+            submodules: [...s.submodules.values()].sort((a, b) => a.submodule_id.localeCompare(b.submodule_id)),
+            entities: [...s.entities].sort(),
+          })),
+      });
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 }
 

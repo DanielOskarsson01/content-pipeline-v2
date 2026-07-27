@@ -488,3 +488,80 @@ export interface DecisionLogEntry {
   context: Record<string, unknown>;
   created_at: string;
 }
+
+// ── Workbench (U6) ────────────────────────────────────────────────
+
+export interface WorkbenchSourceRun {
+  id: string;
+  status: string;
+  project_id: string | null;
+  project_name: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  entity_names: string[];
+}
+
+export interface WorkbenchRunStep {
+  step_index: number;
+  submodules: { submodule_id: string; options: Record<string, unknown>; ran: boolean }[];
+  entities: string[];
+}
+
+export interface WorkbenchRunTree {
+  run_id: string;
+  status: string;
+  project_id: string | null;
+  steps: WorkbenchRunStep[];
+}
+
+export interface WorkbenchAiCall {
+  provider: string | null;
+  model: string | null;
+  tokens_in: number;
+  tokens_out: number;
+  cache_write_tokens: number;
+  cache_read_tokens: number;
+  stop_reason: string | null;
+}
+
+export interface WorkbenchAiUsage {
+  calls: WorkbenchAiCall[];
+  tokens_in_total: number;
+  tokens_out_total: number;
+  cache_write_tokens_total: number;
+  cache_read_tokens_total: number;
+}
+
+export interface WorkbenchExperiment {
+  id: string;
+  source_run_id: string;
+  step_index: number;
+  submodule_id: string;
+  entity_name: string;
+  overrides: Record<string, unknown>;
+  resolved_config: Record<string, unknown> | null;
+  output_data: {
+    items?: Record<string, unknown>[];
+    meta?: { status?: string; error?: string; truncated?: boolean; ai_usage?: WorkbenchAiUsage };
+  } | null;
+  ai_usage: WorkbenchAiUsage | null;
+  duration_ms: number | null;
+  status: 'completed' | 'error' | 'timeout';
+  error: string | null;
+  created_at: string;
+}
+
+export interface WorkbenchExperimentResponse {
+  experiment: WorkbenchExperiment;
+  replay_fidelity: string;
+  /** set when the server answered non-2xx but still recorded the experiment */
+  error?: string;
+}
+
+export interface CreateWorkbenchExperimentInput {
+  source_run_id: string;
+  step_index: number;
+  submodule_id: string;
+  entity_name: string;
+  overrides?: Record<string, unknown>;
+}
