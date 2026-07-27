@@ -366,6 +366,9 @@ export async function runSubmoduleOnce(spec, deps = {}) {
   return {
     submodule_id: spec.submodule_id,
     version: manifest.version,
+    // The FULL options object execute() ran with — U4 stores it as the
+    // experiment's resolved_config (provenance: spec §2 "full resolved config").
+    resolvedOptions: options,
     resolvedPrompt: options.prompt,
     promptInfo,
     result,
