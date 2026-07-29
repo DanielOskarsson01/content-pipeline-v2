@@ -3,10 +3,11 @@
  *
  * POST /api/workbench/experiments
  *   { source_run_id, step_index, submodule_id, entity_name,
- *     overrides?, exclude_entity_submodule_run_id? }
+ *     overrides?, exclude_entity_submodule_run_id?, parent_experiment_id? }
  *
  * Flow (spec §2): pin source run archived (idempotent) → load frozen pool →
- * hydrate via U1 (inside the U2 harness) → execute in-process → insert ONE
+ * [U8: overlay parent experiment's output onto the pool] → hydrate via U1
+ * (inside the U2 harness) → execute in-process → insert ONE
  * workbench_experiments row → return it.
  *
  * LOAD-BEARING NO-WRITE CONTRACT: unlike the existing /run endpoint
@@ -53,6 +54,124 @@ const PINNABLE_STATUSES = ['completed', 'abandoned', 'archived'];
 function defaultGetManifest(submoduleId) {
   loadModules();
   return getSubmoduleById(submoduleId);
+}
+
+// ---- U8 chaining overlay (CHAINING-SCOPE v1 §S2) ----
+
+const httpError = (status, message) => Object.assign(new Error(message), { httpStatus: status });
+
+// Identity/bookkeeping fields — never treated as content when computing the
+// parent's shape (they appear on virtually every pool item).
+const OVERLAY_IDENTITY_FIELDS = new Set(['entity_name', 'name', 'url', 'source_submodule', 'status', 'error', '_blob_ref']);
+
+// Content = a non-empty string, non-empty array, or object. Numbers/booleans
+// are metrics (word_count, qa_pass, …), carried by nearly every item — matching
+// on them would drop the whole pool.
+const isContent = (v) => v != null && typeof v !== 'number' && typeof v !== 'boolean'
+  && !(typeof v === 'string' && v === '') && !(Array.isArray(v) && v.length === 0);
+
+/**
+ * Overlay a completed parent experiment's output items onto the frozen pool.
+ *
+ * MERGE POLICY: REPLACE-BY-SHAPE — deliberately NOT prod's add-by-composite-key
+ * (item_key, source_submodule) semantics. Prod-parity merge would leave BOTH the
+ * original content-writer item and the parent experiment's output carrying
+ * content_markdown, and step-6 checkers concatenate every such item they find
+ * (qa-structural execute.js:147, citation-coverage-checker execute.js:270) —
+ * doubling word/section counts and producing a wrong verdict. Replace-by-shape
+ * (drop every pool item carrying any primary field the parent produced, then
+ * insert the parent's items) is what makes a chained QA verdict meaningful.
+ * Sibling items whose fields the parent does NOT produce (analysis_json,
+ * seo_plan_json, …) are preserved so §7b hydration still supplies them.
+ * Trade-off: sibling FIELDS riding on a dropped item go with it (chaining a
+ * TSE parent drops the content-writer item and its meta_title/meta_description
+ * — §7b re-supplies anything in requires_columns; opportunistic readers lose them).
+ *
+ * Returns { items, dropped } — never mutates the caller's arrays or the parent row.
+ * All guards throw httpError (fail loud, never skip silently).
+ */
+async function applyParentOverlay({ items, parentId, source_run_id, entity_name, db, getManifest }) {
+  const { data: parent, error: parentErr } = await db
+    .from('workbench_experiments')
+    .select('id, source_run_id, entity_name, submodule_id, status, output_data')
+    .eq('id', parentId)
+    .maybeSingle();
+  if (parentErr) throw httpError(500, `parent experiment lookup failed: ${parentErr.message}`);
+  if (!parent) throw httpError(404, `parent experiment ${parentId} not found`);
+
+  // Guards (CHAINING-SCOPE v1): an errored parent's items are stubs
+  // (content_markdown: ''), and a cross-run/cross-entity parent would overlay
+  // foreign content onto this entity's pool.
+  if (parent.status !== 'completed') {
+    throw httpError(409, `parent experiment ${parentId} is '${parent.status}' — only completed experiments can be chained`);
+  }
+  if (parent.source_run_id !== source_run_id) {
+    throw httpError(400, `parent experiment belongs to run ${parent.source_run_id}, not ${source_run_id}`);
+  }
+  if (parent.entity_name !== entity_name) {
+    throw httpError(400, `parent experiment is for entity '${parent.entity_name}', not '${entity_name}'`);
+  }
+
+  const parentManifest = getManifest(parent.submodule_id);
+  if (!parentManifest) throw httpError(500, `parent submodule '${parent.submodule_id}' not found — cannot resolve its item_key`);
+  const itemKeyField = parentManifest.item_key || 'url';
+
+  const parentItems = parent.output_data?.items;
+  if (!Array.isArray(parentItems) || parentItems.length === 0) {
+    throw httpError(409, `parent experiment ${parentId} has no output items to chain from`);
+  }
+  for (const it of parentItems) {
+    if (it?.[itemKeyField] == null || String(it[itemKeyField]) === '') {
+      throw httpError(422, `parent output item lacks its module's item_key field '${itemKeyField}' — cannot merge`);
+    }
+  }
+
+  // The parent's shape: every content field its output items carry.
+  const primaryFields = new Set();
+  for (const it of parentItems) {
+    for (const [k, v] of Object.entries(it)) {
+      if (!OVERLAY_IDENTITY_FIELDS.has(k) && k !== itemKeyField && isContent(v)) primaryFields.add(k);
+    }
+  }
+  if (primaryFields.size === 0) throw httpError(409, `parent experiment ${parentId} output items carry no content fields`);
+
+  // §7c: a pool item's heavy fields can hide behind _blob_ref (e.g. this run's
+  // own tone-seo-editor item stores content_markdown in pool_item_blobs).
+  // Shape-matching on literal keys alone would KEEP that item; §7c hydration
+  // would then restore its content_markdown and resurrect the exact
+  // concatenation bug this overlay exists to kill. Fetch the referenced blobs
+  // and match on their field keys too (the payload is only read for its keys;
+  // a keys-only RPC could avoid the transfer if it ever matters).
+  const refs = [...new Set(items.filter(i => i?._blob_ref).map(i => i._blob_ref))];
+  let blobKeys = new Map();
+  if (refs.length > 0) {
+    const { data: blobs, error: blobErr } = await db
+      .from('pool_item_blobs').select('id, content').in('id', refs);
+    if (blobErr) throw httpError(500, `pool blob lookup failed: ${blobErr.message}`);
+    blobKeys = new Map((blobs || []).map(b => [b.id, Object.keys(b.content || {})]));
+  }
+
+  const carriesPrimary = (it) => {
+    for (const f of primaryFields) if (isContent(it?.[f])) return true;
+    for (const f of blobKeys.get(it?._blob_ref) || []) if (primaryFields.has(f)) return true;
+    return false;
+  };
+
+  const kept = items.filter(it => !carriesPrimary(it));
+  // Stamp source_submodule = parent.submodule_id: experiment outputs are never
+  // stamped (prod stamps at approval), and downstream display/debugging keys on it.
+  const inserted = parentItems.map(it => ({ ...it, source_submodule: parent.submodule_id }));
+  // Parent items go FIRST: §7b decides "missing columns" from the first 10
+  // items only (poolHydration.js sampleItems.slice(0, 10)). Appended at the
+  // end of a production-sized pool, the parent's bearer sits past the sample
+  // window, §7b declares its field missing, and enrichment overwrites the
+  // parent's content with the HISTORICAL rows from submodule_run_item_data —
+  // silently scoring the wrong artifact. Prepending puts the parent's fields
+  // inside the sample so §7b sees them present and skips DB enrichment.
+  // ponytail: holds while a parent emits ≤10 items (every current step-5/6
+  // module emits 1/entity); upgrade path is excluding the parent's
+  // primaryFields from enrichment in poolHydration itself.
+  return { items: [...inserted, ...kept], dropped: items.length - kept.length };
 }
 
 export function createWorkbenchRouter(deps) {
@@ -172,12 +291,15 @@ export function createWorkbenchRouter(deps) {
 }
 
 async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest }) {
-  const { source_run_id, step_index, submodule_id, entity_name, overrides, exclude_entity_submodule_run_id } = req.body || {};
+  const { source_run_id, step_index, submodule_id, entity_name, overrides, exclude_entity_submodule_run_id, parent_experiment_id } = req.body || {};
   if (!source_run_id || step_index == null || !submodule_id || !entity_name) {
     return res.status(400).json({ error: 'source_run_id, step_index, submodule_id, entity_name are required' });
   }
   if (overrides != null && (typeof overrides !== 'object' || Array.isArray(overrides))) {
     return res.status(400).json({ error: 'overrides must be an object' });
+  }
+  if (parent_experiment_id != null && typeof parent_experiment_id !== 'string') {
+    return res.status(400).json({ error: 'parent_experiment_id must be a string' });
   }
 
   // 1. Pin the source run (spec §2 step 1) — idempotent, terminal runs only.
@@ -229,7 +351,24 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
   if (!pool) {
     return res.status(404).json({ error: `no entity_stage_pool row for (${source_run_id}, step ${step_index}, ${entity_name}) — swept or never ran?` });
   }
-  const items = pool.pool_items || [];
+  let items = pool.pool_items || [];
+
+  // U8: chain — overlay the parent experiment's output onto the frozen pool
+  // BEFORE the pin (a bad parent id must not archive a run as a side effect)
+  // and before hydration (§7b then sees the parent's fields as present and
+  // skips DB enrichment for them — experiment content wins).
+  let chain = null;
+  if (parent_experiment_id) {
+    try {
+      const overlaid = await applyParentOverlay({
+        items, parentId: parent_experiment_id, source_run_id, entity_name, db, getManifest,
+      });
+      items = overlaid.items;
+      chain = { parent_experiment_id, pool_items_dropped: overlaid.dropped };
+    } catch (err) {
+      return res.status(err.httpStatus || 500).json({ error: err.message });
+    }
+  }
 
   // Pin AFTER validation so a typo'd submodule/entity can't archive a run
   // as a side effect of a 404.
@@ -249,6 +388,9 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
     submodule_id,
     entity_name,
     overrides: overrides || {},
+    // Provenance on success AND error paths — a chained run that failed is
+    // still a chained run.
+    parent_experiment_id: parent_experiment_id || null,
   };
   let harnessResult;
   try {
@@ -294,5 +436,5 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
     error: meta.error || null,
   }, db);
 
-  return res.status(201).json({ experiment, replay_fidelity: REPLAY_FIDELITY_NOTE });
+  return res.status(201).json({ experiment, replay_fidelity: REPLAY_FIDELITY_NOTE, ...(chain && { chain }) });
 }
