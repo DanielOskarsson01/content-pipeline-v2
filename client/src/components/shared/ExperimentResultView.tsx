@@ -61,6 +61,15 @@ export function ExperimentResultView({ result }: { result: WorkbenchExperimentRe
         {meta?.truncated && (
           <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-100 text-amber-800">truncated</span>
         )}
+        {(result.chain || exp.parent_experiment_id) && (
+          <span
+            className="text-xs px-2 py-0.5 rounded-full font-medium bg-sky-100 text-sky-800"
+            title={result.chain?.parent_experiment_id || exp.parent_experiment_id || ''}
+          >
+            chained from {(result.chain?.parent_experiment_id || exp.parent_experiment_id || '').slice(0, 8)}
+            {result.chain ? ` · ${result.chain.pool_items_dropped} pool item${result.chain.pool_items_dropped === 1 ? '' : 's'} replaced` : ''}
+          </span>
+        )}
       </div>
 
       {errorText && (

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
+import { usePanelStore } from '../../stores/panelStore';
 import { computeOverrides } from '../../api/workbenchOverrides';
 import { useWorkbenchSourceRuns, useWorkbenchSourceRun, useCreateWorkbenchExperiment, usePinWorkbenchRun } from '../../hooks/useWorkbench';
 import { SubmoduleOptions } from '../primitives/SubmoduleOptions';
@@ -26,6 +27,7 @@ export function SubmoduleWorkbench() {
   const { data: allSubmodules } = useQuery({ queryKey: ['submodules-full'], queryFn: api.getSubmodulesFull });
   const experiment = useCreateWorkbenchExperiment();
   const pinRun = usePinWorkbenchRun();
+  const setLastExperiment = usePanelStore((s) => s.setLastExperiment);
   const selectedRun = (runs || []).find((r) => r.id === runId) || null;
 
   const step = tree?.steps.find((s) => s.step_index === stepIndex) || null;
@@ -64,7 +66,20 @@ export function SubmoduleWorkbench() {
         entity_name: entityName!,
         ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
       },
-      { onSuccess: (res) => setResult(res) },
+      {
+        onSuccess: (res) => {
+          setResult(res);
+          // Record for the run-view panel's U8 chaining affordance.
+          const exp = res.experiment;
+          setLastExperiment({
+            id: exp.id,
+            source_run_id: exp.source_run_id,
+            submodule_id: exp.submodule_id,
+            entity_name: exp.entity_name,
+            status: exp.status,
+          });
+        },
+      },
     );
   };
 

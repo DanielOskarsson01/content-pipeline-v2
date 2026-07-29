@@ -66,6 +66,8 @@ export function SubmodulePanel({
     setPanelAccordion,
     setActiveSubmoduleRunId,
     openCloneDialog,
+    lastExperiment,
+    setLastExperiment,
   } = usePanelStore();
 
   // Clone-as-variant opens the shared S2.3 clone dialog (name / describe / single-round select →
@@ -348,6 +350,18 @@ export function SubmodulePanel({
     return computeOverrides(baseline, localOptions);
   }, [manifestDefaults, savedConfig?.options, localOptions]);
 
+  // U8 chaining: offer the session's last experiment as this run's input —
+  // only when it's completed and matches the current run + entity (the server
+  // enforces the same guards; this just avoids offering a doomed chain).
+  const [chainFromLast, setChainFromLast] = useState(false);
+  const chainableParent =
+    lastExperiment
+    && lastExperiment.status === 'completed'
+    && lastExperiment.source_run_id === runId
+    && lastExperiment.entity_name === tryItEntity
+      ? lastExperiment
+      : null;
+
   // Handle escape key
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -480,8 +494,21 @@ export function SubmodulePanel({
         submodule_id: submodule.id,
         entity_name: tryItEntity,
         ...(Object.keys(tryItOverrides).length > 0 ? { overrides: tryItOverrides } : {}),
+        ...(chainFromLast && chainableParent ? { parent_experiment_id: chainableParent.id } : {}),
       },
-      { onSuccess: (res) => setTryItResult(res) }
+      {
+        onSuccess: (res) => {
+          setTryItResult(res);
+          const exp = res.experiment;
+          setLastExperiment({
+            id: exp.id,
+            source_run_id: exp.source_run_id,
+            submodule_id: exp.submodule_id,
+            entity_name: exp.entity_name,
+            status: exp.status,
+          });
+        },
+      }
     );
   };
 
@@ -920,6 +947,23 @@ export function SubmodulePanel({
                   {Object.keys(tryItOverrides).length} option edit{Object.keys(tryItOverrides).length === 1 ? '' : 's'} will
                   be sent as overrides: {Object.keys(tryItOverrides).join(', ')}
                 </p>
+              )}
+
+              {/* U8 chaining affordance — run this submodule on the previous
+                  experiment's output instead of the frozen pool alone */}
+              {chainableParent && (
+                <label className="flex items-start gap-2 text-xs bg-sky-50 border border-sky-200 rounded p-2">
+                  <input
+                    type="checkbox"
+                    checked={chainFromLast}
+                    onChange={(e) => setChainFromLast(e.target.checked)}
+                    className="mt-0.5 rounded border-gray-300 text-[#0891B2] focus:ring-[#0891B2]"
+                  />
+                  <span className="text-gray-700">
+                    Use output from: <span className="font-medium">{chainableParent.submodule_id}</span> experiment
+                    <span className="text-gray-400"> ({chainableParent.id.slice(0, 8)})</span> as input
+                  </span>
+                </label>
               )}
 
               {tryItMutation.isPending && (
