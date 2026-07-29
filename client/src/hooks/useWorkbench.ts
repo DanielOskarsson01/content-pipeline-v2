@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type { CreateWorkbenchExperimentInput } from '../types/step';
 
@@ -20,5 +20,13 @@ export function useWorkbenchSourceRun(runId: string | null) {
 export function useCreateWorkbenchExperiment() {
   return useMutation({
     mutationFn: (data: CreateWorkbenchExperimentInput) => api.createWorkbenchExperiment(data),
+  });
+}
+
+export function usePinWorkbenchRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (runId: string) => api.pinWorkbenchRun(runId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['workbench', 'source-runs'] }),
   });
 }

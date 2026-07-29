@@ -287,6 +287,38 @@ export function createWorkbenchRouter(deps) {
     }
   });
 
+  /**
+   * POST /api/workbench/source-runs/:runId/pin
+   * Pin a run BEFORE experimenting — the same idempotent status='archived'
+   * pin the experiment path performs (handleCreateExperiment step 1), exposed
+   * standalone so a replayable run can be protected from the 7-day retention
+   * sweep without burning an experiment first. This is the workbench's ONE
+   * sanctioned real-run write besides workbench_experiments inserts.
+   * Overloading pipeline_runs.status as the pin is a stopgap — the proper
+   * long-term design is a dedicated workbench_pinned flag (see decision_log
+   * 2026-07-30); deliberately not built here.
+   */
+  router.post('/source-runs/:runId/pin', async (req, res) => {
+    try {
+      const { runId } = req.params;
+      const { data: run, error } = await db
+        .from('pipeline_runs').select('id, status').eq('id', runId).maybeSingle();
+      if (error) return res.status(500).json({ error: `run lookup failed: ${error.message}` });
+      if (!run) return res.status(404).json({ error: `run ${runId} not found` });
+      if (!PINNABLE_STATUSES.includes(run.status)) {
+        return res.status(400).json({ error: `run is '${run.status}' — only terminal runs can be pinned` });
+      }
+      if (run.status !== 'archived') {
+        const { error: pinErr } = await db
+          .from('pipeline_runs').update({ status: 'archived' }).eq('id', runId);
+        if (pinErr) return res.status(500).json({ error: `failed to pin run: ${pinErr.message}` });
+      }
+      res.json({ pinned: true, previous_status: run.status });
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 }
 

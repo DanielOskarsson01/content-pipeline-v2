@@ -309,6 +309,11 @@ export const api = {
     apiFetch<WorkbenchSourceRun[]>('/api/workbench/source-runs'),
   getWorkbenchSourceRun: (runId: string) =>
     apiFetch<WorkbenchRunTree>(`/api/workbench/source-runs/${runId}`),
+  /** T5: idempotent pin (status='archived') so the retention sweep can't take the run */
+  pinWorkbenchRun: (runId: string) =>
+    apiFetch<{ pinned: boolean; previous_status: string }>(`/api/workbench/source-runs/${runId}/pin`, {
+      method: 'POST',
+    }),
   /**
    * Raw fetch (launchTemplate precedent): the endpoint records an experiment
    * row even on 500/504 (harness error / execution ceiling) and returns it in

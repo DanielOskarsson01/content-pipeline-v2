@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import { computeOverrides } from '../../api/workbenchOverrides';
-import { useWorkbenchSourceRuns, useWorkbenchSourceRun, useCreateWorkbenchExperiment } from '../../hooks/useWorkbench';
+import { useWorkbenchSourceRuns, useWorkbenchSourceRun, useCreateWorkbenchExperiment, usePinWorkbenchRun } from '../../hooks/useWorkbench';
 import { SubmoduleOptions } from '../primitives/SubmoduleOptions';
 import { ExperimentResultView } from '../shared/ExperimentResultView';
 import type { WorkbenchExperimentResponse } from '../../types/step';
@@ -25,6 +25,8 @@ export function SubmoduleWorkbench() {
   const { data: tree } = useWorkbenchSourceRun(runId);
   const { data: allSubmodules } = useQuery({ queryKey: ['submodules-full'], queryFn: api.getSubmodulesFull });
   const experiment = useCreateWorkbenchExperiment();
+  const pinRun = usePinWorkbenchRun();
+  const selectedRun = (runs || []).find((r) => r.id === runId) || null;
 
   const step = tree?.steps.find((s) => s.step_index === stepIndex) || null;
   const stepSubmodule = step?.submodules.find((m) => m.submodule_id === submoduleId) || null;
@@ -95,6 +97,23 @@ export function SubmoduleWorkbench() {
               </option>
             ))}
           </select>
+          {/* T5: pin BEFORE experimenting — replayable runs keep vanishing to the
+              7-day retention sweep; until now a run was only pinned as a side
+              effect of its first experiment. */}
+          {selectedRun && (
+            selectedRun.status === 'archived' ? (
+              <p className="text-[11px] text-gray-500 mt-1">Pinned — protected from the 7-day retention sweep.</p>
+            ) : (
+              <button
+                type="button"
+                onClick={() => pinRun.mutate(selectedRun.id)}
+                disabled={pinRun.isPending}
+                className="mt-1 text-xs text-[#0891B2] hover:underline disabled:opacity-50"
+              >
+                {pinRun.isPending ? 'Pinning…' : 'Pin this run (protect from the 7-day sweep)'}
+              </button>
+            )
+          )}
         </div>
 
         {tree && (
