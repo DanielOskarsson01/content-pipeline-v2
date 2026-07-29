@@ -28,6 +28,10 @@ export function SubmoduleOptions({
   projectId,
   submoduleId,
 }: SubmoduleOptionsProps) {
+  // Prompt-sized textareas default to 4 rows — too small to read what's
+  // actually loaded. Per-option expand state (textareas stay resize-y too).
+  const [expandedTextareas, setExpandedTextareas] = useState<Record<string, boolean>>({});
+
   if (options.length === 0) {
     return (
       <p className="text-xs text-gray-400 text-center py-2">
@@ -125,18 +129,28 @@ export function SubmoduleOptions({
               </div>
             );
 
-          case 'textarea':
+          case 'textarea': {
+            const isExpanded = !!expandedTextareas[option.name];
             return (
               <div key={option.name}>
-                <label className="block text-xs text-gray-600 mb-1">
-                  {option.label}
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs text-gray-600">
+                    {option.label}
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedTextareas((prev) => ({ ...prev, [option.name]: !isExpanded }))}
+                    className="text-[10px] text-[#0891B2] hover:underline"
+                  >
+                    {isExpanded ? 'Collapse' : 'Expand'}
+                  </button>
+                </div>
                 {presetDropdown}
                 <textarea
                   value={String(value ?? '')}
                   maxLength={option.maxLength}
                   onChange={(e) => onChange(option.name, e.target.value)}
-                  rows={4}
+                  rows={isExpanded ? 28 : 4}
                   className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 text-sm focus:outline-none focus:border-[#0891B2] resize-y"
                 />
                 {option.description && (
@@ -149,6 +163,7 @@ export function SubmoduleOptions({
                 )}
               </div>
             );
+          }
 
           case 'doc_selector':
             return (

@@ -84,11 +84,14 @@ export function SubmoduleWorkbench() {
           <label className="block text-xs text-gray-600 mb-1">Source run (terminal runs, newest first)</label>
           <select className={selectClass} value={runId ?? ''} onChange={(e) => selectRun(e.target.value || null)}>
             <option value="">{runsLoading ? 'Loading runs…' : 'Select a run…'}</option>
+            {/* Entity names + date + time + short id — several runs of the same
+                project on the same day must stay distinguishable. */}
             {(runs || []).map((r) => (
               <option key={r.id} value={r.id}>
                 {(r.project_name || r.id.slice(0, 8))}
                 {r.entity_names.length > 0 ? ` — ${r.entity_names.slice(0, 3).join(', ')}${r.entity_names.length > 3 ? ` +${r.entity_names.length - 3}` : ''}` : ''}
-                {r.started_at ? ` — ${new Date(r.started_at).toLocaleDateString()}` : ''} ({r.status})
+                {r.started_at ? ` — ${new Date(r.started_at).toLocaleDateString()} ${new Date(r.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}
+                {` — ${r.id.slice(0, 8)} (${r.status})`}
               </option>
             ))}
           </select>
