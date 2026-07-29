@@ -548,6 +548,8 @@ export interface WorkbenchExperiment {
   duration_ms: number | null;
   status: 'completed' | 'error' | 'timeout';
   error: string | null;
+  /** U8: set when this experiment chained from a previous experiment's output */
+  parent_experiment_id?: string | null;
   created_at: string;
 }
 
@@ -556,6 +558,8 @@ export interface WorkbenchExperimentResponse {
   replay_fidelity: string;
   /** set when the server answered non-2xx but still recorded the experiment */
   error?: string;
+  /** U8: present when parent_experiment_id was sent and the overlay applied */
+  chain?: { parent_experiment_id: string; pool_items_dropped: number };
 }
 
 export interface CreateWorkbenchExperimentInput {
@@ -564,4 +568,6 @@ export interface CreateWorkbenchExperimentInput {
   submodule_id: string;
   entity_name: string;
   overrides?: Record<string, unknown>;
+  /** U8: run with a completed experiment's output overlaid onto the frozen pool */
+  parent_experiment_id?: string;
 }
