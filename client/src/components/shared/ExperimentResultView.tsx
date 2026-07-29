@@ -1,4 +1,34 @@
-import type { WorkbenchExperimentResponse } from '../../types/step';
+import type { WorkbenchAiUsage, WorkbenchExperimentResponse } from '../../types/step';
+
+// Mirror of server/lib/aiModelParams.js (keep the regexes in sync): the
+// harness silently omits these params when the model family rejects them, yet
+// they stay recorded in `overrides` — experiment bfc470f9 looks like a
+// temperature test but was actually a baseline replay. Detection is purely
+// from the response (overrides + ai_usage call models); no server change.
+const PARAM_ACCEPTED_BY_MODEL: Record<string, (modelId: string) => boolean> = {
+  temperature: (m) => !/^claude-(sonnet-5|fable-5|mythos-5|opus-4-[789])/.test(m),
+  thinking: (m) => /^claude-(sonnet-5|sonnet-4-6|opus-4-[6789])/.test(m),
+  effort: (m) => /^claude-(sonnet-5|sonnet-4-6|fable-5|mythos-5|opus-4-[56789])/.test(m),
+};
+
+/** Overridden params the harness provably gated out of every AI call made. */
+function findDroppedOverrides(
+  overrides: Record<string, unknown>,
+  usage: WorkbenchAiUsage | null,
+): Array<{ param: string; models: string[] }> {
+  const calls = usage?.calls || [];
+  // No calls recorded (non-LLM module or harness-level failure) → can't tell.
+  // The gates are anthropic-branch-only, so mixed/non-anthropic calls → skip.
+  if (calls.length === 0 || !calls.every((c) => c.provider === 'anthropic')) return [];
+  const dropped: Array<{ param: string; models: string[] }> = [];
+  for (const [param, accepts] of Object.entries(PARAM_ACCEPTED_BY_MODEL)) {
+    if (overrides[param] == null) continue;
+    if (calls.every((c) => c.model && !accepts(c.model))) {
+      dropped.push({ param, models: [...new Set(calls.map((c) => String(c.model)))] });
+    }
+  }
+  return dropped;
+}
 
 /**
  * Shared renderer for a workbench experiment result — used by the /workbench
@@ -19,6 +49,7 @@ export function ExperimentResultView({ result }: { result: WorkbenchExperimentRe
   const stopReasons = [...new Set((usage?.calls || []).map((c) => c.stop_reason).filter(Boolean))];
   const errorText = exp.error || meta?.error
     || (failed ? `experiment ended with status '${exp.status}' — no error text recorded` : null);
+  const dropped = findDroppedOverrides(exp.overrides || {}, usage);
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-4">
@@ -68,6 +99,12 @@ export function ExperimentResultView({ result }: { result: WorkbenchExperimentRe
           <pre className="bg-gray-50 border border-gray-200 rounded p-2 text-[11px] text-gray-700 overflow-x-auto">
             {JSON.stringify(exp.overrides, null, 2)}
           </pre>
+          {dropped.map((d) => (
+            <p key={d.param} className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded p-2 mt-1">
+              Override <span className="font-mono">{d.param}</span> was NOT sent — not supported
+              by {d.models.join(', ')}. For this parameter the result is a baseline replay.
+            </p>
+          ))}
         </div>
       )}
 
