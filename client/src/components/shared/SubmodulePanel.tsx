@@ -4,9 +4,12 @@ import JSZip from 'jszip';
 import { usePanelStore } from '../../stores/panelStore';
 import { useStepContext } from '../../hooks/useStepContext';
 import { useSubmoduleRun, useSubmoduleRunFull, useExecuteSubmodule, useApproveSubmoduleRun, useApproveSubmoduleRunPerEntity, useLatestSubmoduleRuns, useEntityRunDetail } from '../../hooks/useSubmoduleRuns';
+import { useWorkbenchSourceRun, useCreateWorkbenchExperiment } from '../../hooks/useWorkbench';
+import { computeOverrides } from '../../api/workbenchOverrides';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../api/client';
-import type { SubmoduleManifest, SubmoduleConfig, DownloadableField, SubmoduleRun, SubmoduleRunBatch, EntityRunStatus, ProjectMode, TemplateExecutionPlan } from '../../types/step';
+import { ExperimentResultView } from './ExperimentResultView';
+import type { SubmoduleManifest, SubmoduleConfig, DownloadableField, SubmoduleRun, SubmoduleRunBatch, EntityRunStatus, ProjectMode, TemplateExecutionPlan, WorkbenchExperimentResponse } from '../../types/step';
 import { isPerEntityRun } from '../../types/step';
 import { CsvUploadInput, type UploadResult } from '../primitives/CsvUploadInput';
 import { ContentRenderer, type RenderSchema } from '../primitives/ContentRenderer';
@@ -63,6 +66,8 @@ export function SubmodulePanel({
     setPanelAccordion,
     setActiveSubmoduleRunId,
     openCloneDialog,
+    lastExperiment,
+    setLastExperiment,
   } = usePanelStore();
 
   // Clone-as-variant opens the shared S2.3 clone dialog (name / describe / single-round select →
@@ -312,6 +317,51 @@ export function SubmodulePanel({
     setOptionsDirty(false);
   }, [submodule?.id, savedConfig?.options, manifestDefaults]);
 
+  // --- TRY IT (doesn't save) — workbench experiment path ---
+  // Runs the submodule via POST /api/workbench/experiments (read-only replay
+  // harness) instead of the mutating /run route. Why: on run cb49ef80
+  // (2026-07-29) a prompt pasted here and executed via RUN TASK was upserted
+  // into run_submodule_config and its output replaced the pool article. The
+  // experiment path writes neither — it must NEVER call onSaveConfig /
+  // api.saveSubmoduleConfig.
+  const tryItMutation = useCreateWorkbenchExperiment();
+  const [tryItResult, setTryItResult] = useState<WorkbenchExperimentResponse | null>(null);
+  // Entity scope: the panel is step/batch-scoped but experiments are
+  // entity-scoped — pick one entity from the run's frozen pool at this step
+  // (read-only workbench tree endpoint).
+  const { data: workbenchTree } = useWorkbenchSourceRun(submodulePanelOpen ? (runId ?? null) : null);
+  const tryItEntities = useMemo(
+    () => workbenchTree?.steps.find((s) => s.step_index === stepIndex)?.entities ?? [],
+    [workbenchTree, stepIndex]
+  );
+  const [tryItEntity, setTryItEntity] = useState<string | null>(null);
+  useEffect(() => {
+    if (tryItEntities.length > 0 && (!tryItEntity || !tryItEntities.includes(tryItEntity))) {
+      setTryItEntity(tryItEntities[0]);
+    }
+  }, [tryItEntities, tryItEntity]);
+  useEffect(() => { setTryItResult(null); }, [submodule?.id]);
+
+  // Baseline mirrors the endpoint's own resolution (manifest defaults ← run
+  // config), so only real edits travel as overrides and the experiment row
+  // records true edit provenance instead of every option.
+  const tryItOverrides = useMemo(() => {
+    const baseline = { ...manifestDefaults, ...(savedConfig?.options || {}) };
+    return computeOverrides(baseline, localOptions);
+  }, [manifestDefaults, savedConfig?.options, localOptions]);
+
+  // U8 chaining: offer the session's last experiment as this run's input —
+  // only when it's completed and matches the current run + entity (the server
+  // enforces the same guards; this just avoids offering a doomed chain).
+  const [chainFromLast, setChainFromLast] = useState(false);
+  const chainableParent =
+    lastExperiment
+    && lastExperiment.status === 'completed'
+    && lastExperiment.source_run_id === runId
+    && lastExperiment.entity_name === tryItEntity
+      ? lastExperiment
+      : null;
+
   // Handle escape key
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -426,6 +476,40 @@ export function SubmodulePanel({
 
   const handleSeeResults = () => {
     setPanelAccordion('results');
+  };
+
+  // TRY IT — the safe path. Sends the panel's current option edits as
+  // experiment overrides; deliberately does NOT save input, options, or
+  // anything else (contrast handleRunTask/handleNext above, which call
+  // onSaveConfig before executing).
+  const handleTryIt = () => {
+    if (!runId || !submodule) return;
+    setPanelAccordion('tryit');
+    if (!tryItEntity || tryItMutation.isPending) return;
+    setTryItResult(null);
+    tryItMutation.mutate(
+      {
+        source_run_id: runId,
+        step_index: stepIndex,
+        submodule_id: submodule.id,
+        entity_name: tryItEntity,
+        ...(Object.keys(tryItOverrides).length > 0 ? { overrides: tryItOverrides } : {}),
+        ...(chainFromLast && chainableParent ? { parent_experiment_id: chainableParent.id } : {}),
+      },
+      {
+        onSuccess: (res) => {
+          setTryItResult(res);
+          const exp = res.experiment;
+          setLastExperiment({
+            id: exp.id,
+            source_run_id: exp.source_run_id,
+            submodule_id: exp.submodule_id,
+            entity_name: exp.entity_name,
+            status: exp.status,
+          });
+        },
+      }
+    );
   };
 
   const handleApprove = () => {
@@ -829,11 +913,96 @@ export function SubmodulePanel({
               />
             )}
           </PanelAccordionItem>
+
+          {/* --- TRY IT ACCORDION (workbench experiment — writes nothing to the run) --- */}
+          <PanelAccordionItem
+            title="Try it (doesn't save)"
+            badge={tryItMutation.isPending ? 'running' : tryItResult ? tryItResult.experiment.status : undefined}
+            isOpen={panelAccordion === 'tryit'}
+            onToggle={() => setPanelAccordion(panelAccordion === 'tryit' ? null : 'tryit')}
+            variant="teal"
+          >
+            <div className="space-y-3">
+              <p className="text-xs text-gray-500">
+                Replays this submodule against the run&apos;s frozen pool with your current option
+                edits sent as overrides. Nothing is saved to the run — no config, no pool, no results.
+              </p>
+
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Entity</label>
+                <select
+                  value={tryItEntity ?? ''}
+                  onChange={(e) => setTryItEntity(e.target.value || null)}
+                  className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 text-sm focus:outline-none focus:border-[#0891B2]"
+                >
+                  {tryItEntities.length === 0 && <option value="">No entities in this step&apos;s pool</option>}
+                  {tryItEntities.map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              </div>
+
+              {Object.keys(tryItOverrides).length > 0 && (
+                <p className="text-[11px] text-gray-500">
+                  {Object.keys(tryItOverrides).length} option edit{Object.keys(tryItOverrides).length === 1 ? '' : 's'} will
+                  be sent as overrides: {Object.keys(tryItOverrides).join(', ')}
+                </p>
+              )}
+
+              {/* U8 chaining affordance — run this submodule on the previous
+                  experiment's output instead of the frozen pool alone */}
+              {chainableParent && (
+                <label className="flex items-start gap-2 text-xs bg-sky-50 border border-sky-200 rounded p-2">
+                  <input
+                    type="checkbox"
+                    checked={chainFromLast}
+                    onChange={(e) => setChainFromLast(e.target.checked)}
+                    className="mt-0.5 rounded border-gray-300 text-[#0891B2] focus:ring-[#0891B2]"
+                  />
+                  <span className="text-gray-700">
+                    Use output from: <span className="font-medium">{chainableParent.submodule_id}</span> experiment
+                    <span className="text-gray-400"> ({chainableParent.id.slice(0, 8)})</span> as input
+                  </span>
+                </label>
+              )}
+
+              {tryItMutation.isPending && (
+                <div className="flex items-center gap-3 py-2">
+                  <Spinner />
+                  <p className="text-sm text-gray-500 animate-pulse">
+                    Replaying {submodule.id}{tryItEntity ? ` for ${tryItEntity}` : ''}… LLM submodules can take several minutes.
+                  </p>
+                </div>
+              )}
+
+              {tryItMutation.isError && !tryItResult && (
+                <div className="bg-red-50 border border-red-200 rounded p-3 text-xs text-red-700">
+                  Experiment failed: {tryItMutation.error instanceof Error ? tryItMutation.error.message : 'request failed'}
+                </div>
+              )}
+
+              {tryItResult && <ExperimentResultView result={tryItResult} />}
+            </div>
+          </PanelAccordionItem>
         </div>
 
         {/* CTA Footer */}
         <div className="border-t border-gray-200 px-4 py-3 bg-white flex-shrink-0">
-          <div className="flex items-center justify-center gap-3">
+          <div className="flex items-center justify-center gap-3 flex-wrap">
+            {/* TRY IT — safe workbench replay; never calls onSaveConfig or /run */}
+            <button
+              onClick={handleTryIt}
+              disabled={tryItMutation.isPending || !runId}
+              title="Runs via the workbench experiment endpoint — writes nothing to the run"
+              className={`px-4 py-3 rounded text-sm font-medium transition-colors border-2 ${
+                tryItMutation.isPending || !runId
+                  ? 'border-gray-200 text-gray-400 cursor-not-allowed'
+                  : 'border-[#0891B2] text-[#0891B2] hover:bg-[#0891B2]/10'
+              }`}
+            >
+              {tryItMutation.isPending ? 'TRYING…' : "TRY IT (doesn't save)"}
+            </button>
+
             {/* RUN TASK / ABORT */}
             {isRunning ? (
               <button

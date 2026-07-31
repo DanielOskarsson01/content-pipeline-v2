@@ -9,6 +9,7 @@ import { RunView } from './components/pages/RunView';
 import { RunReport } from './components/pages/RunReport';
 import { TemplatesPage } from './components/pages/TemplatesPage';
 import { TemplateEditor } from './components/pages/TemplateEditor';
+import { SubmoduleWorkbench } from './components/pages/SubmoduleWorkbench';
 
 function RootLayout() {
   return (
@@ -45,6 +46,7 @@ export const router = createBrowserRouter([
       { path: 'projects', element: <ProjectsList /> },
       { path: 'templates', element: <TemplatesPage /> },
       { path: 'templates/new', element: <TemplateEditor /> },
+      { path: 'workbench', element: <SubmoduleWorkbench /> },
       { path: 'templates/:templateId', element: <TemplateEditor /> },
       { path: 'projects/:projectId/runs/:runId', element: <RunView /> },
       { path: 'projects/:projectId/runs/:runId/report', element: <RunReport /> },

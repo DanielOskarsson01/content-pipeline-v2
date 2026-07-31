@@ -4,6 +4,7 @@ const TABS = [
   { path: '/new', label: 'New Project' },
   { path: '/projects', label: 'Projects' },
   { path: '/templates', label: 'Templates' },
+  { path: '/workbench', label: 'Workbench' },
 ];
 
 export function AppHeader() {

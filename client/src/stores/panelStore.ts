@@ -1,6 +1,20 @@
 import { create } from 'zustand';
 
-export type PanelAccordion = 'input' | 'options' | 'results' | null;
+export type PanelAccordion = 'input' | 'options' | 'results' | 'tryit' | null;
+
+/**
+ * Last workbench experiment run this session (either surface) — a POINTER
+ * (ids + status only, no result payload; the payload stays in TanStack/local
+ * state). Held here so the chaining affordance survives switching
+ * step/submodule in the panel.
+ */
+export interface LastExperimentRef {
+  id: string;
+  source_run_id: string;
+  submodule_id: string;
+  entity_name: string;
+  status: string;
+}
 
 /**
  * Panel UI Store - UI state only
@@ -21,6 +35,9 @@ interface PanelStore {
   // Accordion state
   panelAccordion: PanelAccordion;
 
+  // Last workbench experiment (chaining affordance — U8 UI half)
+  lastExperiment: LastExperimentRef | null;
+
   // Variant pane (card editor) — mutually exclusive with the submodule panel
   variantPaneOpen: boolean;
   variantCardId: string | null;
@@ -37,6 +54,7 @@ interface PanelStore {
   closeSubmodulePanel: () => void;
   setPanelAccordion: (accordion: PanelAccordion) => void;
   setActiveSubmoduleRunId: (runId: string | null) => void;
+  setLastExperiment: (exp: LastExperimentRef | null) => void;
   openVariantPane: (cardId: string) => void;
   closeVariantPane: () => void;
   openCloneDialog: (submoduleId: string, step: number, round: number) => void;
@@ -50,6 +68,7 @@ export const usePanelStore = create<PanelStore>((set) => ({
   activeCategoryKey: null,
   activeSubmoduleRunId: null,
   panelAccordion: 'input',
+  lastExperiment: null,
   variantPaneOpen: false,
   variantCardId: null,
   cloneDialogOpen: false,
@@ -77,6 +96,9 @@ export const usePanelStore = create<PanelStore>((set) => ({
 
   setActiveSubmoduleRunId: (runId) =>
     set({ activeSubmoduleRunId: runId }),
+
+  setLastExperiment: (exp) =>
+    set({ lastExperiment: exp }),
 
   openVariantPane: (cardId) =>
     set({ variantPaneOpen: true, variantCardId: cardId, submodulePanelOpen: false, cloneDialogOpen: false }),

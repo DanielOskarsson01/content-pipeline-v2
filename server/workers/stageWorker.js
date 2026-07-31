@@ -17,9 +17,10 @@ import db from '../services/db.js';
 import { createSupabaseStorage } from '../services/storage.js';
 import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
-import { anthropicAcceptsTemperature } from '../lib/aiModelParams.js';
+import { anthropicAcceptsTemperature, anthropicAcceptsThinking, anthropicAcceptsEffort } from '../lib/aiModelParams.js';
 import { COST_CONFIG } from '../config/timeouts.js';
 import { hydrateItems } from '../services/poolBlobs.js';
+import { hydrateRequiresColumns } from '../services/poolHydration.js';
 import { convertXlsxInDir } from '../utils/xlsxConverter.js';
 import { parseAnthropicSSE } from '../services/aiStream.js';
 import { buildCachedUserContent } from '../services/promptCache.js';
@@ -159,9 +160,17 @@ function buildTools(runId, submoduleId) {
   const aiCalls = [];
 
   const ai = {
-    complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens, cache_prefix }) => {
+    complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens, cache_prefix, thinking, effort }) => {
       const startTime = Date.now();
       const modelId = MODEL_MAP[model] || model;
+
+      // BACKLOG #53: caller asked for a control the model family doesn't
+      // accept → omit it silently (never 400), but leave a trace. (This logger
+      // has no debug level; info is the lowest.)
+      if (provider === 'anthropic') {
+        if (thinking != null && !anthropicAcceptsThinking(modelId)) logger.info(`[ai] thinking control omitted — ${modelId} does not accept an explicit thinking config`);
+        if (effort != null && !anthropicAcceptsEffort(modelId)) logger.info(`[ai] effort control omitted — ${modelId} does not accept output_config.effort`);
+      }
 
       // Inner function that makes a single API call with timeout
       async function callProvider(attempt) {
@@ -197,6 +206,11 @@ function buildTools(runId, submoduleId) {
                 // Claude-5 models (sonnet-5, opus-4-8, …) 400 on `temperature`;
                 // haiku-4-5 and older still accept it. Omit for the 5-gen ids.
                 ...(temperature != null && anthropicAcceptsTemperature(modelId) && { temperature }),
+                // BACKLOG #53: optional thinking/effort control — sent only
+                // when the caller supplies it AND the family accepts it. A
+                // call passing neither yields a byte-identical body to before.
+                ...(thinking != null && anthropicAcceptsThinking(modelId) && { thinking }),
+                ...(effort != null && anthropicAcceptsEffort(modelId) && { output_config: { effort } }),
               }),
             });
             if (res.status !== 200) {
@@ -501,175 +515,22 @@ async function handleEntityJob(job) {
     }
   }
 
-  // 7b. Enrich: merge downloadable fields from upstream for this entity's items
-  // Helper: item_data stores objects as JSON strings — parse them back
-  const parseContent = (val) => {
-    if (typeof val !== 'string') return val;
-    const trimmed = val.trimStart();
-    if ((trimmed[0] === '{' || trimmed[0] === '[') && trimmed.length > 1) {
-      try { return JSON.parse(val); } catch { /* not JSON */ }
-    }
-    return val;
-  };
-
-  const enrichedFields = new Set();
-  const requiresColumns = manifest.requires_columns || [];
+  // 7b. Enrich: merge downloadable fields from upstream for this entity's items.
+  //     Shared logic lives in server/services/poolHydration.js so stageWorker, the
+  //     workbench, and offline reconstruction all run the same primary-key→cross-key
+  //     cascade instead of re-copying it. excludeRunId keeps the current (running)
+  //     row out of the upstream set — behavior-identical to the pre-extract filter.
+  //     Mutates entityItems in place; the returned Set drives the 9b strip below.
   const entityItems = input?.entity?.items || [];
-  if (requiresColumns.length > 0 && entityItems.length > 0) {
-    const sampleItems = entityItems.slice(0, 10);
-    const missingColumns = requiresColumns.filter(col =>
-      sampleItems.every(item => !item[col] || String(item[col]).length === 0)
-    );
-
-    if (missingColumns.length > 0) {
-      console.log(`[worker:entity] Enriching "${entity_name}": ${missingColumns.join(', ')} missing from ${entityItems.length} items`);
-
-      // Find upstream completed entity_submodule_runs for this entity (with step_index for ordering)
-      const pipelineRunId = entityRun.run_id;
-      const { data: upstreamRuns } = await db
-        .from('entity_submodule_runs')
-        .select('id, step_index')
-        .eq('run_id', pipelineRunId)
-        .eq('entity_name', entity_name)
-        .in('status', ['completed', 'approved']);
-
-      const upstreamRunList = (upstreamRuns || [])
-        .filter(r => r.id !== entity_submodule_run_id);
-      const upstreamRunIds = upstreamRunList.map(r => r.id);
-      // Map submodule_run_id → step_index so we can sort item_data rows
-      const stepIndexMap = Object.fromEntries(upstreamRunList.map(r => [r.id, r.step_index]));
-
-      if (upstreamRunIds.length > 0) {
-        const itemKeyField = manifest.item_key || 'url';
-        const itemKeys = [...new Set(
-          entityItems.map(item => String(item[itemKeyField] ?? '')).filter(Boolean)
-        )];
-
-        const ENRICH_BATCH = 200;
-        const lookup = new Map();
-        const allItemDataRows = [];
-        for (let i = 0; i < itemKeys.length; i += ENRICH_BATCH) {
-          const keyBatch = itemKeys.slice(i, i + ENRICH_BATCH);
-          const { data: itemData } = await db
-            .from('submodule_run_item_data')
-            .select('submodule_run_id, item_key, field_name, content')
-            .in('submodule_run_id', upstreamRunIds)
-            .in('field_name', missingColumns)
-            .in('item_key', keyBatch);
-
-          if (itemData) allItemDataRows.push(...itemData);
-        }
-        // Sort by step_index ascending so later steps (e.g. boilerplate-stripper step 4)
-        // overwrite earlier steps (e.g. page-scraper step 3) in the lookup map
-        allItemDataRows.sort((a, b) =>
-          (stepIndexMap[a.submodule_run_id] || 0) - (stepIndexMap[b.submodule_run_id] || 0)
-        );
-        for (const row of allItemDataRows) {
-          if (!lookup.has(row.item_key)) lookup.set(row.item_key, {});
-          lookup.get(row.item_key)[row.field_name] = parseContent(row.content);
-        }
-
-        let mergedCount = 0;
-        for (const item of entityItems) {
-          const key = String(item[itemKeyField] ?? '');
-          const extra = lookup.get(key);
-          if (extra) {
-            for (const k of Object.keys(extra)) enrichedFields.add(k);
-            Object.assign(item, extra);
-            mergedCount++;
-          }
-        }
-        if (mergedCount > 0) {
-          console.log(`[worker:entity] Enriched ${mergedCount}/${entityItems.length} items for "${entity_name}" via primary key (${itemKeyField})`);
-        }
-
-        // Cross-key fallback: check which required fields are STILL missing after
-        // primary enrichment, then try alternate keys (url ↔ entity_name).
-        const stillMissing = missingColumns.filter(col =>
-          entityItems.some(item => item[col] === undefined || item[col] === null)
-        );
-
-        if (stillMissing.length > 0) {
-          // Try url-based lookup (for entity_name-keyed modules needing url-keyed data)
-          if (itemKeyField !== 'url') {
-            const urlKeys = [...new Set(
-              entityItems.map(item => String(item.url ?? '')).filter(Boolean)
-            )];
-            if (urlKeys.length > 0) {
-              const lookup2 = new Map();
-              const crossRows = [];
-              for (let i = 0; i < urlKeys.length; i += ENRICH_BATCH) {
-                const keyBatch = urlKeys.slice(i, i + ENRICH_BATCH);
-                const { data: itemData } = await db
-                  .from('submodule_run_item_data')
-                  .select('submodule_run_id, item_key, field_name, content')
-                  .in('submodule_run_id', upstreamRunIds)
-                  .in('field_name', stillMissing)
-                  .in('item_key', keyBatch);
-                if (itemData) crossRows.push(...itemData);
-              }
-              // Sort by step_index ascending so later steps overwrite earlier
-              crossRows.sort((a, b) =>
-                (stepIndexMap[a.submodule_run_id] || 0) - (stepIndexMap[b.submodule_run_id] || 0)
-              );
-              for (const row of crossRows) {
-                if (!lookup2.has(row.item_key)) lookup2.set(row.item_key, {});
-                lookup2.get(row.item_key)[row.field_name] = parseContent(row.content);
-              }
-              let crossCount = 0;
-              for (const item of entityItems) {
-                const urlVal = String(item.url ?? '');
-                const extra = lookup2.get(urlVal);
-                if (extra) {
-                  for (const k of Object.keys(extra)) enrichedFields.add(k);
-                  Object.assign(item, extra);
-                  crossCount++;
-                }
-              }
-              if (crossCount > 0) {
-                console.log(`[worker:entity] Cross-key enriched ${crossCount}/${entityItems.length} items for "${entity_name}" (url fallback, fields: ${stillMissing.join(', ')})`);
-              }
-            }
-          }
-
-          // Try entity_name-based lookup (for url-keyed modules needing entity_name-keyed data)
-          if (itemKeyField !== 'entity_name') {
-            const stillMissing2 = stillMissing.filter(col =>
-              entityItems.some(item => item[col] === undefined || item[col] === null)
-            );
-            if (stillMissing2.length > 0) {
-              const entityKeys = [...new Set(
-                entityItems.map(item => String(item.entity_name ?? '')).filter(Boolean)
-              )];
-              if (entityKeys.length > 0) {
-                const { data: itemData } = await db
-                  .from('submodule_run_item_data')
-                  .select('item_key, field_name, content')
-                  .in('submodule_run_id', upstreamRunIds)
-                  .in('field_name', stillMissing2)
-                  .in('item_key', entityKeys);
-                const entLookup = {};
-                for (const row of (itemData || [])) {
-                  entLookup[row.field_name] = parseContent(row.content);
-                }
-                if (Object.keys(entLookup).length > 0) {
-                  let entCount = 0;
-                  for (const item of entityItems) {
-                    if (item.entity_name && entityKeys.includes(item.entity_name)) {
-                      Object.assign(item, entLookup);
-                      entCount++;
-                    }
-                  }
-                  for (const k of Object.keys(entLookup)) enrichedFields.add(k);
-                  console.log(`[worker:entity] Cross-key enriched ${entCount}/${entityItems.length} items for "${entity_name}" (entity_name fallback, fields: ${stillMissing2.join(', ')})`);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
+  const enrichedFields = await hydrateRequiresColumns({
+    runId: entityRun.run_id,
+    entityName: entity_name,
+    stepIndex: step_index,
+    items: entityItems,
+    manifest,
+    excludeRunId: entity_submodule_run_id,
+    db,
+  });
 
   // 7c. Hydrate pool blob refs — restore large fields that were extracted to pool_item_blobs
   if (entityItems.length > 0) {
