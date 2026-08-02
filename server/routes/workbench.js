@@ -73,23 +73,42 @@ const isContent = (v) => v != null && typeof v !== 'number' && typeof v !== 'boo
 /**
  * Overlay a completed parent experiment's output items onto the frozen pool.
  *
- * MERGE POLICY: REPLACE-BY-SHAPE — deliberately NOT prod's add-by-composite-key
- * (item_key, source_submodule) semantics. Prod-parity merge would leave BOTH the
- * original content-writer item and the parent experiment's output carrying
- * content_markdown, and step-6 checkers concatenate every such item they find
- * (qa-structural execute.js:147, citation-coverage-checker execute.js:270) —
- * doubling word/section counts and producing a wrong verdict. Replace-by-shape
- * (drop every pool item carrying any primary field the parent produced, then
- * insert the parent's items) is what makes a chained QA verdict meaningful.
- * Sibling items whose fields the parent does NOT produce (analysis_json,
- * seo_plan_json, …) are preserved so §7b hydration still supplies them.
- * Trade-off: sibling FIELDS riding on a dropped item go with it (chaining a
- * TSE parent drops the content-writer item and its meta_title/meta_description
- * — §7b re-supplies anything in requires_columns; opportunistic readers lose them).
+ * MERGE POLICY: REPLACE-BY-SHAPE, SCOPED TO GENERATED ITEMS — deliberately NOT
+ * prod's add-by-composite-key (item_key, source_submodule) semantics. The
+ * predicate sits between two failure modes, both observed live:
  *
- * Returns { items, dropped } — never mutates the caller's arrays or the parent row.
- * All guards throw httpError (fail loud, never skip silently).
+ *   (a) UNDER-DROP → concatenation. Prod-parity merge would leave BOTH the
+ *       original content-writer item and the parent's output carrying
+ *       content_markdown, and step-6 checkers concatenate every bearer they
+ *       find (qa-structural execute.js:147, citation-coverage-checker
+ *       execute.js:270) — doubling word/section counts (the 5,237-word
+ *       artefact). So every GENERATED item carrying a parent field is dropped.
+ *
+ *   (b) OVER-DROP → source starvation. Shape-matching the WHOLE pool drops
+ *       source items on incidental field-name collisions: run cb49ef80's
+ *       content-writer parent emits meta_description (SEO meta), 45 scraped
+ *       stripper items carried meta_description (their og:description), and
+ *       the checker was left 12 footer stubs as its evidence base —
+ *       "hallucination" scores measured source deletion, not grounding. So
+ *       items from source-producing modules (manifest step <= SOURCE_STEP_MAX:
+ *       discovery/validation/scraping/filtering) are EXEMPT from the drop —
+ *       they are the evidence base a step-5/6 parent can never supersede.
+ *
+ * The exemption is provenance-positive: an item with no source_submodule, or
+ * one whose module isn't in the registry, stays shape-matched — exempting
+ * unknowns could let a second content_markdown bearer through (failure mode a).
+ * Ceiling: if a step<=4 module ever emits a generation field name
+ * (content_markdown), its items would be exempt and could under-drop.
+ * Residual over-drop: a generation-step SIBLING with an incidental collision
+ * is still dropped (e.g. a content-writer parent drops the seo-planner item
+ * via meta_title) — §7b re-supplies anything in requires_columns;
+ * opportunistic readers lose the rest.
+ *
+ * Returns { items, dropped, kept } — never mutates the caller's arrays or the
+ * parent row. All guards throw httpError (fail loud, never skip silently).
  */
+// Steps 0–4 produce/refine source material; 5+ generate/verify content from it.
+const SOURCE_STEP_MAX = 4;
 async function applyParentOverlay({ items, parentId, source_run_id, entity_name, db, getManifest }) {
   const { data: parent, error: parentErr } = await db
     .from('workbench_experiments')
@@ -157,7 +176,15 @@ async function applyParentOverlay({ items, parentId, source_run_id, entity_name,
     return false;
   };
 
-  const kept = items.filter(it => !carriesPrimary(it));
+  // Failure-mode (b) exemption — see the merge-policy comment above.
+  const isSourceItem = (it) => {
+    const src = it?.source_submodule;
+    if (!src) return false;
+    const m = getManifest(src);
+    return !!m && m.step <= SOURCE_STEP_MAX;
+  };
+
+  const kept = items.filter(it => isSourceItem(it) || !carriesPrimary(it));
   // Stamp source_submodule = parent.submodule_id: experiment outputs are never
   // stamped (prod stamps at approval), and downstream display/debugging keys on it.
   const inserted = parentItems.map(it => ({ ...it, source_submodule: parent.submodule_id }));
@@ -171,7 +198,7 @@ async function applyParentOverlay({ items, parentId, source_run_id, entity_name,
   // ponytail: holds while a parent emits ≤10 items (every current step-5/6
   // module emits 1/entity); upgrade path is excluding the parent's
   // primaryFields from enrichment in poolHydration itself.
-  return { items: [...inserted, ...kept], dropped: items.length - kept.length };
+  return { items: [...inserted, ...kept], dropped: items.length - kept.length, kept: kept.length };
 }
 
 export function createWorkbenchRouter(deps) {
@@ -396,7 +423,8 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
         items, parentId: parent_experiment_id, source_run_id, entity_name, db, getManifest,
       });
       items = overlaid.items;
-      chain = { parent_experiment_id, pool_items_dropped: overlaid.dropped };
+      // kept alongside dropped so pool starvation is visible at a glance
+      chain = { parent_experiment_id, pool_items_dropped: overlaid.dropped, pool_items_kept: overlaid.kept };
     } catch (err) {
       return res.status(err.httpStatus || 500).json({ error: err.message });
     }
