@@ -95,9 +95,13 @@ function makeRespond({ parent = TSE_PARENT, insertCapture } = {}) {
 }
 
 const MANIFESTS = {
-  'qa-structural': { id: 'qa-structural', item_key: 'entity_name', options_defaults: {}, options: [] },
-  'tone-seo-editor': { id: 'tone-seo-editor', item_key: 'entity_name', options_defaults: {}, options: [] },
-  'content-writer': { id: 'content-writer', item_key: 'entity_name', options_defaults: {}, options: [] },
+  'qa-structural': { id: 'qa-structural', step: 6, item_key: 'entity_name', options_defaults: {}, options: [] },
+  'tone-seo-editor': { id: 'tone-seo-editor', step: 5, item_key: 'entity_name', options_defaults: {}, options: [] },
+  'content-writer': { id: 'content-writer', step: 5, item_key: 'entity_name', options_defaults: {}, options: [] },
+  'hallucination-detector': { id: 'hallucination-detector', step: 6, item_key: 'entity_name', options_defaults: {}, options: [] },
+  'boilerplate-stripper': { id: 'boilerplate-stripper', step: 4, item_key: 'url', options_defaults: {}, options: [] },
+  'seo-planner': { id: 'seo-planner', step: 5, item_key: 'entity_name', options_defaults: {}, options: [] },
+  'content-analyzer': { id: 'content-analyzer', step: 5, item_key: 'entity_name', options_defaults: {}, options: [] },
 };
 
 async function driveEndpoint({ respond, runSubmodule, body, getManifest }) {
@@ -149,8 +153,10 @@ test('chain TSE→qa-structural: child sees exactly one content_markdown item (t
   assert.ok(!items.some(i => i.content_markdown === 'ORIGINAL CW CONTENT'));
   // scrape items untouched
   assert.equal(items.filter(i => i.url).length, 2);
+  assert.equal(json.source, 'chained');
   assert.equal(json.chain.parent_experiment_id, PARENT_ID);
   assert.equal(json.chain.pool_items_dropped, 2);
+  assert.equal(json.chain.pool_items_kept, 4);
 });
 
 // ---------- (b) CW → TSE chain ----------
@@ -317,14 +323,94 @@ test('>10-item pool: parent content survives real §7b hydration as the only bea
   assert.equal(itemDataQueried, false, '§7b saw the parent field present and never hit item_data');
 });
 
-// ---------- unchained requests unaffected ----------
-test('request without parent_experiment_id never touches workbench parent load or blobs', async () => {
+// ---------- unchained requests unaffected, and explicitly marked ----------
+test('request without parent_experiment_id never touches workbench parent load or blobs, and is marked pool-sourced', async () => {
   let inserted;
-  const { status, calls } = await driveEndpoint({
+  const { status, json, calls } = await driveEndpoint({
     respond: makeRespond({ parent: TSE_PARENT, insertCapture: (row) => { inserted = row; } }),
     body: { source_run_id: RUN, step_index: 6, submodule_id: 'qa-structural', entity_name: ENTITY },
   });
   assert.equal(status, 201);
   assert.ok(!calls.some(c => c.table === 'pool_item_blobs'), 'no blob lookup without a parent');
   assert.equal(inserted.parent_experiment_id, null);
+  // the silent-unchained fix: an unchained response says so positively —
+  // absence of the chain key must never be the only signal
+  assert.equal(json.source, 'pool');
+  assert.equal(json.chain, null);
+  assert.ok('chain' in json, 'chain key present (explicit null), not omitted');
+});
+
+// ---------- the cb49ef80 over-drop shape (failure mode b) ----------
+// Run cb49ef80 / Hacksawgaming: 57 boilerplate-stripper items (45 carrying the
+// scrape's meta_description og:description), plus step-5 singletons. Chaining a
+// content-writer parent (which emits meta_description as SEO meta) shape-dropped
+// the 45 scraped sources and left the checker 12 footer stubs — hallucination
+// scores measured source deletion, not grounding. Source-step items must be
+// exempt from the drop; the stale generated bearers must still go.
+test('cb49ef80 shape: scraped meta_description bearers survive a CW parent; stale writer/TSE bearers dropped; one content_markdown bearer', async () => {
+  const cbPool = [
+    ...Array.from({ length: 45 }, (_, i) => ({
+      url: `https://hacksawgaming.com/p${i}`, entity_name: ENTITY, status: 'success',
+      meta_description: `og description ${i}`, title: `Page ${i}`, text_preview: `preview ${i}`,
+      word_count: 500, source_submodule: 'boilerplate-stripper',
+    })),
+    ...Array.from({ length: 12 }, (_, i) => ({
+      url: `https://hacksawgaming.com/stub${i}`, entity_name: ENTITY, status: 'success',
+      text_preview: 'footer stub', word_count: 40, source_submodule: 'boilerplate-stripper',
+    })),
+    { entity_name: ENTITY, content_markdown: 'ORIGINAL CW CONTENT', meta_title: 'CW title', meta_description: 'CW desc', word_count: 2791, source_submodule: 'content-writer' },
+    { entity_name: ENTITY, _blob_ref: 'blob-1', revision_summary: 'old tse summary', word_count: 2446, source_submodule: 'tone-seo-editor' },
+    { entity_name: ENTITY, meta_title: 'planner meta title', keywords_text: 'kw', source_submodule: 'seo-planner' },
+    { entity_name: ENTITY, analysis_json: { sections: [1] }, source_submodule: 'content-analyzer' },
+  ];
+  let harnessSpec;
+  const { status, json } = await driveEndpoint({
+    respond: (rec) => {
+      if (rec.table === 'entity_stage_pool') return { data: { pool_items: structuredClone(cbPool) }, error: null };
+      return makeRespond({ parent: CW_PARENT })(rec);
+    },
+    runSubmodule: async (spec) => { harnessSpec = spec; return { resolvedOptions: spec.options, result: { items: [], meta: {} } }; },
+    body: chainBody('hallucination-detector'),
+  });
+  assert.equal(status, 201);
+  const items = harnessSpec.entity.items;
+  // all 57 scraped/stripped source items survive — including the 45 whose
+  // meta_description collides with the parent's declared output field
+  assert.equal(items.filter(i => i.source_submodule === 'boilerplate-stripper').length, 57, 'no source starvation');
+  // stale generated bearers are gone: exactly ONE content_markdown bearer (the parent's)
+  const bearers = items.filter(i => i.content_markdown);
+  assert.equal(bearers.length, 1, 'exactly one content_markdown bearer');
+  assert.equal(bearers[0].content_markdown, 'NEW CW CONTENT');
+  // blob-hidden bearer still dropped (its blob keys include content_markdown)
+  assert.equal(items.filter(i => i._blob_ref).length, 0, 'blob-hidden bearer dropped');
+  // residual documented over-drop: the seo-planner sibling goes via its
+  // meta_title collision (generation-step item, not exempt)
+  assert.ok(!items.some(i => i.source_submodule === 'seo-planner'), 'planner sibling still shape-dropped (documented residual)');
+  assert.ok(items.some(i => i.analysis_json), 'analyzer sibling survives');
+  // counts surface starvation at a glance
+  assert.equal(json.source, 'chained');
+  assert.equal(json.chain.pool_items_dropped, 3, 'CW + TSE + planner');
+  assert.equal(json.chain.pool_items_kept, 58, '57 source items + analyzer');
+});
+
+// ---------- unknown provenance stays shape-matched (failure mode a guard) ----------
+test('item with no source_submodule carrying a parent field is still dropped', async () => {
+  const pool = [
+    { entity_name: ENTITY, content_markdown: 'ANONYMOUS BEARER', word_count: 100 }, // no source_submodule
+    { url: 'https://x.com/a', entity_name: ENTITY, meta_description: 'og desc', source_submodule: 'boilerplate-stripper' },
+  ];
+  let harnessSpec;
+  const { status } = await driveEndpoint({
+    respond: (rec) => {
+      if (rec.table === 'entity_stage_pool') return { data: { pool_items: structuredClone(pool) }, error: null };
+      return makeRespond({ parent: CW_PARENT })(rec);
+    },
+    runSubmodule: async (spec) => { harnessSpec = spec; return { resolvedOptions: spec.options, result: { items: [], meta: {} } }; },
+    body: chainBody('qa-structural'),
+  });
+  assert.equal(status, 201);
+  const items = harnessSpec.entity.items;
+  assert.ok(!items.some(i => i.content_markdown === 'ANONYMOUS BEARER'), 'unknown-provenance bearer dropped');
+  assert.equal(items.filter(i => i.content_markdown).length, 1, 'only the parent bearer remains');
+  assert.ok(items.some(i => i.source_submodule === 'boilerplate-stripper'), 'source item exempt');
 });
