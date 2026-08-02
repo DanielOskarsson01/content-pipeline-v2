@@ -38,6 +38,13 @@ interface PanelStore {
   // Last workbench experiment (chaining affordance — U8 UI half)
   lastExperiment: LastExperimentRef | null;
 
+  // Chaining intent — lives here, NOT in component useState: the panel
+  // remounts when the user switches step/submodule, and a local checkbox
+  // silently reset to unchecked, sending runs unchained without any signal.
+  // Only APPLIED when the last experiment matches the current run+entity
+  // (SubmodulePanel's chainableParent guard).
+  chainFromLast: boolean;
+
   // Variant pane (card editor) — mutually exclusive with the submodule panel
   variantPaneOpen: boolean;
   variantCardId: string | null;
@@ -55,6 +62,7 @@ interface PanelStore {
   setPanelAccordion: (accordion: PanelAccordion) => void;
   setActiveSubmoduleRunId: (runId: string | null) => void;
   setLastExperiment: (exp: LastExperimentRef | null) => void;
+  setChainFromLast: (on: boolean) => void;
   openVariantPane: (cardId: string) => void;
   closeVariantPane: () => void;
   openCloneDialog: (submoduleId: string, step: number, round: number) => void;
@@ -69,6 +77,7 @@ export const usePanelStore = create<PanelStore>((set) => ({
   activeSubmoduleRunId: null,
   panelAccordion: 'input',
   lastExperiment: null,
+  chainFromLast: false,
   variantPaneOpen: false,
   variantCardId: null,
   cloneDialogOpen: false,
@@ -98,7 +107,20 @@ export const usePanelStore = create<PanelStore>((set) => ({
     set({ activeSubmoduleRunId: runId }),
 
   setLastExperiment: (exp) =>
-    set({ lastExperiment: exp }),
+    set((s) => ({
+      lastExperiment: exp,
+      // The checked box carries across step/submodule switches within the same
+      // run+entity (the chaining workflow), but a context change requires a
+      // fresh opt-in — a sticky flag would silently chain a DIFFERENT entity's
+      // next experiment, the mirror image of the silent-unchain bug.
+      chainFromLast: s.chainFromLast
+        && !!exp && !!s.lastExperiment
+        && exp.source_run_id === s.lastExperiment.source_run_id
+        && exp.entity_name === s.lastExperiment.entity_name,
+    })),
+
+  setChainFromLast: (on) =>
+    set({ chainFromLast: on }),
 
   openVariantPane: (cardId) =>
     set({ variantPaneOpen: true, variantCardId: cardId, submodulePanelOpen: false, cloneDialogOpen: false }),

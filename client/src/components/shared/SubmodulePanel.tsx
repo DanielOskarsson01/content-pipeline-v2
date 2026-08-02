@@ -68,6 +68,8 @@ export function SubmodulePanel({
     openCloneDialog,
     lastExperiment,
     setLastExperiment,
+    chainFromLast,
+    setChainFromLast,
   } = usePanelStore();
 
   // Clone-as-variant opens the shared S2.3 clone dialog (name / describe / single-round select →
@@ -353,7 +355,8 @@ export function SubmodulePanel({
   // U8 chaining: offer the session's last experiment as this run's input —
   // only when it's completed and matches the current run + entity (the server
   // enforces the same guards; this just avoids offering a doomed chain).
-  const [chainFromLast, setChainFromLast] = useState(false);
+  // chainFromLast lives in panelStore so it survives the panel remount on
+  // step/submodule switch (a local useState reset silently unchained two runs).
   const chainableParent =
     lastExperiment
     && lastExperiment.status === 'completed'
@@ -950,7 +953,9 @@ export function SubmodulePanel({
               )}
 
               {/* U8 chaining affordance — run this submodule on the previous
-                  experiment's output instead of the frozen pool alone */}
+                  experiment's output instead of the frozen pool alone. The
+                  input-source line states what the NEXT run will read in both
+                  directions, so an unchained run is never a surprise. */}
               {chainableParent && (
                 <label className="flex items-start gap-2 text-xs bg-sky-50 border border-sky-200 rounded p-2">
                   <input
@@ -965,6 +970,16 @@ export function SubmodulePanel({
                   </span>
                 </label>
               )}
+              <p className="text-[11px] text-gray-500">
+                Next run will read:{' '}
+                {chainFromLast && chainableParent ? (
+                  <span className="font-medium text-sky-800">
+                    experiment {chainableParent.id.slice(0, 8)} ({chainableParent.submodule_id}) overlaid on the pool
+                  </span>
+                ) : (
+                  <span className="font-medium">the run&apos;s frozen pool</span>
+                )}
+              </p>
 
               {tryItMutation.isPending && (
                 <div className="flex items-center gap-3 py-2">
