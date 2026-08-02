@@ -177,14 +177,28 @@ async function applyParentOverlay({ items, parentId, source_run_id, entity_name,
   };
 
   // Failure-mode (b) exemption — see the merge-policy comment above.
+  // Memoized: the default getManifest rescans the modules dir on every call,
+  // and this runs once per pool item (~60 on a production pool).
+  const manifestMemo = new Map();
   const isSourceItem = (it) => {
     const src = it?.source_submodule;
     if (!src) return false;
-    const m = getManifest(src);
+    if (!manifestMemo.has(src)) manifestMemo.set(src, getManifest(src));
+    const m = manifestMemo.get(src);
     return !!m && m.step <= SOURCE_STEP_MAX;
   };
 
-  const kept = items.filter(it => isSourceItem(it) || !carriesPrimary(it));
+  // The parent's OWN originals are always replaced by composite key
+  // (item_key, source_submodule) — prod's merge identity — regardless of shape
+  // or exemption. Without this, chaining a step<=4 parent (e.g. an improved
+  // boilerplate-stripper experiment) would prepend its items while the
+  // exemption keeps every original: two text_content bearers per url, doubling
+  // the child's corpus with pre-fix text.
+  const parentKeys = new Set(parentItems.map(it => String(it[itemKeyField])));
+  const isParentOriginal = (it) =>
+    it?.source_submodule === parent.submodule_id && parentKeys.has(String(it?.[itemKeyField]));
+
+  const kept = items.filter(it => !isParentOriginal(it) && (isSourceItem(it) || !carriesPrimary(it)));
   // Stamp source_submodule = parent.submodule_id: experiment outputs are never
   // stamped (prod stamps at approval), and downstream display/debugging keys on it.
   const inserted = parentItems.map(it => ({ ...it, source_submodule: parent.submodule_id }));

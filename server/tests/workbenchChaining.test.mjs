@@ -393,6 +393,47 @@ test('cb49ef80 shape: scraped meta_description bearers survive a CW parent; stal
   assert.equal(json.chain.pool_items_kept, 58, '57 source items + analyzer');
 });
 
+// ---------- step<=4 parent: own originals replaced by composite key, never duplicated ----------
+// The source-item exemption must not shield the parent's OWN originals: chaining
+// an improved boilerplate-stripper experiment prepends its items — without the
+// composite-key arm, every original would be exempt-kept too (two text_content
+// bearers per url, doubling the child's corpus with pre-fix text).
+test('chain stripper parent: originals replaced by (item_key, source_submodule), other source items and generated bearers kept', async () => {
+  const STRIPPER_PARENT = {
+    id: PARENT_ID, source_run_id: RUN, entity_name: ENTITY, submodule_id: 'boilerplate-stripper', status: 'completed',
+    output_data: {
+      items: [
+        { url: 'https://x.com/a', entity_name: ENTITY, text_content: 'RESTRIPPED A', word_count: 90, status: 'success' },
+        { url: 'https://x.com/b', entity_name: ENTITY, text_content: 'RESTRIPPED B', word_count: 180, status: 'success' },
+      ],
+    },
+  };
+  const pool = [
+    { url: 'https://x.com/a', entity_name: ENTITY, text_content: 'OLD A', word_count: 100, source_submodule: 'boilerplate-stripper' },
+    { url: 'https://x.com/b', entity_name: ENTITY, text_content: 'OLD B', word_count: 200, source_submodule: 'boilerplate-stripper' },
+    { url: 'https://x.com/c', entity_name: ENTITY, text_content: 'OLD C', word_count: 300, source_submodule: 'boilerplate-stripper' },
+    { entity_name: ENTITY, content_markdown: 'CW CONTENT', word_count: 2791, source_submodule: 'content-writer' },
+  ];
+  let harnessSpec;
+  const { status, json } = await driveEndpoint({
+    respond: (rec) => {
+      if (rec.table === 'entity_stage_pool') return { data: { pool_items: structuredClone(pool) }, error: null };
+      return makeRespond({ parent: STRIPPER_PARENT })(rec);
+    },
+    runSubmodule: async (spec) => { harnessSpec = spec; return { resolvedOptions: spec.options, result: { items: [], meta: {} } }; },
+    body: chainBody('qa-structural'),
+  });
+  assert.equal(status, 201);
+  const items = harnessSpec.entity.items;
+  const urls = items.filter(i => i.url).map(i => i.url);
+  assert.equal(new Set(urls).size, urls.length, 'no url appears twice');
+  assert.equal(items.find(i => i.url === 'https://x.com/a').text_content, 'RESTRIPPED A', 'parent item replaced the original');
+  assert.equal(items.find(i => i.url === 'https://x.com/c').text_content, 'OLD C', 'untouched source item kept');
+  assert.ok(items.some(i => i.content_markdown === 'CW CONTENT'), 'generated bearer not superseded by a source parent');
+  assert.equal(json.chain.pool_items_dropped, 2, 'exactly the two originals');
+  assert.equal(json.chain.pool_items_kept, 2);
+});
+
 // ---------- unknown provenance stays shape-matched (failure mode a guard) ----------
 test('item with no source_submodule carrying a parent field is still dropped', async () => {
   const pool = [

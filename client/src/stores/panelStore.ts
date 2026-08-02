@@ -107,7 +107,17 @@ export const usePanelStore = create<PanelStore>((set) => ({
     set({ activeSubmoduleRunId: runId }),
 
   setLastExperiment: (exp) =>
-    set({ lastExperiment: exp }),
+    set((s) => ({
+      lastExperiment: exp,
+      // The checked box carries across step/submodule switches within the same
+      // run+entity (the chaining workflow), but a context change requires a
+      // fresh opt-in — a sticky flag would silently chain a DIFFERENT entity's
+      // next experiment, the mirror image of the silent-unchain bug.
+      chainFromLast: s.chainFromLast
+        && !!exp && !!s.lastExperiment
+        && exp.source_run_id === s.lastExperiment.source_run_id
+        && exp.entity_name === s.lastExperiment.entity_name,
+    })),
 
   setChainFromLast: (on) =>
     set({ chainFromLast: on }),
