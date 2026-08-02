@@ -61,13 +61,22 @@ export function ExperimentResultView({ result }: { result: WorkbenchExperimentRe
         {meta?.truncated && (
           <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-amber-100 text-amber-800">truncated</span>
         )}
-        {(result.chain || exp.parent_experiment_id) && (
+        {/* What the run READ is stated positively in both directions — an
+            unchained run must never be mistaken for a chained one by the mere
+            absence of a chip (two live runs were, and their pool-scored numbers
+            looked plausible). parent_experiment_id fallback covers pre-marker
+            server responses. */}
+        {(result.chain || exp.parent_experiment_id) ? (
           <span
             className="text-xs px-2 py-0.5 rounded-full font-medium bg-sky-100 text-sky-800"
             title={result.chain?.parent_experiment_id || exp.parent_experiment_id || ''}
           >
-            chained from {(result.chain?.parent_experiment_id || exp.parent_experiment_id || '').slice(0, 8)}
-            {result.chain ? ` · ${result.chain.pool_items_dropped} pool item${result.chain.pool_items_dropped === 1 ? '' : 's'} replaced` : ''}
+            scored experiment {(result.chain?.parent_experiment_id || exp.parent_experiment_id || '').slice(0, 8)}
+            {result.chain ? ` · ${result.chain.pool_items_dropped} pool item${result.chain.pool_items_dropped === 1 ? '' : 's'} replaced, ${result.chain.pool_items_kept} kept` : ''}
+          </span>
+        ) : (
+          <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-gray-100 text-gray-600">
+            scored the run&apos;s pool — not chained
           </span>
         )}
       </div>

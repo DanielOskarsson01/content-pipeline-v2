@@ -558,8 +558,10 @@ export interface WorkbenchExperimentResponse {
   replay_fidelity: string;
   /** set when the server answered non-2xx but still recorded the experiment */
   error?: string;
-  /** U8: present when parent_experiment_id was sent and the overlay applied */
-  chain?: { parent_experiment_id: string; pool_items_dropped: number };
+  /** U8: what the run read — always present on current servers ('pool' when unchained) */
+  source?: 'chained' | 'pool';
+  /** U8: overlay stats when chained; explicit null when the run scored the pool */
+  chain?: { parent_experiment_id: string; pool_items_dropped: number; pool_items_kept: number } | null;
 }
 
 export interface CreateWorkbenchExperimentInput {

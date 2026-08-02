@@ -480,7 +480,14 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
       error: err.message,
     }, db);
     return res.status(err.isCeiling ? 504 : 500)
-      .json({ error: err.message, experiment, replay_fidelity: REPLAY_FIDELITY_NOTE });
+      .json({
+        error: err.message,
+        experiment,
+        replay_fidelity: REPLAY_FIDELITY_NOTE,
+        // a chained run that failed is still a chained run — same marker as the 201 path
+        source: chain ? 'chained' : 'pool',
+        chain: chain,
+      });
   }
 
   // 5. Insert the ONE experiment row (spec §2 step 5) and return it.
@@ -496,5 +503,14 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
     error: meta.error || null,
   }, db);
 
-  return res.status(201).json({ experiment, replay_fidelity: REPLAY_FIDELITY_NOTE, ...(chain && { chain }) });
+  // source/chain are ALWAYS present — two live runs came back unchained
+  // (parent_experiment_id: null), scored the pool, and were indistinguishable
+  // from chained runs because the key was simply absent. An explicit
+  // source:'pool' + chain:null makes "what did this run read" unambiguous.
+  return res.status(201).json({
+    experiment,
+    replay_fidelity: REPLAY_FIDELITY_NOTE,
+    source: chain ? 'chained' : 'pool',
+    chain: chain,
+  });
 }
