@@ -5,6 +5,7 @@ import { executeRun, isAutoExecuting, abortAutoExecute } from '../services/autoE
 import { getSubmodules, getSubmodulesGroupedByCategory, getSubmoduleById } from '../services/moduleLoader.js';
 import { CATEGORY_ORDER, sortSubmoduleIds } from '../services/moduleOrder.js';
 import { applyRouting } from '../services/routingHandler.js';
+import { abandonRun } from '../services/abandonRun.js';
 
 const router = Router();
 
@@ -976,19 +977,7 @@ router.post('/:id/abandon', async (req, res, next) => {
       return res.status(400).json({ error: 'Abort auto-execute first before abandoning' });
     }
 
-    await db
-      .from('pipeline_runs')
-      .update({ status: 'abandoned', completed_at: new Date().toISOString() })
-      .eq('id', req.params.id);
-
-    await db
-      .from('decision_log')
-      .insert({
-        run_id: req.params.id,
-        step_index: 0,
-        decision: 'run_abandoned',
-        context: { reason: req.body?.reason || 'User abandoned run' },
-      });
+    await abandonRun(req.params.id, req.body?.reason || 'User abandoned run');
 
     res.json({ status: 'abandoned' });
   } catch (err) { next(err); }
