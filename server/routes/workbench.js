@@ -31,8 +31,11 @@
 import express from 'express';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { runSubmoduleOnce } from '../services/submoduleHarness.js';
-import { insertExperiment } from '../services/workbenchExperiments.js';
+import { insertExperiment, getExperimentById } from '../services/workbenchExperiments.js';
 import { runForwardChain, getChainTree } from './workbenchChains.js';
+import {
+  getOrCreateSession, findSession, acceptExperiment, getSessionSteps, resolveSessionParent,
+} from '../services/tuningSessions.js';
 
 // Per-request execution ceiling. The harness caps each AI call at 600s with up
 // to 3 attempts but has no overall bound (U2 review finding); a single
@@ -509,14 +512,80 @@ export function createWorkbenchRouter(deps) {
     }
   });
 
+  // ---- T2 tuning-session accept + read (see tuningSessions.js) ----
+
+  /**
+   * POST /api/workbench/sessions/accept
+   * Mark an experiment as the accepted result for its step in the (run, entity)
+   * session. Creates the session on first accept. Accepting at step N erases the
+   * session's accepted steps > N (erase-downstream, session-only). Only a
+   * completed experiment can be accepted — a truncated/errored one must never
+   * become the parent the next step chains from (fail-closed, house convention).
+   * Writes ONLY tuning_* tables; workbench_experiments and real-run tables untouched.
+   * Body: { source_run_id, entity_name, step_index, experiment_id }
+   */
+  router.post('/sessions/accept', async (req, res) => {
+    try {
+      const { source_run_id, entity_name, step_index, experiment_id } = req.body || {};
+      if (!source_run_id || !entity_name || step_index == null || !experiment_id) {
+        return res.status(400).json({ error: 'source_run_id, entity_name, step_index, experiment_id are required' });
+      }
+      const exp = await getExperimentById(experiment_id, db);
+      if (!exp) return res.status(404).json({ error: `experiment ${experiment_id} not found` });
+      if (exp.source_run_id !== source_run_id || exp.entity_name !== entity_name || exp.step_index !== step_index) {
+        return res.status(400).json({ error: 'experiment does not match this run / entity / step' });
+      }
+      if (exp.status !== 'completed') {
+        return res.status(409).json({ error: `cannot accept a '${exp.status}' experiment — only completed experiments can be accepted` });
+      }
+      const session = await getOrCreateSession(source_run_id, entity_name, db);
+      const { accepted, erased } = await acceptExperiment(
+        { sessionId: session.id, stepIndex: step_index, experimentId: experiment_id, submoduleId: exp.submodule_id }, db);
+      const steps = await getSessionSteps(session.id, db);
+      res.json({ session_id: session.id, accepted, erased, steps });
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * GET /api/workbench/sessions/:runId/:entityName
+   * The accepted chain for a (run, entity) tuning session, or an empty shell if
+   * none exists yet. Read-only.
+   */
+  router.get('/sessions/:runId/:entityName', async (req, res) => {
+    try {
+      const session = await findSession(req.params.runId, decodeURIComponent(req.params.entityName), db);
+      if (!session) return res.json({ session_id: null, steps: [] });
+      const steps = await getSessionSteps(session.id, db);
+      res.json({
+        session_id: session.id,
+        source_run_id: session.source_run_id,
+        entity_name: session.entity_name,
+        steps,
+      });
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 }
 
 async function handleCreateExperiment(req, res, deps) {
-  const { source_run_id, step_index, submodule_id, entity_name, overrides, exclude_entity_submodule_run_id, parent_experiment_id } = req.body || {};
+  const { db } = deps;
+  const {
+    source_run_id, step_index, submodule_id, entity_name, overrides,
+    exclude_entity_submodule_run_id, parent_experiment_id, session: useSession,
+  } = req.body || {};
   if (parent_experiment_id != null && typeof parent_experiment_id !== 'string') {
     return res.status(400).json({ error: 'parent_experiment_id must be a string' });
   }
+  // T2: in session mode, auto-chain from the accepted experiment at the nearest
+  // accepted upstream step (no hand-picked parent). resolveSessionParent also
+  // returns the `session` block that makes a pool fallback unmistakable.
+  const { effectiveParent, sessionBlock } = await resolveSessionParent(
+    { source_run_id, entity_name, step_index, parent_experiment_id, useSession }, db);
   const r = await runExperimentCore({
     source_run_id,
     step_index,
@@ -524,9 +593,10 @@ async function handleCreateExperiment(req, res, deps) {
     entity_name,
     overrides,
     exclude_entity_submodule_run_id,
-    overlay_parent_ids: parent_experiment_id ? [parent_experiment_id] : [],
-    record_parent_id: parent_experiment_id || null,
+    overlay_parent_ids: effectiveParent ? [effectiveParent] : [],
+    record_parent_id: effectiveParent || null,
   }, deps);
+  if (sessionBlock) r.body.session = sessionBlock;
   return res.status(r.status).json(r.body);
 }
 

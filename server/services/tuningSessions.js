@@ -43,6 +43,18 @@ export async function getOrCreateSession(sourceRunId, entityName, db) {
   return data;
 }
 
+/** Read-only: the session for (run, entity), or null. Does NOT create one. */
+export async function findSession(sourceRunId, entityName, db) {
+  const { data, error } = await db
+    .from('tuning_sessions')
+    .select('*')
+    .eq('source_run_id', sourceRunId)
+    .eq('entity_name', entityName)
+    .maybeSingle();
+  if (error) throw new Error(`tuning_sessions read failed: ${error.message}`);
+  return data || null;
+}
+
 /** Accepted steps for a session, ascending by step. */
 export async function getSessionSteps(sessionId, db) {
   const { data, error } = await db
@@ -118,5 +130,59 @@ export async function acceptExperiment({ sessionId, stepIndex, experimentId, sub
   return {
     accepted: { session_id: sessionId, step_index: stepIndex, experiment_id: experimentId, submodule_id: submoduleId },
     erased,
+  };
+}
+
+/**
+ * T2: resolve the effective chain parent for a session-mode experiment, without
+ * the caller hand-picking a parent. Explicit `parent_experiment_id` always wins.
+ * Otherwise chain from the accepted experiment at the nearest accepted upstream
+ * step. The returned `sessionBlock` rides the experiment response and makes a
+ * pool fallback (no accepted upstream) UNMISTAKABLE — the "silently scored the
+ * pool" failure class this feature must not reintroduce.
+ *
+ * @returns {{ effectiveParent: string|null, sessionBlock: object|null }}
+ */
+export async function resolveSessionParent({ source_run_id, entity_name, step_index, parent_experiment_id, useSession }, db) {
+  if (!useSession) return { effectiveParent: parent_experiment_id || null, sessionBlock: null };
+  if (parent_experiment_id) {
+    return {
+      effectiveParent: parent_experiment_id,
+      sessionBlock: {
+        session_id: null, chained_from: parent_experiment_id, chained_from_step: null,
+        note: 'used the explicitly supplied parent_experiment_id (session auto-chain skipped)',
+      },
+    };
+  }
+  if (!source_run_id || !entity_name || step_index == null) {
+    // runExperimentCore will 400 on the missing fields — don't invent a session.
+    return { effectiveParent: null, sessionBlock: null };
+  }
+  const sess = await findSession(source_run_id, entity_name, db);
+  if (!sess) {
+    return {
+      effectiveParent: null,
+      sessionBlock: {
+        session_id: null, chained_from: null, chained_from_step: null,
+        note: 'no tuning session yet for this run+entity — ran against the raw pool',
+      },
+    };
+  }
+  const upstream = await getAcceptedUpstream(sess.id, step_index, db);
+  if (!upstream) {
+    return {
+      effectiveParent: null,
+      sessionBlock: {
+        session_id: sess.id, chained_from: null, chained_from_step: null,
+        note: 'no accepted upstream step — ran against the raw pool',
+      },
+    };
+  }
+  return {
+    effectiveParent: upstream.experiment_id,
+    sessionBlock: {
+      session_id: sess.id, chained_from: upstream.experiment_id, chained_from_step: upstream.step_index,
+      note: `chained from the accepted step-${upstream.step_index} experiment`,
+    },
   };
 }

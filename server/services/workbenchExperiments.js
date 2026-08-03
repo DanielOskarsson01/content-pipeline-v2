@@ -27,6 +27,14 @@ export async function insertExperiment(row, db) {
   return data;
 }
 
+/** Fetch one experiment row by id, or null. */
+export async function getExperimentById(id, db) {
+  const { data, error } = await db
+    .from('workbench_experiments').select('*').eq('id', id).maybeSingle();
+  if (error) throw new Error(`workbench_experiments read failed: ${error.message}`);
+  return data || null;
+}
+
 /**
  * List experiments, newest first. All filters optional.
  * @param {{source_run_id?:string, step_index?:number, submodule_id?:string, entity_name?:string, limit?:number}} filters
