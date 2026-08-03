@@ -9,10 +9,15 @@
  * survive deletion of their source run.
  */
 
+import { computeExperimentMetrics } from '../lib/experimentMetrics.js';
+
 export async function insertExperiment(row, db) {
   // PostgreSQL JSONB rejects null bytes (\\u0000) — replayed scrapers can fetch fresh
   // null-byte content (same fix as stageWorker.js:746).
   const sanitized = JSON.parse(JSON.stringify(row).replace(/\\u0000/g, ''));
+  // A3: derived metrics ride every insert (success, error and timeout paths) —
+  // computed once here, the single choke point for experiment rows.
+  sanitized.metrics = computeExperimentMetrics(sanitized);
   const { data, error } = await db
     .from('workbench_experiments')
     .insert(sanitized)
