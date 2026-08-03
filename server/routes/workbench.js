@@ -42,7 +42,9 @@ const REPLAY_FIDELITY_NOTE =
   'Replay reconstructs frozen input from current submodule_run_item_data/pool_item_blobs — '
   + 'post-run revisions are visible; not a byte-frozen snapshot. The replayed entity also '
   + 'carries only {name, items}: original entity fields (website, linkedin, …) are not '
-  + 'reconstructed. Compare experiment arms with each other, not with the historical verdict.';
+  + 'reconstructed. Chained replays additionally reorder the pool (parent output and '
+  + 'protected bearers move to the front). Compare experiment arms with each other, not '
+  + 'with the historical verdict.';
 
 // Runs the workbench may replay: terminal states only. Pinning a live run
 // would yank it out from under the auto-executor. 'halted' is deliberately
@@ -99,17 +101,102 @@ const isContent = (v) => v != null && typeof v !== 'number' && typeof v !== 'boo
  * unknowns could let a second content_markdown bearer through (failure mode a).
  * Ceiling: if a step<=4 module ever emits a generation field name
  * (content_markdown), its items would be exempt and could under-drop.
- * Residual over-drop: a generation-step SIBLING with an incidental collision
- * is still dropped (e.g. a content-writer parent drops the seo-planner item
- * via meta_title) — §7b re-supplies anything in requires_columns;
- * opportunistic readers lose the rest.
+ *
+ *   (c) PROTECTED-ARTIFACT EXCEPTION → the meta_title residual. Generation
+ *       siblings collide symmetrically (seo-planner, content-writer and
+ *       meta-compliance-checker all emit meta_title), so shape-matching alone
+ *       drops the writer's content_markdown bearer behind a seo-planner
+ *       parent — and §7b then re-supplies content_markdown from HISTORICAL
+ *       submodule_run_item_data under the entity_name key, broadcasting it
+ *       onto every entity-keyed item (the 65-way concatenation class). No
+ *       step- or order-based rule can fix this: the collision field is the
+ *       same in both directions, and the required outcomes differ only by
+ *       which module is the parent. So the rule keys on what the parent
+ *       PRODUCES: an item carrying a protected artifact field (inline or
+ *       blob-hidden) can only be shape-dropped by a parent that itself
+ *       produces that field. Kept inline protected bearers are moved to the
+ *       front of the pool so §7b's 10-item sample sees the field present and
+ *       skips the historical broadcast.
+ *
+ * Residuals (named, not hidden):
+ *   - Non-artifact siblings still over-drop on incidental collisions behind
+ *     an artifact parent (a content-writer parent drops the seo-planner and
+ *     meta-compliance items via meta_title) — §7b re-supplies anything in
+ *     requires_columns; opportunistic readers lose the rest.
+ *   - A checker chained directly behind a non-artifact parent (e.g. planner)
+ *     inherits the pool's own pre-existing multi-bearer state (writer draft +
+ *     tone-seo-editor revision both present → the checker concatenates them,
+ *     exactly as an unchained replay of that pool does). The overlay refuses
+ *     to adjudicate between sibling artifacts it does not supersede — chain
+ *     checkers behind the artifact-producing hop instead.
+ *   - A blob-hidden protected bearer cannot satisfy §7b's inline sample; if
+ *     the ONLY bearer is blob-hidden, a checker child still triggers the
+ *     historical broadcast (unchanged from unchained replays).
+ *   - A new heavy artifact field (e.g. a future html_content) must be added
+ *     to PROTECTED_ARTIFACT_FIELDS or the over-drop residual returns for it.
  *
  * Returns { items, dropped, kept } — never mutates the caller's arrays or the
  * parent row. All guards throw httpError (fail loud, never skip silently).
  */
 // Steps 0–4 produce/refine source material; 5+ generate/verify content from it.
 const SOURCE_STEP_MAX = 4;
-async function applyParentOverlay({ items, parentId, source_run_id, entity_name, db, getManifest }) {
+// §7b samples this many items when deciding missing columns
+// (poolHydration.js sampleItems.slice(0, 10)).
+const HYDRATION_SAMPLE_WINDOW = 10;
+// Fields where a duplicate bearer or an extinct bearer is catastrophic
+// downstream: step-6 checkers concatenate EVERY bearer they find
+// (qa-structural execute.js:147, citation-coverage-checker execute.js:270),
+// and §7b re-supply of a missing entity-keyed field Object.assigns historical
+// content onto every entity-keyed item. All other collision-prone fields
+// (meta_title, meta_description, …) coexist multi-bearer in every prod pool.
+export const PROTECTED_ARTIFACT_FIELDS = ['content_markdown'];
+/**
+ * Fold one or more parent experiments onto the pool, in order (chain order:
+ * oldest ancestor first). Single-parent calls behave exactly as before.
+ *
+ * CHAIN-PROVENANCE EXEMPTION (A2): items inserted by an EARLIER parent in this
+ * fold are the chain's own accumulated fresh state — a later parent's
+ * incidental field collision must not destroy them (a writer hop would
+ * otherwise shape-drop the planner hop's fresh plan via meta_title, and §7b
+ * would resupply the HISTORICAL plan). They are exempt from the shape-drop
+ * with ONE crossover: a later parent that produces a protected artifact field
+ * still supersedes earlier chain items carrying it (a tone-seo-editor hop's
+ * revision replaces the writer hop's draft — never two bearers).
+ * Composite-key replacement applies to chain items as to any item (a re-run
+ * of the same module supersedes its own earlier hop).
+ *
+ * Returns { items, dropped, kept } — dropped/kept count ORIGINAL pool items
+ * only; chain items superseded by later hops are not "pool items dropped".
+ */
+async function applyParentOverlays({ items, parentIds, source_run_id, entity_name, db, getManifest }) {
+  const originals = new Set(items);
+  const chainInserted = new Set();
+  let current = items;
+  for (const parentId of parentIds) {
+    const r = await applyOneParent({
+      items: current, parentId, source_run_id, entity_name, db, getManifest, chainInserted,
+    });
+    current = r.items;
+    for (const it of r.inserted) chainInserted.add(it);
+  }
+  const kept = current.filter(it => originals.has(it)).length;
+  // Tripwire (CTO + brutal-critic A1 findings): protection and the
+  // parent-prepend both rely on §7b's inline sample window. A parent emitting
+  // >9 items pushes the only artifact bearer past it — §7b then Object.assigns
+  // HISTORICAL content over every entity-keyed item INCLUDING the kept bearer.
+  // Console alone fails the failure-visibility rule (CLAUDE.md C.4), so the
+  // warning also rides the response's chain object.
+  let warning = null;
+  const firstBearerIdx = current.findIndex(it =>
+    PROTECTED_ARTIFACT_FIELDS.some(f => isContent(it?.[f])));
+  if (firstBearerIdx >= HYDRATION_SAMPLE_WINDOW) {
+    warning = `first protected artifact bearer sits at index ${firstBearerIdx}, past §7b's ${HYDRATION_SAMPLE_WINDOW}-item sample window — historical enrichment may overwrite it for checker children`;
+    console.warn(`[workbench] overlay: ${warning}`);
+  }
+  return { items: current, dropped: items.length - kept, kept, warning };
+}
+
+async function applyOneParent({ items, parentId, source_run_id, entity_name, db, getManifest, chainInserted }) {
   const { data: parent, error: parentErr } = await db
     .from('workbench_experiments')
     .select('id, source_run_id, entity_name, submodule_id, status, output_data')
@@ -142,6 +229,17 @@ async function applyParentOverlay({ items, parentId, source_run_id, entity_name,
   for (const it of parentItems) {
     if (it?.[itemKeyField] == null || String(it[itemKeyField]) === '') {
       throw httpError(422, `parent output item lacks its module's item_key field '${itemKeyField}' — cannot merge`);
+    }
+    // Fail-closed on a degraded artifact (brutal-critic A1 finding 2): a
+    // completed parent whose protected field is PRESENT but EMPTY (aggressive
+    // override, truncation salvage) would otherwise demote itself to a
+    // non-artifact parent — stale bearers then survive as "protected" against
+    // the very parent that should supersede them, and §7b broadcasts
+    // historical content under a green 201.
+    for (const f of PROTECTED_ARTIFACT_FIELDS) {
+      if (Object.hasOwn(it, f) && !isContent(it[f])) {
+        throw httpError(422, `parent experiment ${parentId} carries an empty '${f}' — refusing to chain a degraded artifact`);
+      }
     }
   }
 
@@ -198,7 +296,28 @@ async function applyParentOverlay({ items, parentId, source_run_id, entity_name,
   const isParentOriginal = (it) =>
     it?.source_submodule === parent.submodule_id && parentKeys.has(String(it?.[itemKeyField]));
 
-  const kept = items.filter(it => !isParentOriginal(it) && (isSourceItem(it) || !carriesPrimary(it)));
+  // (c) Protection applies only to fields the parent does NOT produce: a
+  // parent bearing content_markdown still supersedes every other bearer of it
+  // (failure mode a stays impossible); a parent not bearing it can never
+  // remove one (failure mode b stays impossible for the artifact under test).
+  const protectedFields = PROTECTED_ARTIFACT_FIELDS.filter(f => !primaryFields.has(f));
+  const carriesProtected = (it) => {
+    for (const f of protectedFields) {
+      if (isContent(it?.[f])) return true;
+      if ((blobKeys.get(it?._blob_ref) || []).includes(f)) return true;
+    }
+    return false;
+  };
+
+  // Chain-provenance exemption + artifact crossover (see applyParentOverlays).
+  const parentSupersedesArtifactOf = (it) =>
+    PROTECTED_ARTIFACT_FIELDS.some(f => primaryFields.has(f) && isContent(it?.[f]));
+
+  const kept = items.filter(it => {
+    if (isParentOriginal(it)) return false;
+    if (chainInserted?.has(it)) return !parentSupersedesArtifactOf(it);
+    return isSourceItem(it) || carriesProtected(it) || !carriesPrimary(it);
+  });
   // Stamp source_submodule = parent.submodule_id: experiment outputs are never
   // stamped (prod stamps at approval), and downstream display/debugging keys on it.
   const inserted = parentItems.map(it => ({ ...it, source_submodule: parent.submodule_id }));
@@ -212,7 +331,16 @@ async function applyParentOverlay({ items, parentId, source_run_id, entity_name,
   // ponytail: holds while a parent emits ≤10 items (every current step-5/6
   // module emits 1/entity); upgrade path is excluding the parent's
   // primaryFields from enrichment in poolHydration itself.
-  return { items: [...inserted, ...kept], dropped: items.length - kept.length, kept: kept.length };
+  // Kept INLINE protected bearers move to the front for the same reason: a
+  // non-artifact parent (planner) doesn't carry content_markdown, so without
+  // this the surviving writer bearer sits past the sample window and §7b
+  // broadcasts historical content anyway. Blob-hidden bearers stay put —
+  // §7b samples inline fields only, so front-moving them buys nothing.
+  const bearsInlineProtected = (it) => protectedFields.some(f => isContent(it?.[f]));
+  const front = kept.filter(bearsInlineProtected);
+  const rest = front.length > 0 ? kept.filter(it => !bearsInlineProtected(it)) : kept;
+  const merged = front.length > 0 ? [...inserted, ...front, ...rest] : [...inserted, ...kept];
+  return { items: merged, inserted };
 }
 
 export function createWorkbenchRouter(deps) {
@@ -363,29 +491,59 @@ export function createWorkbenchRouter(deps) {
   return router;
 }
 
-async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest }) {
+async function handleCreateExperiment(req, res, deps) {
   const { source_run_id, step_index, submodule_id, entity_name, overrides, exclude_entity_submodule_run_id, parent_experiment_id } = req.body || {};
-  if (!source_run_id || step_index == null || !submodule_id || !entity_name) {
-    return res.status(400).json({ error: 'source_run_id, step_index, submodule_id, entity_name are required' });
-  }
-  if (overrides != null && (typeof overrides !== 'object' || Array.isArray(overrides))) {
-    return res.status(400).json({ error: 'overrides must be an object' });
-  }
   if (parent_experiment_id != null && typeof parent_experiment_id !== 'string') {
     return res.status(400).json({ error: 'parent_experiment_id must be a string' });
+  }
+  const r = await runExperimentCore({
+    source_run_id,
+    step_index,
+    submodule_id,
+    entity_name,
+    overrides,
+    exclude_entity_submodule_run_id,
+    overlay_parent_ids: parent_experiment_id ? [parent_experiment_id] : [],
+    record_parent_id: parent_experiment_id || null,
+  }, deps);
+  return res.status(r.status).json(r.body);
+}
+
+/**
+ * The experiment engine behind POST /experiments, callable in-process (the
+ * forward-chain runner drives one call per hop). Same contract, HTTP-free:
+ * returns { status, body } instead of writing to res.
+ *
+ * overlay_parent_ids — parents folded onto the pool, oldest first (a chain
+ *   hop passes its full ancestor set; /experiments passes at most one).
+ * record_parent_id — what lands in the row's parent_experiment_id column: the
+ *   immediately preceding hop in execution order, making a chain a linked
+ *   list that is reconstructible from rows alone.
+ */
+export async function runExperimentCore(input, { db, runSubmodule, getManifest }) {
+  const {
+    source_run_id, step_index, submodule_id, entity_name, overrides,
+    exclude_entity_submodule_run_id, overlay_parent_ids = [], record_parent_id = null,
+  } = input;
+  const bad = (status, error) => ({ status, body: { error } });
+  if (!source_run_id || step_index == null || !submodule_id || !entity_name) {
+    return bad(400, 'source_run_id, step_index, submodule_id, entity_name are required');
+  }
+  if (overrides != null && (typeof overrides !== 'object' || Array.isArray(overrides))) {
+    return bad(400, 'overrides must be an object');
   }
 
   // 1. Pin the source run (spec §2 step 1) — idempotent, terminal runs only.
   const { data: run, error: runErr } = await db
     .from('pipeline_runs').select('id, status').eq('id', source_run_id).maybeSingle();
-  if (runErr) return res.status(500).json({ error: `run lookup failed: ${runErr.message}` });
-  if (!run) return res.status(404).json({ error: `run ${source_run_id} not found` });
+  if (runErr) return bad(500, `run lookup failed: ${runErr.message}`);
+  if (!run) return bad(404, `run ${source_run_id} not found`);
   if (!PINNABLE_STATUSES.includes(run.status)) {
-    return res.status(400).json({ error: `run is '${run.status}' — the workbench only replays terminal runs` });
+    return bad(400, `run is '${run.status}' — the workbench only replays terminal runs`);
   }
 
   const manifest = getManifest(submodule_id);
-  if (!manifest) return res.status(404).json({ error: `submodule '${submodule_id}' not found` });
+  if (!manifest) return bad(404, `submodule '${submodule_id}' not found`);
 
   // 2. Resolve options exactly as /run does (submoduleRuns.js step 5/5b) but
   // READ-ONLY: no 5a upsert back into run_submodule_config.
@@ -420,9 +578,9 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
     .eq('step_index', step_index)
     .eq('entity_name', entity_name)
     .maybeSingle();
-  if (poolErr) return res.status(500).json({ error: `pool lookup failed: ${poolErr.message}` });
+  if (poolErr) return bad(500, `pool lookup failed: ${poolErr.message}`);
   if (!pool) {
-    return res.status(404).json({ error: `no entity_stage_pool row for (${source_run_id}, step ${step_index}, ${entity_name}) — swept or never ran?` });
+    return bad(404, `no entity_stage_pool row for (${source_run_id}, step ${step_index}, ${entity_name}) — swept or never ran?`);
   }
   let items = pool.pool_items || [];
 
@@ -431,16 +589,23 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
   // and before hydration (§7b then sees the parent's fields as present and
   // skips DB enrichment for them — experiment content wins).
   let chain = null;
-  if (parent_experiment_id) {
+  if (overlay_parent_ids.length > 0) {
     try {
-      const overlaid = await applyParentOverlay({
-        items, parentId: parent_experiment_id, source_run_id, entity_name, db, getManifest,
+      const overlaid = await applyParentOverlays({
+        items, parentIds: overlay_parent_ids, source_run_id, entity_name, db, getManifest,
       });
       items = overlaid.items;
-      // kept alongside dropped so pool starvation is visible at a glance
-      chain = { parent_experiment_id, pool_items_dropped: overlaid.dropped, pool_items_kept: overlaid.kept };
+      // kept alongside dropped so pool starvation is visible at a glance;
+      // read_from names every overlaid parent (a hop reads its full ancestry)
+      chain = {
+        parent_experiment_id: record_parent_id,
+        read_from: overlay_parent_ids,
+        pool_items_dropped: overlaid.dropped,
+        pool_items_kept: overlaid.kept,
+        ...(overlaid.warning ? { warning: overlaid.warning } : {}),
+      };
     } catch (err) {
-      return res.status(err.httpStatus || 500).json({ error: err.message });
+      return { status: err.httpStatus || 500, body: { error: err.message } };
     }
   }
 
@@ -449,7 +614,7 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
   if (run.status !== 'archived') {
     const { error: pinErr } = await db
       .from('pipeline_runs').update({ status: 'archived' }).eq('id', source_run_id);
-    if (pinErr) return res.status(500).json({ error: `failed to pin run archived: ${pinErr.message}` });
+    if (pinErr) return bad(500, `failed to pin run archived: ${pinErr.message}`);
   }
 
   // 4. Hydrate (U1, inside the harness) + execute (U2) under the ceiling.
@@ -464,7 +629,7 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
     overrides: overrides || {},
     // Provenance on success AND error paths — a chained run that failed is
     // still a chained run.
-    parent_experiment_id: parent_experiment_id || null,
+    parent_experiment_id: record_parent_id,
   };
   let harnessResult;
   try {
@@ -493,15 +658,17 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
       status: err.isCeiling ? 'timeout' : 'error',
       error: err.message,
     }, db);
-    return res.status(err.isCeiling ? 504 : 500)
-      .json({
+    return {
+      status: err.isCeiling ? 504 : 500,
+      body: {
         error: err.message,
         experiment,
         replay_fidelity: REPLAY_FIDELITY_NOTE,
         // a chained run that failed is still a chained run — same marker as the 201 path
         source: chain ? 'chained' : 'pool',
         chain: chain,
-      });
+      },
+    };
   }
 
   // 5. Insert the ONE experiment row (spec §2 step 5) and return it.
@@ -521,10 +688,13 @@ async function handleCreateExperiment(req, res, { db, runSubmodule, getManifest 
   // (parent_experiment_id: null), scored the pool, and were indistinguishable
   // from chained runs because the key was simply absent. An explicit
   // source:'pool' + chain:null makes "what did this run read" unambiguous.
-  return res.status(201).json({
-    experiment,
-    replay_fidelity: REPLAY_FIDELITY_NOTE,
-    source: chain ? 'chained' : 'pool',
-    chain: chain,
-  });
+  return {
+    status: 201,
+    body: {
+      experiment,
+      replay_fidelity: REPLAY_FIDELITY_NOTE,
+      source: chain ? 'chained' : 'pool',
+      chain: chain,
+    },
+  };
 }
