@@ -86,7 +86,40 @@ export async function getAcceptedUpstream(sessionId, stepIndex, db) {
  * @returns {{ accepted, erased }} erased = the cleared downstream step rows.
  */
 export async function acceptExperiment({ sessionId, stepIndex, experimentId, submoduleId }, db, log = console) {
-  // 1. Upsert the accepted marker for this step (re-accept replaces it).
+  // Ordering is crash-safety, not cosmetic: erase downstream FIRST and make the
+  // marker upsert the LAST write. A crash mid-accept can then only leave a
+  // consistent (un-updated) state — never a NEW marker at step N with stale
+  // downstream still chained to the OLD step-N experiment, which is the exact
+  // "stale state survives" failure this erase exists to prevent.
+  // ponytail: still not fully atomic — two tabs accepting on the same
+  // (run, entity) could interleave into an orphan. One-live-chain-per-session
+  // (decision 1) makes concurrent tuning of one entity a non-goal; the upgrade
+  // is a single plpgsql RPC (read+delete+upsert in one txn). Tracked in the PR.
+
+  // 1. Read what will be erased BEFORE deleting, so the log + response name it.
+  const { data: downstream, error: dErr } = await db
+    .from('tuning_session_steps')
+    .select('*')
+    .eq('session_id', sessionId)
+    .gt('step_index', stepIndex);
+  if (dErr) throw new Error(`tuning_session_steps downstream read failed: ${dErr.message}`);
+  const erased = downstream || [];
+
+  // 2. Erase downstream (session-only). workbench_experiments is NEVER touched.
+  if (erased.length) {
+    const { error: delErr } = await db
+      .from('tuning_session_steps')
+      .delete()
+      .eq('session_id', sessionId)
+      .gt('step_index', stepIndex);
+    if (delErr) throw new Error(`tuning_session_steps erase-downstream failed: ${delErr.message}`);
+    const cleared = erased.map(d => `s${d.step_index}:${d.experiment_id}`).join(', ');
+    (log.warn || log.log)?.call(log,
+      `[tuning] session ${sessionId}: accepting step ${stepIndex} (exp ${experimentId}) — ` +
+      `ERASED ${erased.length} downstream step(s): ${cleared}`);
+  }
+
+  // 3. Upsert the accepted marker LAST (re-accept replaces it).
   const { error: upErr } = await db
     .from('tuning_session_steps')
     .upsert(
@@ -101,30 +134,7 @@ export async function acceptExperiment({ sessionId, stepIndex, experimentId, sub
     );
   if (upErr) throw new Error(`tuning_session_steps accept failed: ${upErr.message}`);
 
-  // 2. Read what will be erased BEFORE deleting, so the log + response name it.
-  const { data: downstream, error: dErr } = await db
-    .from('tuning_session_steps')
-    .select('step_index, experiment_id, submodule_id')
-    .eq('session_id', sessionId)
-    .gt('step_index', stepIndex);
-  if (dErr) throw new Error(`tuning_session_steps downstream read failed: ${dErr.message}`);
-  const erased = downstream || [];
-
-  // 3. Erase downstream (session-only). workbench_experiments is NOT touched.
-  if (erased.length) {
-    const { error: delErr } = await db
-      .from('tuning_session_steps')
-      .delete()
-      .eq('session_id', sessionId)
-      .gt('step_index', stepIndex);
-    if (delErr) throw new Error(`tuning_session_steps erase-downstream failed: ${delErr.message}`);
-    const cleared = erased.map(d => `s${d.step_index}:${d.experiment_id}`).join(', ');
-    (log.warn || log.log)?.call(log,
-      `[tuning] session ${sessionId}: accepted step ${stepIndex} (exp ${experimentId}) — ` +
-      `ERASED ${erased.length} downstream step(s): ${cleared}`);
-  }
-
-  // 4. Touch the session so "most recently active" is queryable.
+  // 4. Touch the session so "most recently active" is queryable (best-effort).
   await db.from('tuning_sessions').update({ updated_at: new Date().toISOString() }).eq('id', sessionId);
 
   return {

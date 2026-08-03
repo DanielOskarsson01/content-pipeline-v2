@@ -31,12 +31,11 @@ CREATE TABLE tuning_session_steps (
   experiment_id uuid NOT NULL,          -- plain uuid, NO FK to workbench_experiments
   submodule_id  text NOT NULL,
   accepted_at   timestamptz NOT NULL DEFAULT now(),
-  -- one accepted experiment per step within a session (re-accept replaces it)
+  -- one accepted experiment per step within a session (re-accept replaces it).
+  -- This UNIQUE also serves every (session_id) and (session_id, step_index)
+  -- lookup + the step-ordered read, so no separate index is needed.
   UNIQUE (session_id, step_index)
 );
-
-CREATE INDEX idx_tuning_session_steps_session
-  ON tuning_session_steps (session_id, step_index);
 
 COMMENT ON TABLE tuning_sessions IS
   'Tuning sessions (TUNING-SESSIONS v1 T1). source_run_id has NO FK and this table must never enter retention RUN_ID_TABLES — a session outlives its source run. One live chain per (run, entity).';
