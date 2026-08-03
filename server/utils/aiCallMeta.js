@@ -55,10 +55,16 @@ export function applyAiCallMeta(result, aiCalls) {
       // content-writer once it adopts prompt caching).
       cache_write_tokens: c.cache_write_tokens || 0,
       cache_read_tokens: c.cache_read_tokens || 0,
+      // Gemini 2.5 (BACKLOG #49): total_tokens includes internal thinking tokens
+      // that tokens_out (completion) excludes but that ARE billed at the output
+      // rate. Carry it so costOfUsage prices the true output; 0 for providers that
+      // don't report a total.
+      tokens_total: c.tokens_total || 0,
       stop_reason: c.stop_reason ?? null,
     })),
     tokens_in_total: calls.reduce((s, c) => s + (c.tokens_in || 0), 0),
     tokens_out_total: calls.reduce((s, c) => s + (c.tokens_out || 0), 0),
+    tokens_total_total: calls.reduce((s, c) => s + (c.tokens_total || 0), 0),
     cache_write_tokens_total: calls.reduce((s, c) => s + (c.cache_write_tokens || 0), 0),
     cache_read_tokens_total: calls.reduce((s, c) => s + (c.cache_read_tokens || 0), 0),
   };

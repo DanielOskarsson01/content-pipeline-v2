@@ -18,6 +18,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { buildHarnessTools } from './submoduleHarness.js';
+import { applyAiCallMeta } from '../utils/aiCallMeta.js';
+import { costOfUsage } from '../lib/aiCost.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STAGEWORKER = readFileSync(path.join(__dirname, '../workers/stageWorker.js'), 'utf8');
@@ -101,4 +103,27 @@ test('MODEL_MAP gemini entries are in sync across both copies', () => {
     assert.ok(STAGEWORKER.includes(line), `stageWorker MODEL_MAP must contain ${line}`);
     assert.ok(HARNESS.includes(line), `submoduleHarness MODEL_MAP must contain ${line}`);
   }
+});
+
+// ── cost wiring: tokens_total reaches ai_usage AND is priced (review WARNING) ──
+test("gemini tokens_total flows to ai_usage and prices the thinking tokens (not the Opus fallback)", () => {
+  const result = applyAiCallMeta({ items: [] }, [
+    { provider: 'gemini', model: 'gemini-flash-latest', tokens_in: 100, tokens_out: 20, tokens_total: 200, stop_reason: null },
+  ]);
+  const u = result.meta.ai_usage;
+  assert.equal(u.calls[0].tokens_total, 200, 'per-call tokens_total lands in ai_usage');
+  assert.equal(u.tokens_total_total, 200, 'tokens_total_total is summed');
+  // billed output = total - in = 100 (completion 20 + 80 thinking), priced at $2.50/M;
+  // input 100 @ $0.30/M. NOT the Opus fallback ($5/$25).
+  const usd = costOfUsage(u);
+  assert.ok(Math.abs(usd - (100 * 0.30 / 1e6 + 100 * 2.50 / 1e6)) < 1e-12, `gemini priced by billed output, got ${usd}`);
+});
+
+test("providers without tokens_total keep pricing from tokens_out (backward-compatible)", () => {
+  const result = applyAiCallMeta({ items: [] }, [
+    { provider: 'anthropic', model: 'claude-sonnet-5', tokens_in: 1000, tokens_out: 100, stop_reason: 'end_turn' },
+  ]);
+  assert.equal(result.meta.ai_usage.calls[0].tokens_total, 0, 'anthropic carries tokens_total 0');
+  const usd = costOfUsage(result.meta.ai_usage);
+  assert.ok(Math.abs(usd - (1000 * 3 / 1e6 + 100 * 15 / 1e6)) < 1e-12, `sonnet still priced by tokens_out, got ${usd}`);
 });
