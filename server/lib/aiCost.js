@@ -19,6 +19,12 @@ export const MODEL_PRICES_PER_MTOK = {
   'gpt-4o-mini': { input: 0.15, output: 0.6, cache_read: 0.075, cache_write: 0.15 },
   sonar: { input: 1, output: 1, cache_read: 1, cache_write: 1 },
   'sonar-pro': { input: 3, output: 15, cache_read: 3, cache_write: 3 },
+  // Google Gemini (BACKLOG #49). Public list rates for the 2.5 Flash/Pro tier
+  // the -latest aliases resolve to (verify: the aliases can shift the underlying
+  // model + its price). No native prompt caching → cache_* never billed (the
+  // ledger's cache_*_tokens are always 0 for gemini); mirror input to be safe.
+  'gemini-flash-latest': { input: 0.30, output: 2.50, cache_read: 0.30, cache_write: 0.30 },
+  'gemini-pro-latest': { input: 1.25, output: 10, cache_read: 1.25, cache_write: 10 },
 };
 
 // Unknown model → priced as the most expensive row so a cap can only
@@ -26,15 +32,22 @@ export const MODEL_PRICES_PER_MTOK = {
 const FALLBACK = MODEL_PRICES_PER_MTOK['claude-opus-4-8'];
 
 /**
- * @param {{calls?: Array<{model?:string, tokens_in?:number, tokens_out?:number, cache_read_tokens?:number, cache_write_tokens?:number}>}|null} aiUsage
+ * @param {{calls?: Array<{model?:string, tokens_in?:number, tokens_out?:number, tokens_total?:number, cache_read_tokens?:number, cache_write_tokens?:number}>}|null} aiUsage
  * @returns {number} USD (0 for null/non-AI usage)
  */
 export function costOfUsage(aiUsage) {
   let usd = 0;
   for (const c of aiUsage?.calls || []) {
     const p = MODEL_PRICES_PER_MTOK[c.model] || FALLBACK;
+    // Billed output. Gemini 2.5 counts internal "thinking" tokens in total_tokens
+    // but NOT in completion (tokens_out), and bills them at the output rate — so
+    // for gemini the true output is tokens_total - tokens_in. Providers without a
+    // tokens_total (anthropic/openai/perplexity) fall back to tokens_out, and when
+    // there is no thinking tokens_total - tokens_in == tokens_out, so this is
+    // backward-compatible for every existing provider.
+    const billedOut = c.tokens_total ? (c.tokens_total - (c.tokens_in || 0)) : (c.tokens_out || 0);
     usd += (c.tokens_in || 0) * p.input / 1e6
-      + (c.tokens_out || 0) * p.output / 1e6
+      + billedOut * p.output / 1e6
       + (c.cache_read_tokens || 0) * p.cache_read / 1e6
       + (c.cache_write_tokens || 0) * p.cache_write / 1e6;
   }
