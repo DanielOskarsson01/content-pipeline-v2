@@ -85,12 +85,17 @@ export async function runForwardChain(params, deps) {
   const { db, getManifest } = deps;
   const {
     start_experiment_id, from_step, to_step,
-    overrides_per_submodule = {},
     max_cost_usd = CHAIN_DEFAULT_MAX_COST_USD,
     max_hops = CHAIN_DEFAULT_MAX_HOPS,
     dry_run = false,
   } = params || {};
   const bad = (status, error) => ({ status, body: { error } });
+  // `= {}` defaults only cover undefined — an explicit null would throw at
+  // Object.keys as a 500 instead of validating (code-review finding).
+  const overrides_per_submodule = params?.overrides_per_submodule ?? {};
+  if (typeof overrides_per_submodule !== 'object' || Array.isArray(overrides_per_submodule)) {
+    return bad(400, 'overrides_per_submodule must be an object keyed by submodule_id');
+  }
 
   if (!start_experiment_id || typeof start_experiment_id !== 'string') {
     return bad(400, 'start_experiment_id is required');
