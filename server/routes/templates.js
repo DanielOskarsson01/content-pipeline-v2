@@ -6,6 +6,7 @@ import { validateExecutionPlan, mergeCardWorkFromSourcePlan } from '../services/
 import { sortSubmoduleIds } from '../services/moduleOrder.js';
 import { STEP_CONFIG } from '../../shared/stepConfig.js';
 import { parseSeedFile } from '../utils/seedParser.js';
+import { resolvePresetMapWith } from '../services/presetResolution.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -961,45 +962,13 @@ function remapPresetMapDocIds(presetMap, docIdMap) {
  * 3. Fallback values from preset_map
  * Returns: { submoduleId: { optionName: resolvedValue } }
  */
-export async function resolvePresetMap(presetMap, projectId) {
-  const submoduleIds = Object.keys(presetMap);
-  const presetNames = [...new Set(submoduleIds.map(id => presetMap[id].preset_name).filter(Boolean))];
-
-  // Batch-fetch matching presets
-  let presetRows = [];
-  if (presetNames.length > 0 && submoduleIds.length > 0) {
-    const { data } = await db
-      .from('option_presets')
-      .select('submodule_id, option_name, preset_name, preset_value, project_id')
-      .in('submodule_id', submoduleIds)
-      .in('preset_name', presetNames);
-    presetRows = data || [];
-  }
-
-  // Index: "submoduleId::optionName" → { project: value, global: value }
-  const presetIndex = {};
-  for (const row of presetRows) {
-    const key = `${row.submodule_id}::${row.option_name}`;
-    if (!presetIndex[key]) presetIndex[key] = {};
-    if (row.project_id === projectId) {
-      presetIndex[key].project = row.preset_value;
-    } else if (!row.project_id) {
-      presetIndex[key].global = row.preset_value;
-    }
-  }
-
-  // Resolve each option
-  const resolved = {};
-  for (const [subId, config] of Object.entries(presetMap)) {
-    resolved[subId] = {};
-    for (const [optName, fallbackVal] of Object.entries(config.fallback_values || {})) {
-      const key = `${subId}::${optName}`;
-      const idx = presetIndex[key] || {};
-      resolved[subId][optName] = idx.project ?? idx.global ?? fallbackVal;
-    }
-  }
-
-  return resolved;
+export async function resolvePresetMap(presetMap, projectId, dbClient = db) {
+  // Thin shim. The resolution LOGIC lives in server/services/presetResolution.js
+  // — add any new resolution rule THERE, never here, so promote-settings' fresh
+  // run proof stays byte-identical to what a real run resolves.
+  // dbClient defaults to the module db so existing 2-arg callers are unchanged;
+  // promote-settings / hermetic tests inject a fake or scoped client.
+  return resolvePresetMapWith(presetMap, projectId, dbClient);
 }
 
 /**

@@ -31,8 +31,14 @@
 import express from 'express';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { runSubmoduleOnce } from '../services/submoduleHarness.js';
-import { insertExperiment } from '../services/workbenchExperiments.js';
+import { insertExperiment, getExperimentById } from '../services/workbenchExperiments.js';
 import { runForwardChain, getChainTree } from './workbenchChains.js';
+import {
+  getOrCreateSession, findSession, acceptExperiment, getSessionSteps, resolveSessionParent,
+} from '../services/tuningSessions.js';
+import { promoteExperimentSettings } from '../services/promoteSettings.js';
+import { createPostmortemStore } from '../services/postmortemStore.js';
+import { buildPostmortem, writePostmortem } from '../services/tuningPostmortem.js';
 
 // Per-request execution ceiling. The harness caps each AI call at 600s with up
 // to 3 attempts but has no overall bound (U2 review finding); a single
@@ -509,14 +515,154 @@ export function createWorkbenchRouter(deps) {
     }
   });
 
+  // ---- T2 tuning-session accept + read (see tuningSessions.js) ----
+
+  /**
+   * POST /api/workbench/sessions/accept
+   * Mark an experiment as the accepted result for its step in the (run, entity)
+   * session. Creates the session on first accept. Accepting at step N erases the
+   * session's accepted steps > N (erase-downstream, session-only). Only a
+   * completed experiment can be accepted — a truncated/errored one must never
+   * become the parent the next step chains from (fail-closed, house convention).
+   * Writes ONLY tuning_* tables; workbench_experiments and real-run tables untouched.
+   * Body: { source_run_id, entity_name, step_index, experiment_id }
+   */
+  router.post('/sessions/accept', async (req, res) => {
+    try {
+      const { source_run_id, entity_name, step_index, experiment_id } = req.body || {};
+      if (!source_run_id || !entity_name || step_index == null || !experiment_id) {
+        return res.status(400).json({ error: 'source_run_id, entity_name, step_index, experiment_id are required' });
+      }
+      const exp = await getExperimentById(experiment_id, db);
+      if (!exp) return res.status(404).json({ error: `experiment ${experiment_id} not found` });
+      if (exp.source_run_id !== source_run_id || exp.entity_name !== entity_name || exp.step_index !== step_index) {
+        return res.status(400).json({ error: 'experiment does not match this run / entity / step' });
+      }
+      if (exp.status !== 'completed') {
+        return res.status(409).json({ error: `cannot accept a '${exp.status}' experiment — only completed experiments can be accepted` });
+      }
+      const session = await getOrCreateSession(source_run_id, entity_name, db);
+      const { accepted, erased } = await acceptExperiment(
+        { sessionId: session.id, stepIndex: step_index, experimentId: experiment_id, submoduleId: exp.submodule_id }, db);
+      const steps = await getSessionSteps(session.id, db);
+      // T5: continuously (re)write the durable postmortem after each accept.
+      // Best-effort — an accept must not fail because the durable store is down
+      // or unconfigured, but "not written" is always logged, never silent.
+      let postmortem = null;
+      try {
+        const store = createPostmortemStore({ db });
+        if (store) postmortem = await writePostmortem(session, db, store);
+        else console.warn('[tuning] no POSTMORTEM_DIR/POSTMORTEM_BUCKET configured — postmortem not written');
+      } catch (e) {
+        console.warn(`[tuning] postmortem write failed (accept still succeeded): ${e.message}`);
+      }
+      res.json({ session_id: session.id, accepted, erased, steps, postmortem });
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * POST /api/workbench/promote-settings   (T3 — the dangerous one)
+   * Write an ACCEPTED experiment's tuned overrides back to a template's
+   * preset_map.fallback_values so future runs resolve to them. REFUSES (409) if
+   * a higher global option_presets layer would silently shadow the write. Writes
+   * only the `templates` row (by PK); backs up, read-back md5-verifies, and
+   * proves a fresh run resolves. `dry_run: true` analyses + plans, writes nothing
+   * (drives the UI's "this changes template T for all future runs" confirmation).
+   * Body: { experiment_id, template_id, dry_run? }
+   */
+  router.post('/promote-settings', async (req, res) => {
+    try {
+      const { experiment_id, template_id, dry_run } = req.body || {};
+      if (!experiment_id || !template_id) {
+        return res.status(400).json({ error: 'experiment_id and template_id are required' });
+      }
+      const experiment = await getExperimentById(experiment_id, db);
+      if (!experiment) return res.status(404).json({ error: `experiment ${experiment_id} not found` });
+      if (experiment.status !== 'completed') {
+        return res.status(409).json({ error: `cannot promote a '${experiment.status}' experiment — only completed experiments can be promoted` });
+      }
+      // Only a *vetted* (accepted) experiment may be promoted.
+      const session = await findSession(experiment.source_run_id, experiment.entity_name, db);
+      const accepted = session
+        ? (await getSessionSteps(session.id, db)).some(s => s.step_index === experiment.step_index && s.experiment_id === experiment_id)
+        : false;
+      if (!accepted) {
+        return res.status(409).json({ error: 'only an accepted experiment can be promoted — accept it for its step first' });
+      }
+      const { data: template, error: tErr } = await db
+        .from('templates').select('id, name, preset_map, updated_at').eq('id', template_id).maybeSingle();
+      if (tErr) return res.status(500).json({ error: `template lookup failed: ${tErr.message}` });
+      if (!template) return res.status(404).json({ error: `template ${template_id} not found` });
+
+      const { data: run } = await db
+        .from('pipeline_runs').select('project_id').eq('id', experiment.source_run_id).maybeSingle();
+
+      const result = await promoteExperimentSettings({
+        experiment, template, projectId: run?.project_id || null,
+        priorUpdatedAt: template.updated_at || null, dryRun: !!dry_run, db,
+      });
+      return res.status(result.refused ? 409 : 200).json(result);
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * GET /api/workbench/sessions/:runId/:entityName
+   * The accepted chain for a (run, entity) tuning session, or an empty shell if
+   * none exists yet. Read-only.
+   */
+  router.get('/sessions/:runId/:entityName', async (req, res) => {
+    try {
+      const session = await findSession(req.params.runId, decodeURIComponent(req.params.entityName), db);
+      if (!session) return res.json({ session_id: null, steps: [] });
+      const steps = await getSessionSteps(session.id, db);
+      res.json({
+        session_id: session.id,
+        source_run_id: session.source_run_id,
+        entity_name: session.entity_name,
+        steps,
+      });
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * GET /api/workbench/sessions/:runId/:entityName/summary   (T6 step-10 summary)
+   * Every attempt per step with its metrics, the accepted one flagged so
+   * discarded and accepted attempts are clearly distinguished — the postmortem
+   * structure served live from the DB. Read-only.
+   */
+  router.get('/sessions/:runId/:entityName/summary', async (req, res) => {
+    try {
+      const session = await findSession(req.params.runId, decodeURIComponent(req.params.entityName), db);
+      if (!session) return res.json({ session_id: null, steps: [] });
+      res.json(await buildPostmortem(session, db));
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 }
 
 async function handleCreateExperiment(req, res, deps) {
-  const { source_run_id, step_index, submodule_id, entity_name, overrides, exclude_entity_submodule_run_id, parent_experiment_id } = req.body || {};
+  const { db } = deps;
+  const {
+    source_run_id, step_index, submodule_id, entity_name, overrides,
+    exclude_entity_submodule_run_id, parent_experiment_id, session: useSession,
+  } = req.body || {};
   if (parent_experiment_id != null && typeof parent_experiment_id !== 'string') {
     return res.status(400).json({ error: 'parent_experiment_id must be a string' });
   }
+  // T2: in session mode, auto-chain from the accepted experiment at the nearest
+  // accepted upstream step (no hand-picked parent). resolveSessionParent also
+  // returns the `session` block that makes a pool fallback unmistakable.
+  const { effectiveParent, sessionBlock } = await resolveSessionParent(
+    { source_run_id, entity_name, step_index, parent_experiment_id, useSession }, db);
   const r = await runExperimentCore({
     source_run_id,
     step_index,
@@ -524,9 +670,10 @@ async function handleCreateExperiment(req, res, deps) {
     entity_name,
     overrides,
     exclude_entity_submodule_run_id,
-    overlay_parent_ids: parent_experiment_id ? [parent_experiment_id] : [],
-    record_parent_id: parent_experiment_id || null,
+    overlay_parent_ids: effectiveParent ? [effectiveParent] : [],
+    record_parent_id: effectiveParent || null,
   }, deps);
+  if (sessionBlock) r.body.session = sessionBlock;
   return res.status(r.status).json(r.body);
 }
 
