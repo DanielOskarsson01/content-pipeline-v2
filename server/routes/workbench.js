@@ -32,6 +32,7 @@ import express from 'express';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { runSubmoduleOnce } from '../services/submoduleHarness.js';
 import { insertExperiment } from '../services/workbenchExperiments.js';
+import { runForwardChain, getChainTree } from './workbenchChains.js';
 
 // Per-request execution ceiling. The harness caps each AI call at 600s with up
 // to 3 attempts but has no overall bound (U2 review finding); a single
@@ -352,6 +353,26 @@ export function createWorkbenchRouter(deps) {
       await handleCreateExperiment(req, res, { db, runSubmodule, getManifest });
     } catch (err) {
       // express 4 doesn't route async throws to the error middleware
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ---- A2 forward chains (see workbenchChains.js for the design note) ----
+
+  router.post('/chains', async (req, res) => {
+    try {
+      const r = await runForwardChain(req.body, { db, runSubmodule, getManifest });
+      res.status(r.status).json(r.body);
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.get('/chains/:startId', async (req, res) => {
+    try {
+      const r = await getChainTree(req.params.startId, { db });
+      res.status(r.status).json(r.body);
+    } catch (err) {
       if (!res.headersSent) res.status(500).json({ error: err.message });
     }
   });

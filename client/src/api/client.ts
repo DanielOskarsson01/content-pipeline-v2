@@ -66,6 +66,7 @@ import type {
   EntityRunDetail, ExecuteSubmoduleResponse,
   DecisionLogEntry, OptionPreset, RunReport,
   WorkbenchSourceRun, WorkbenchRunTree, WorkbenchExperimentResponse, CreateWorkbenchExperimentInput,
+  WorkbenchChainResponse, RunWorkbenchChainInput, WorkbenchChainTree,
   Template, TemplateDetail, TemplatePresetMap, TemplateExecutionPlan, TemplateSeedConfig,
   SeedPreviewResult,
 } from '../types/step';
@@ -330,4 +331,19 @@ export const api = {
       if (!r.ok && !body.experiment) throw new Error(body.error || `HTTP ${r.status}`);
       return body as WorkbenchExperimentResponse;
     }),
+
+  // Workbench forward chains (A2). Raw fetch: a stopped/refused chain answers
+  // 200 with the hops that DID run — apiFetch would only surface happy paths.
+  runWorkbenchChain: (data: RunWorkbenchChainInput) =>
+    fetch(`${API_BASE}/api/workbench/chains`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok && !body.chain_status) throw new Error(body.error || `HTTP ${r.status}`);
+      return body as WorkbenchChainResponse;
+    }),
+  getWorkbenchChainTree: (startExperimentId: string) =>
+    apiFetch<WorkbenchChainTree>(`/api/workbench/chains/${startExperimentId}`),
 };

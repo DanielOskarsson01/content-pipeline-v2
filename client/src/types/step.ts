@@ -573,3 +573,71 @@ export interface CreateWorkbenchExperimentInput {
   /** U8: run with a completed experiment's output overlaid onto the frozen pool */
   parent_experiment_id?: string;
 }
+
+// ---- A2 forward chains ----
+
+export interface WorkbenchChainHop {
+  step_index: number;
+  submodule_id: string;
+  experiment_id: string | null;
+  parent_experiment_id: string;
+  read_from: string[];
+  status: string;
+  error: string | null;
+  duration_ms: number | null;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+  pool_items_dropped: number | null;
+  pool_items_kept: number | null;
+  overlay_warning?: string | null;
+  summary: Record<string, unknown>;
+  /** full row minus frozen_input — renderable via ExperimentResultView */
+  experiment: WorkbenchExperiment | null;
+}
+
+export interface WorkbenchChainResponse {
+  chain_status: 'completed' | 'stopped_error' | 'refused_cost_cap' | 'dry_run';
+  stop: {
+    reason: string;
+    refused_hop?: { step_index: number; submodule_id: string; estimate_usd: number };
+    failed_hop_experiment_id?: string | null;
+  } | null;
+  start_experiment_id: string;
+  source_run_id: string;
+  entity_name: string;
+  from_step: number;
+  to_step: number;
+  planned_hops: { step_index: number; submodule_id: string; estimate_usd: number }[];
+  warnings?: string[];
+  estimate_total_usd: number;
+  max_cost_usd: number;
+  max_hops: number;
+  hops: WorkbenchChainHop[];
+  totals: { cost_usd: number; tokens_in: number; tokens_out: number; duration_ms: number };
+}
+
+export interface RunWorkbenchChainInput {
+  start_experiment_id: string;
+  from_step: number;
+  to_step: number;
+  overrides_per_submodule?: Record<string, Record<string, unknown>>;
+  max_cost_usd?: number;
+  max_hops?: number;
+  dry_run?: boolean;
+}
+
+export interface WorkbenchChainTree {
+  start: { experiment_id: string; submodule_id: string; step_index: number; status: string };
+  hops: {
+    experiment_id: string;
+    submodule_id: string;
+    step_index: number;
+    status: string;
+    parent_experiment_id: string;
+    duration_ms: number | null;
+    cost_usd: number;
+    created_at: string;
+    summary: Record<string, unknown>;
+  }[];
+}
