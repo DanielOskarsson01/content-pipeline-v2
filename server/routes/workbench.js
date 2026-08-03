@@ -36,6 +36,7 @@ import { runForwardChain, getChainTree } from './workbenchChains.js';
 import {
   getOrCreateSession, findSession, acceptExperiment, getSessionSteps, resolveSessionParent,
 } from '../services/tuningSessions.js';
+import { promoteExperimentSettings } from '../services/promoteSettings.js';
 
 // Per-request execution ceiling. The harness caps each AI call at 600s with up
 // to 3 attempts but has no overall bound (U2 review finding); a single
@@ -543,6 +544,52 @@ export function createWorkbenchRouter(deps) {
         { sessionId: session.id, stepIndex: step_index, experimentId: experiment_id, submoduleId: exp.submodule_id }, db);
       const steps = await getSessionSteps(session.id, db);
       res.json({ session_id: session.id, accepted, erased, steps });
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * POST /api/workbench/promote-settings   (T3 — the dangerous one)
+   * Write an ACCEPTED experiment's tuned overrides back to a template's
+   * preset_map.fallback_values so future runs resolve to them. REFUSES (409) if
+   * a higher global option_presets layer would silently shadow the write. Writes
+   * only the `templates` row (by PK); backs up, read-back md5-verifies, and
+   * proves a fresh run resolves. `dry_run: true` analyses + plans, writes nothing
+   * (drives the UI's "this changes template T for all future runs" confirmation).
+   * Body: { experiment_id, template_id, dry_run? }
+   */
+  router.post('/promote-settings', async (req, res) => {
+    try {
+      const { experiment_id, template_id, dry_run } = req.body || {};
+      if (!experiment_id || !template_id) {
+        return res.status(400).json({ error: 'experiment_id and template_id are required' });
+      }
+      const experiment = await getExperimentById(experiment_id, db);
+      if (!experiment) return res.status(404).json({ error: `experiment ${experiment_id} not found` });
+      if (experiment.status !== 'completed') {
+        return res.status(409).json({ error: `cannot promote a '${experiment.status}' experiment — only completed experiments can be promoted` });
+      }
+      // Only a *vetted* (accepted) experiment may be promoted.
+      const session = await findSession(experiment.source_run_id, experiment.entity_name, db);
+      const accepted = session
+        ? (await getSessionSteps(session.id, db)).some(s => s.step_index === experiment.step_index && s.experiment_id === experiment_id)
+        : false;
+      if (!accepted) {
+        return res.status(409).json({ error: 'only an accepted experiment can be promoted — accept it for its step first' });
+      }
+      const { data: template, error: tErr } = await db
+        .from('templates').select('id, name, preset_map').eq('id', template_id).maybeSingle();
+      if (tErr) return res.status(500).json({ error: `template lookup failed: ${tErr.message}` });
+      if (!template) return res.status(404).json({ error: `template ${template_id} not found` });
+
+      const { data: run } = await db
+        .from('pipeline_runs').select('project_id').eq('id', experiment.source_run_id).maybeSingle();
+
+      const result = await promoteExperimentSettings({
+        experiment, template, projectId: run?.project_id || null, dryRun: !!dry_run, db,
+      });
+      return res.status(result.refused ? 409 : 200).json(result);
     } catch (err) {
       if (!res.headersSent) res.status(500).json({ error: err.message });
     }
