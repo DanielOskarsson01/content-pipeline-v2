@@ -9,8 +9,10 @@
  * + template_id keying make postmortems comparable across runs and templates
  * (the copilot's cross-run evidence base — decision 5).
  *
- * Attempts are scoped to the session by created_at >= session.created_at, so the
- * digest reflects this tuning session, not the run's whole experiment history.
+ * There is exactly one session per (run, entity) (UNIQUE), so EVERY experiment
+ * for that (run, entity) is this session's attempt history — including the ones
+ * run BEFORE the first accept created the session row. (A created_at >= session
+ * filter wrongly dropped the founding step's own accepted attempt — review T5.)
  *
  * `db` is injected. Reads only; writes go through an injected postmortem store.
  */
@@ -49,7 +51,6 @@ export async function buildPostmortem(session, db) {
     .select('id, step_index, submodule_id, overrides, metrics, status, created_at, parent_experiment_id')
     .eq('source_run_id', session.source_run_id)
     .eq('entity_name', session.entity_name)
-    .gte('created_at', session.created_at)
     .order('created_at', { ascending: true });
   if (error) throw new Error(`postmortem experiment read failed: ${error.message}`);
 

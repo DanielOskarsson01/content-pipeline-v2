@@ -41,14 +41,18 @@ function makeDb(seed = {}) {
   return { from };
 }
 
+// Realistic ordering: experiments run FIRST, then the first accept creates the
+// session at 10:00 — so the founding step's attempts predate session.created_at.
+// A created_at>=session filter would wrongly drop them (review T5); these seeds
+// prove they are included.
 const SESSION = { id: 's1', source_run_id: 'run-1', entity_name: 'Hacksawgaming', created_at: '2026-08-03T10:00:00Z', updated_at: '2026-08-03T10:06:00Z' };
 
 function seedOneStep() {
   return {
     tuning_session_steps: [{ session_id: 's1', step_index: 5, experiment_id: 'e5b', submodule_id: 'content-writer' }],
     workbench_experiments: [
-      { id: 'e5a', source_run_id: 'run-1', entity_name: 'Hacksawgaming', step_index: 5, submodule_id: 'content-writer', overrides: { max_tokens: 2000 }, metrics: { words: 1800, tokens_out: 1800, cost_usd: 0.05 }, status: 'completed', created_at: '2026-08-03T10:01:00Z', parent_experiment_id: null },
-      { id: 'e5b', source_run_id: 'run-1', entity_name: 'Hacksawgaming', step_index: 5, submodule_id: 'content-writer', overrides: { max_tokens: 4000 }, metrics: { words: 2579, tokens_out: 2579, cost_usd: 0.09 }, status: 'completed', created_at: '2026-08-03T10:05:00Z', parent_experiment_id: null },
+      { id: 'e5a', source_run_id: 'run-1', entity_name: 'Hacksawgaming', step_index: 5, submodule_id: 'content-writer', overrides: { max_tokens: 2000 }, metrics: { words: 1800, tokens_out: 1800, cost_usd: 0.05 }, status: 'completed', created_at: '2026-08-03T09:58:00Z', parent_experiment_id: null },
+      { id: 'e5b', source_run_id: 'run-1', entity_name: 'Hacksawgaming', step_index: 5, submodule_id: 'content-writer', overrides: { max_tokens: 4000 }, metrics: { words: 2579, tokens_out: 2579, cost_usd: 0.09 }, status: 'completed', created_at: '2026-08-03T09:59:00Z', parent_experiment_id: null },
     ],
     pipeline_runs: [{ id: 'run-1', project_id: 'proj-1' }],
     projects: [{ id: 'proj-1', template_id: 'tpl-1' }],
