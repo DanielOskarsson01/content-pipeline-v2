@@ -102,6 +102,18 @@ const MANIFESTS = {
   'boilerplate-stripper': { id: 'boilerplate-stripper', step: 4, item_key: 'url', options_defaults: {}, options: [] },
   'seo-planner': { id: 'seo-planner', step: 5, item_key: 'entity_name', options_defaults: {}, options: [] },
   'content-analyzer': { id: 'content-analyzer', step: 5, item_key: 'entity_name', options_defaults: {}, options: [] },
+  'meta-compliance-checker': { id: 'meta-compliance-checker', step: 6, item_key: 'entity_name', options_defaults: {}, options: [] },
+  'citation-coverage-checker': { id: 'citation-coverage-checker', step: 6, item_key: 'entity_name', options_defaults: {}, options: [] },
+};
+
+const PLANNER_PARENT = {
+  id: PARENT_ID, source_run_id: RUN, entity_name: ENTITY, submodule_id: 'seo-planner', status: 'completed',
+  output_data: {
+    items: [{
+      entity_name: ENTITY, meta_title: 'NEW planner meta title', keywords_text: 'kw1, kw2',
+      faqs_text: 'q1', meta_text: 'new meta desc', primary_keyword: 'kw1', status: 'success',
+    }],
+  },
 };
 
 async function driveEndpoint({ respond, runSubmodule, body, getManifest }) {
@@ -362,6 +374,12 @@ test('cb49ef80 shape: scraped meta_description bearers survive a CW parent; stal
     { entity_name: ENTITY, _blob_ref: 'blob-1', revision_summary: 'old tse summary', word_count: 2446, source_submodule: 'tone-seo-editor' },
     { entity_name: ENTITY, meta_title: 'planner meta title', keywords_text: 'kw', source_submodule: 'seo-planner' },
     { entity_name: ENTITY, analysis_json: { sections: [1] }, source_submodule: 'content-analyzer' },
+    // the four step-6 verdict items the real cb49ef80 pool carries — only the
+    // meta checker collides with a CW parent (it echoes meta_title)
+    { entity_name: ENTITY, meta_title: 'CW title', meta_description_text: 'CW desc', qa_pass: true, violations: [], source_submodule: 'meta-compliance-checker' },
+    { entity_name: ENTITY, citation_score: 0.9, summary_text: 'citations ok', qa_pass: true, source_submodule: 'citation-coverage-checker' },
+    { entity_name: ENTITY, hallucination_score: 0.95, summary_text: 'grounded', qa_pass: true, source_submodule: 'hallucination-detector' },
+    { entity_name: ENTITY, structural_score: 0.8, section_report: 'sections ok', qa_pass: true, source_submodule: 'qa-structural' },
   ];
   let harnessSpec;
   const { status, json } = await driveEndpoint({
@@ -383,14 +401,111 @@ test('cb49ef80 shape: scraped meta_description bearers survive a CW parent; stal
   assert.equal(bearers[0].content_markdown, 'NEW CW CONTENT');
   // blob-hidden bearer still dropped (its blob keys include content_markdown)
   assert.equal(items.filter(i => i._blob_ref).length, 0, 'blob-hidden bearer dropped');
-  // residual documented over-drop: the seo-planner sibling goes via its
-  // meta_title collision (generation-step item, not exempt)
+  // residual documented over-drop: non-artifact siblings with an incidental
+  // collision still go (planner + meta checker via meta_title) — an artifact
+  // parent supersedes them, and §7b re-supplies requires_columns
   assert.ok(!items.some(i => i.source_submodule === 'seo-planner'), 'planner sibling still shape-dropped (documented residual)');
+  assert.ok(!items.some(i => i.source_submodule === 'meta-compliance-checker'), 'meta checker still shape-dropped (documented residual)');
   assert.ok(items.some(i => i.analysis_json), 'analyzer sibling survives');
-  // counts surface starvation at a glance
+  assert.ok(items.some(i => i.source_submodule === 'citation-coverage-checker'), 'non-colliding verdict survives');
+  assert.ok(items.some(i => i.source_submodule === 'qa-structural'), 'non-colliding verdict survives');
+  // counts surface starvation at a glance — mirrors the live acceptance
+  // numbers for run cb49ef80 (65-item pool, dropped 4, kept 61)
   assert.equal(json.source, 'chained');
-  assert.equal(json.chain.pool_items_dropped, 3, 'CW + TSE + planner');
-  assert.equal(json.chain.pool_items_kept, 58, '57 source items + analyzer');
+  assert.equal(json.chain.pool_items_dropped, 4, 'CW + TSE + planner + meta checker');
+  assert.equal(json.chain.pool_items_kept, 61, '57 source items + analyzer + 3 non-colliding verdicts');
+});
+
+// ---------- the A1 residual fix: symmetric collision, asymmetric outcome ----------
+// seo-planner, content-writer and meta-compliance-checker all emit meta_title.
+// Shape-matching alone dropped the writer's content_markdown bearer behind a
+// seo-planner parent — and §7b then re-supplied content_markdown from
+// HISTORICAL item_data under the entity_name key, broadcasting it onto every
+// entity-keyed item. The protected-artifact rule keys on what the parent
+// PRODUCES: a bearer of content_markdown can only be shape-dropped by a
+// parent that itself produces content_markdown.
+test('chain planner→content-writer: writer bearer survives the meta_title collision, front-moved; planner original + meta checker dropped', async () => {
+  const pool = [
+    ...Array.from({ length: 12 }, (_, i) => ({
+      url: `https://x.com/p${i}`, entity_name: ENTITY, status: 'success', word_count: 100, source_submodule: 'boilerplate-stripper',
+    })),
+    { entity_name: ENTITY, content_markdown: 'ORIGINAL CW CONTENT', meta_title: 'CW title', meta_description: 'CW desc', word_count: 2791, source_submodule: 'content-writer' },
+    { entity_name: ENTITY, _blob_ref: 'blob-1', revision_summary: 'old tse summary', keyword_placements_text: 'old placements', word_count: 2446, source_submodule: 'tone-seo-editor' },
+    { entity_name: ENTITY, meta_title: 'OLD planner meta title', keywords_text: 'old kw', source_submodule: 'seo-planner' },
+    { entity_name: ENTITY, meta_title: 'CW title', qa_pass: true, source_submodule: 'meta-compliance-checker' },
+    { entity_name: ENTITY, analysis_json: { sections: [1] }, source_submodule: 'content-analyzer' },
+  ];
+  let harnessSpec;
+  const { status, json } = await driveEndpoint({
+    respond: (rec) => {
+      if (rec.table === 'entity_stage_pool') return { data: { pool_items: structuredClone(pool) }, error: null };
+      return makeRespond({ parent: PLANNER_PARENT })(rec);
+    },
+    runSubmodule: async (spec) => { harnessSpec = spec; return { resolvedOptions: spec.options, result: { items: [], meta: {} } }; },
+    body: chainBody('content-writer', { step_index: 5 }),
+  });
+  assert.equal(status, 201);
+  const items = harnessSpec.entity.items;
+  // the artifact under test is intact despite the meta_title collision
+  const writer = items.find(i => i.content_markdown === 'ORIGINAL CW CONTENT');
+  assert.ok(writer, 'writer bearer survives a non-artifact parent');
+  // and sits inside §7b's 10-item sample window (right after the parent item)
+  assert.equal(items.indexOf(writer), 1, 'protected bearer front-moved behind the parent item');
+  assert.equal(items[0].source_submodule, 'seo-planner', 'parent item still first');
+  assert.equal(items[0].meta_title, 'NEW planner meta title');
+  // parent original replaced by composite key; colliding non-artifact verdict dropped
+  assert.ok(!items.some(i => i.meta_title === 'OLD planner meta title'), 'planner original replaced');
+  assert.ok(!items.some(i => i.source_submodule === 'meta-compliance-checker'), 'colliding meta verdict dropped');
+  // blob-hidden TSE bearer has no planner-field collision and is protected anyway
+  assert.equal(items.filter(i => i._blob_ref).length, 1, 'TSE bearer kept');
+  assert.equal(json.chain.pool_items_dropped, 2, 'planner original + meta checker');
+  assert.equal(json.chain.pool_items_kept, 15);
+});
+
+// ---------- protected bearer × real §7b: no historical broadcast behind a planner parent ----------
+// The catastrophic form of the residual: a checker child (requires
+// content_markdown) chained behind a planner parent. Pre-fix the writer bearer
+// was dropped, §7b saw content_markdown missing and Object.assigned HISTORICAL
+// content onto every entity-keyed item. Post-fix the bearer survives AND is
+// front-moved into §7b's sample window, so enrichment never fires.
+test('chain planner→qa-structural: surviving writer bearer suppresses the §7b historical broadcast', async () => {
+  const pool = [
+    ...Array.from({ length: 12 }, (_, i) => ({
+      url: `https://x.com/p${i}`, entity_name: ENTITY, status: 'success', word_count: 100, source_submodule: 'boilerplate-stripper',
+    })),
+    { entity_name: ENTITY, content_markdown: 'ORIGINAL CW CONTENT', meta_title: 'CW title', word_count: 2791, source_submodule: 'content-writer' },
+    { entity_name: ENTITY, analysis_json: { sections: [1] }, source_submodule: 'content-analyzer' },
+  ];
+  let itemDataQueried = false;
+  const respond = (rec) => {
+    if (rec.table === 'entity_stage_pool') return { data: { pool_items: structuredClone(pool) }, error: null };
+    if (rec.table === 'entity_submodule_runs') return { data: [{ id: 'up1', step_index: 5 }], error: null };
+    if (rec.table === 'submodule_run_item_data') {
+      itemDataQueried = true;
+      return { data: [{ submodule_run_id: 'up1', item_key: ENTITY, field_name: 'content_markdown', content: 'HISTORICAL CW CONTENT' }], error: null };
+    }
+    return makeRespond({ parent: PLANNER_PARENT })(rec);
+  };
+  let hydratedItems;
+  const { status } = await driveEndpoint({
+    respond,
+    runSubmodule: async (spec, deps) => {
+      await hydrateRequiresColumns({
+        runId: spec.run_id, entityName: spec.entity.name, stepIndex: spec.step_index,
+        items: spec.entity.items,
+        manifest: { item_key: 'entity_name', requires_columns: ['content_markdown'] },
+        db: deps.db,
+      });
+      hydratedItems = spec.entity.items;
+      return { resolvedOptions: spec.options, result: { items: [], meta: {} } };
+    },
+    body: chainBody('qa-structural'),
+  });
+  assert.equal(status, 201);
+  const bearers = hydratedItems.filter(i => i.content_markdown);
+  assert.equal(bearers.length, 1, `exactly one bearer post-hydration, got ${bearers.length}`);
+  assert.equal(bearers[0].content_markdown, 'ORIGINAL CW CONTENT', 'the pool artifact, not historical broadcast');
+  assert.equal(itemDataQueried, false, '§7b saw the protected bearer in its sample and never hit item_data');
 });
 
 // ---------- step<=4 parent: own originals replaced by composite key, never duplicated ----------
@@ -432,6 +547,49 @@ test('chain stripper parent: originals replaced by (item_key, source_submodule),
   assert.ok(items.some(i => i.content_markdown === 'CW CONTENT'), 'generated bearer not superseded by a source parent');
   assert.equal(json.chain.pool_items_dropped, 2, 'exactly the two originals');
   assert.equal(json.chain.pool_items_kept, 2);
+});
+
+// ---------- brutal-critic A1 finding 2: degraded-artifact parent refused ----------
+test('parent with an EMPTY content_markdown is refused 422 (fail-closed, not demoted to non-artifact)', async () => {
+  const degraded = {
+    ...CW_PARENT,
+    output_data: { items: [{ entity_name: ENTITY, content_markdown: '', meta_title: 'still has meta', status: 'success' }] },
+  };
+  const { status, json, calls } = await driveEndpoint({
+    respond: makeRespond({ parent: degraded }),
+    body: chainBody('qa-structural'),
+  });
+  assert.equal(status, 422);
+  assert.match(json.error, /empty 'content_markdown'/);
+  assert.deepEqual(writesTo(calls), [], 'refusal must not pin or insert');
+});
+
+// ---------- brutal-critic A1 finding 1: bearer past §7b's window is VISIBLE ----------
+test('a >9-item parent that pushes the protected bearer past the sample window surfaces chain.warning', async () => {
+  const bigStripperParent = {
+    id: PARENT_ID, source_run_id: RUN, entity_name: ENTITY, submodule_id: 'boilerplate-stripper', status: 'completed',
+    output_data: {
+      items: Array.from({ length: 12 }, (_, i) => ({
+        url: `https://x.com/p${i}`, entity_name: ENTITY, text_content: `RESTRIPPED ${i}`, word_count: 90, status: 'success',
+      })),
+    },
+  };
+  const pool = [
+    ...Array.from({ length: 12 }, (_, i) => ({
+      url: `https://x.com/p${i}`, entity_name: ENTITY, text_content: `OLD ${i}`, word_count: 100, source_submodule: 'boilerplate-stripper',
+    })),
+    { entity_name: ENTITY, content_markdown: 'THE ARTICLE', word_count: 2500, source_submodule: 'content-writer' },
+  ];
+  const { status, json } = await driveEndpoint({
+    respond: (rec) => {
+      if (rec.table === 'entity_stage_pool') return { data: { pool_items: structuredClone(pool) }, error: null };
+      return makeRespond({ parent: bigStripperParent })(rec);
+    },
+    runSubmodule: async (spec) => ({ resolvedOptions: spec.options, result: { items: [], meta: {} } }),
+    body: chainBody('qa-structural'),
+  });
+  assert.equal(status, 201);
+  assert.match(json.chain.warning, /past §7b's 10-item sample window/, 'window breach visible in the response, not just the console');
 });
 
 // ---------- unknown provenance stays shape-matched (failure mode a guard) ----------

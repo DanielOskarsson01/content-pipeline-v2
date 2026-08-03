@@ -8,6 +8,12 @@ This document is the canonical "how to build and serve the React client" procedu
 the recovery recipe for the Rollup optional-dependency bug (BACKLOG #4) that historically
 broke `deploy.sh` at step 1.
 
+> **⚠️ Deploy reality check (2026-08-03):** every push to `main` fires
+> `.github/workflows/deploy.yml`, which builds the client **in CI** and rsyncs
+> the whole tree (`--delete`) to the box — merge = deploy. `deploy.sh` and the
+> "Path B" workaround below are for attended/manual deploys only; they are NOT
+> the primary deploy path. See CLAUDE.md "⚠️ MERGE = DEPLOY".
+
 ---
 
 ## What the client is / how it is served

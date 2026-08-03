@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
-import type { CreateWorkbenchExperimentInput } from '../types/step';
+import type { CreateWorkbenchExperimentInput, RunWorkbenchChainInput } from '../types/step';
 
 export function useWorkbenchSourceRuns() {
   return useQuery({
@@ -28,5 +28,23 @@ export function usePinWorkbenchRun() {
   return useMutation({
     mutationFn: (runId: string) => api.pinWorkbenchRun(runId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['workbench', 'source-runs'] }),
+  });
+}
+
+// ---- A2 forward chains ----
+
+export function useRunWorkbenchChain() {
+  return useMutation({
+    mutationFn: (data: RunWorkbenchChainInput) => api.runWorkbenchChain(data),
+  });
+}
+
+/** Polls the linked-list reconstruction while a chain POST is in flight. */
+export function useWorkbenchChainTree(startExperimentId: string | null, polling: boolean) {
+  return useQuery({
+    queryKey: ['workbench', 'chains', startExperimentId],
+    queryFn: () => api.getWorkbenchChainTree(startExperimentId!),
+    enabled: !!startExperimentId && polling,
+    refetchInterval: polling ? 3000 : false,
   });
 }

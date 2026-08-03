@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams, Link, Navigate, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import { useRunData, useApproveStep, useSkipStep, useReopenStep } from '../../hooks/useRun';
+import { useWorkbenchSourceRun } from '../../hooks/useWorkbench';
 import { usePipelineStore } from '../../stores/pipelineStore';
 import { usePanelStore } from '../../stores/panelStore';
 import { useAppStore } from '../../stores/appStore';
@@ -39,6 +40,16 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
   const { data: run, isLoading, error } = useRunData(runId);
   const { setExpandedStep } = usePipelineStore();
   const { resetPanel } = usePanelStore();
+
+  // A4: run identity — entity names via the read-only workbench tree (the
+  // same source the panel's Try-It uses); with several tabs open, project +
+  // short id + entities + date is what tells runs apart.
+  const { data: identityTree } = useWorkbenchSourceRun(runId);
+  const entityNames = useMemo(() => {
+    const names = new Set<string>();
+    for (const s of identityTree?.steps || []) for (const e of s.entities) names.add(e);
+    return [...names].sort();
+  }, [identityTree]);
 
   // Reset panel state when navigating to a different run
   useEffect(() => { resetPanel(); }, [runId, resetPanel]);
@@ -89,7 +100,16 @@ function RunViewInner({ projectId, runId }: { projectId: string; runId: string }
             {project?.name || 'Loading...'}
           </h2>
           <p className="text-xs text-gray-500">
-            Run {runId.slice(0, 8)} · Step {run.current_step} of 10 · {
+            {/* A4: workbench-picker format — entities + date make runs
+                distinguishable across tabs */}
+            Run {runId.slice(0, 8)}
+            {entityNames.length > 0 && (
+              <> · {entityNames.slice(0, 3).join(', ')}{entityNames.length > 3 ? ` +${entityNames.length - 3}` : ''}</>
+            )}
+            {run.started_at && (
+              <> · {new Date(run.started_at).toLocaleDateString()} {new Date(run.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</>
+            )}
+            {' '}· Step {run.current_step} of 10 · {
               run.status === 'auto_executing' ? 'Auto-Executing' :
               run.status === 'halted' ? 'Halted' :
               run.status === 'paused' ? 'Paused' :

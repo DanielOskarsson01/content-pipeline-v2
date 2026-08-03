@@ -513,6 +513,26 @@ Drop zone hint in `client/src/components/primitives/CsvUploadInput.tsx` mentions
 
 ---
 
+## ⚠️ MERGE = DEPLOY (verified live 2026-08-02)
+
+`.github/workflows/deploy.yml` triggers on **every push to `main`** and performs a
+FULL deploy: client build in CI, `rsync -azP --delete` of the entire tree to
+`/opt/content-pipeline-v2` (excluding node_modules/.env/.git/.github/logs),
+`npm install`, and `pm2 startOrReload`. There is **no attended gate**: merging a
+PR into `main` IS a production deploy. The D12 Cloudinary swap reached prod on
+2026-08-02 precisely because "merge ≠ deploy" was assumed.
+
+Consequences:
+- **Branch + PR only.** Never push to `main` unless deploying right now is the intent.
+  A push with `[skip ci]` in the commit subject is the only non-deploying main push.
+- **The box IS a full checkout of `main`** after any CI deploy (the full-tree
+  `rsync --delete` mirrors the repo). This **supersedes** the earlier
+  "box is not a complete checkout" finding *for the skeleton* — diff-scoped
+  Path-B deploys created that state, and the first CI deploy erased it. (The
+  modules repo may still be deployed diff-scoped; verify separately.)
+- `deploy.sh` / attended "Path-B" deploys still exist as tools, but any document
+  claiming they are the ONLY deploy mechanism is wrong — CI-on-main-push is live.
+
 ## ⛔ Production Server — No Git Commands
 
 **NEVER run git commands on the production server (188.245.110.34).** The server has no `.git` directory. It is deployed exclusively by CI/CD (rsync `--delete` from GitHub Actions). Running `git pull`, `git checkout`, or `git reset` on the server will either fail or corrupt the deployment.
