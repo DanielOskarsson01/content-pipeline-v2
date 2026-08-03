@@ -37,6 +37,8 @@ import {
   getOrCreateSession, findSession, acceptExperiment, getSessionSteps, resolveSessionParent,
 } from '../services/tuningSessions.js';
 import { promoteExperimentSettings } from '../services/promoteSettings.js';
+import { createPostmortemStore } from '../services/postmortemStore.js';
+import { buildPostmortem, writePostmortem } from '../services/tuningPostmortem.js';
 
 // Per-request execution ceiling. The harness caps each AI call at 600s with up
 // to 3 attempts but has no overall bound (U2 review finding); a single
@@ -543,7 +545,18 @@ export function createWorkbenchRouter(deps) {
       const { accepted, erased } = await acceptExperiment(
         { sessionId: session.id, stepIndex: step_index, experimentId: experiment_id, submoduleId: exp.submodule_id }, db);
       const steps = await getSessionSteps(session.id, db);
-      res.json({ session_id: session.id, accepted, erased, steps });
+      // T5: continuously (re)write the durable postmortem after each accept.
+      // Best-effort — an accept must not fail because the durable store is down
+      // or unconfigured, but "not written" is always logged, never silent.
+      let postmortem = null;
+      try {
+        const store = createPostmortemStore({ db });
+        if (store) postmortem = await writePostmortem(session, db, store);
+        else console.warn('[tuning] no POSTMORTEM_DIR/POSTMORTEM_BUCKET configured — postmortem not written');
+      } catch (e) {
+        console.warn(`[tuning] postmortem write failed (accept still succeeded): ${e.message}`);
+      }
+      res.json({ session_id: session.id, accepted, erased, steps, postmortem });
     } catch (err) {
       if (!res.headersSent) res.status(500).json({ error: err.message });
     }
@@ -611,6 +624,22 @@ export function createWorkbenchRouter(deps) {
         entity_name: session.entity_name,
         steps,
       });
+    } catch (err) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * GET /api/workbench/sessions/:runId/:entityName/summary   (T6 step-10 summary)
+   * Every attempt per step with its metrics, the accepted one flagged so
+   * discarded and accepted attempts are clearly distinguished — the postmortem
+   * structure served live from the DB. Read-only.
+   */
+  router.get('/sessions/:runId/:entityName/summary', async (req, res) => {
+    try {
+      const session = await findSession(req.params.runId, decodeURIComponent(req.params.entityName), db);
+      if (!session) return res.json({ session_id: null, steps: [] });
+      res.json(await buildPostmortem(session, db));
     } catch (err) {
       if (!res.headersSent) res.status(500).json({ error: err.message });
     }
