@@ -47,6 +47,10 @@ const MODEL_MAP = {
   'gpt-4o': 'gpt-4o',
   sonar: 'sonar',
   'sonar-pro': 'sonar-pro',
+  // Google Gemini (OpenAI-compatible endpoint) — -latest aliases only (dated ids
+  // 404 "no longer available to new users" on this key, verified 2026-08-03).
+  'gemini-flash': 'gemini-flash-latest',
+  'gemini-pro': 'gemini-pro-latest',
 };
 
 const AI_REQUEST_TIMEOUT_MS = 600_000;
@@ -121,6 +125,16 @@ export function buildHarnessTools(submoduleId, logs = []) {
       if (provider === 'anthropic') {
         if (thinking != null && !anthropicAcceptsThinking(modelId)) logger.info(`[ai] thinking control omitted — ${modelId} does not accept an explicit thinking config`);
         if (effort != null && !anthropicAcceptsEffort(modelId)) logger.info(`[ai] effort control omitted — ${modelId} does not accept output_config.effort`);
+      } else {
+        // BACKLOG #49 landmine: non-anthropic branches can't honor these controls;
+        // make the drop visible instead of silent (stageWorker parity).
+        if (thinking != null) logger.info(`[ai] thinking control dropped — provider '${provider}' has no thinking config`);
+        if (effort != null) logger.info(`[ai] effort control dropped — provider '${provider}' has no output_config.effort`);
+        if (cache_prefix != null) {
+          logger.info(provider === 'gemini'
+            ? `[ai] prompt-cache not honored on gemini — cache_prefix inlined into the prompt (no caching savings)`
+            : `[ai] cache_prefix DROPPED — provider '${provider}' sends the prompt WITHOUT the cache prefix (content decapitated)`);
+        }
       }
 
       async function callProvider() {
@@ -183,12 +197,24 @@ export function buildHarnessTools(submoduleId, logs = []) {
           return result;
         }
 
-        // openai / perplexity (non-streamed), mirroring stageWorker's branches.
-        const endpoints = { openai: 'https://api.openai.com/v1/chat/completions', perplexity: 'https://api.perplexity.ai/chat/completions' };
-        const keyNames = { openai: 'OPENAI_API_KEY', perplexity: 'PERPLEXITY_API_KEY' };
-        if (!endpoints[provider]) throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity`);
+        // openai / perplexity / gemini (non-streamed), mirroring stageWorker's branches.
+        const endpoints = {
+          openai: 'https://api.openai.com/v1/chat/completions',
+          perplexity: 'https://api.perplexity.ai/chat/completions',
+          gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+        };
+        const keyNames = { openai: 'OPENAI_API_KEY', perplexity: 'PERPLEXITY_API_KEY', gemini: 'GOOGLE_AI_API_KEY' };
+        if (!endpoints[provider]) throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity, gemini`);
         const apiKey = process.env[keyNames[provider]];
         if (!apiKey) throw new Error(`${keyNames[provider]} not set in environment`);
+
+        // Gemini has no Anthropic-style cache_control blocks; inline the stable
+        // prefix into the prompt (string concat — byte-identical to the split the
+        // model would otherwise see) so a cache_prefix caller is never decapitated.
+        // openai / perplexity keep content = prompt (byte-identical to pre-#49).
+        const content = (provider === 'gemini' && typeof cache_prefix === 'string' && cache_prefix.length > 0)
+          ? cache_prefix + prompt
+          : prompt;
 
         const { status, body } = await withTimeout(async (signal) => {
           const res = await fetch(endpoints[provider], {
@@ -196,7 +222,7 @@ export function buildHarnessTools(submoduleId, logs = []) {
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
             body: JSON.stringify({
               model: modelId,
-              messages: [{ role: 'user', content: prompt }],
+              messages: [{ role: 'user', content }],
               ...(max_tokens && { max_tokens }),
               ...(temperature != null && { temperature }),
             }),
@@ -218,6 +244,9 @@ export function buildHarnessTools(submoduleId, logs = []) {
           model: modelId,
           provider,
           ...(provider === 'perplexity' && { citations: data.citations || [] }),
+          // Gemini 2.5 counts internal thinking tokens in total_tokens (not in
+          // completion_tokens) — carry total so cost math isn't undercounted.
+          ...(provider === 'gemini' && { tokens_total: data.usage?.total_tokens || 0 }),
           duration_ms,
         };
         logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms`);

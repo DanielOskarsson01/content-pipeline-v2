@@ -45,6 +45,12 @@ const MODEL_MAP = {
   // Perplexity
   sonar: 'sonar',
   'sonar-pro': 'sonar-pro',
+  // Google Gemini (OpenAI-compatible endpoint). Pinned to the -latest aliases:
+  // the dated ids (gemini-2.5-flash, -flash-lite, -2.0-flash, -2.5-pro) 404 with
+  // "no longer available to new users" on this project's key (verified live
+  // 2026-08-03); the -latest aliases are the only reliably callable ids.
+  'gemini-flash': 'gemini-flash-latest',
+  'gemini-pro': 'gemini-pro-latest',
 };
 
 /**
@@ -170,6 +176,18 @@ function buildTools(runId, submoduleId) {
       if (provider === 'anthropic') {
         if (thinking != null && !anthropicAcceptsThinking(modelId)) logger.info(`[ai] thinking control omitted — ${modelId} does not accept an explicit thinking config`);
         if (effort != null && !anthropicAcceptsEffort(modelId)) logger.info(`[ai] effort control omitted — ${modelId} does not accept output_config.effort`);
+      } else {
+        // BACKLOG #49 landmine: the non-anthropic branches can't honor these
+        // controls. Make the drop VISIBLE instead of silent (the anthropic-gated
+        // trace above never fired for non-anthropic providers, so cache_prefix /
+        // thinking / effort vanished with zero signal).
+        if (thinking != null) logger.info(`[ai] thinking control dropped — provider '${provider}' has no thinking config`);
+        if (effort != null) logger.info(`[ai] effort control dropped — provider '${provider}' has no output_config.effort`);
+        if (cache_prefix != null) {
+          logger.info(provider === 'gemini'
+            ? `[ai] prompt-cache not honored on gemini — cache_prefix inlined into the prompt (no caching savings)`
+            : `[ai] cache_prefix DROPPED — provider '${provider}' sends the prompt WITHOUT the cache prefix (content decapitated)`);
+        }
       }
 
       // Inner function that makes a single API call with timeout
@@ -330,8 +348,69 @@ function buildTools(runId, submoduleId) {
           logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms, ${result.citations.length} citations`);
           return result;
 
+        } else if (provider === 'gemini') {
+          const apiKey = process.env.GOOGLE_AI_API_KEY;
+          if (!apiKey) throw new Error('GOOGLE_AI_API_KEY not set in environment');
+
+          // Google Gemini via its OpenAI-compatible endpoint — the openai/perplexity
+          // request shape ports verbatim. cache_prefix is INLINED into the content
+          // (string concat — byte-identical to the two-block split the model would
+          // otherwise see; promptCache.js:7-9), NOT sent as Anthropic cache_control
+          // blocks, which Gemini can't parse. So a caller that passes reference docs
+          // via cache_prefix is never silently decapitated (content-analyzer does
+          // exactly this). No native prompt caching → no cache read/write savings.
+          const content = (typeof cache_prefix === 'string' && cache_prefix.length > 0)
+            ? cache_prefix + prompt
+            : prompt;
+
+          // ponytail: non-streamed, matching openai/perplexity. undici's hidden
+          // ~300s idle-socket timeout is HALF of AI_REQUEST_TIMEOUT_MS, so a long
+          // generation idles past it → bare "fetch failed" (no statusCode) → 3
+          // retries → ~908s wall at 3x input tokens. Fine for short-output checkers;
+          // stream (OpenAI-style SSE) or make no-status timeouts fail-fast BEFORE
+          // pointing this provider at a long-output step (step 5) at volume.
+          const { status, body } = await withTimeout(async (signal) => {
+            const res = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
+              method: 'POST',
+              signal,
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+              },
+              body: JSON.stringify({
+                model: modelId,
+                messages: [{ role: 'user', content }],
+                ...(max_tokens && { max_tokens }),
+                ...(temperature != null && { temperature }),
+              }),
+            });
+            return { status: res.status, body: await res.text() };
+          }, AI_REQUEST_TIMEOUT_MS);
+
+          if (status !== 200) {
+            const err = new Error(`Gemini API error ${status}: ${body.slice(0, 500)}`);
+            err.statusCode = status;
+            throw err;
+          }
+
+          const data = JSON.parse(body);
+          const duration_ms = Date.now() - startTime;
+          const result = {
+            text: data.choices?.[0]?.message?.content || '',
+            tokens_in: data.usage?.prompt_tokens || 0,
+            tokens_out: data.usage?.completion_tokens || 0,
+            // Gemini 2.5 counts internal "thinking" tokens in total_tokens but NOT
+            // in completion_tokens — carry total so cost math isn't undercounted.
+            tokens_total: data.usage?.total_tokens || 0,
+            model: modelId,
+            provider: 'gemini',
+            duration_ms,
+          };
+          logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out (total ${result.tokens_total}), ${duration_ms}ms`);
+          return result;
+
         } else {
-          throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity`);
+          throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity, gemini`);
         }
       }
 
