@@ -1,4 +1,5 @@
 import type { WorkbenchAiUsage, WorkbenchExperimentResponse } from '../../types/step';
+import { ExperimentMetrics } from './ExperimentMetrics';
 
 // Mirror of server/lib/aiModelParams.js (keep the regexes in sync): the
 // harness silently omits these params when the model family rejects them, yet
@@ -46,7 +47,6 @@ export function ExperimentResultView({ result }: { result: WorkbenchExperimentRe
   const meta = exp.output_data?.meta;
   const items = exp.output_data?.items || [];
   const failed = exp.status !== 'completed';
-  const stopReasons = [...new Set((usage?.calls || []).map((c) => c.stop_reason).filter(Boolean))];
   const errorText = exp.error || meta?.error
     || (failed ? `experiment ended with status '${exp.status}' — no error text recorded` : null);
   const dropped = findDroppedOverrides(exp.overrides || {}, usage);
@@ -87,29 +87,10 @@ export function ExperimentResultView({ result }: { result: WorkbenchExperimentRe
         </div>
       )}
 
-      <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-        <div>
-          <dt className="text-gray-400">Duration</dt>
-          <dd className="text-gray-900 font-medium">{exp.duration_ms != null ? `${(exp.duration_ms / 1000).toFixed(1)}s` : '—'}</dd>
-        </div>
-        <div>
-          <dt className="text-gray-400">Tokens in / out</dt>
-          <dd className="text-gray-900 font-medium">
-            {usage ? `${usage.tokens_in_total.toLocaleString()} / ${usage.tokens_out_total.toLocaleString()}` : '—'}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-gray-400">Cache read / write</dt>
-          <dd className="text-gray-900 font-medium">
-            {usage ? `${usage.cache_read_tokens_total.toLocaleString()} / ${usage.cache_write_tokens_total.toLocaleString()}` : '—'}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-gray-400">Stop reason</dt>
-          <dd className="text-gray-900 font-medium">{stopReasons.length > 0 ? stopReasons.join(', ') : '—'}</dd>
-        </div>
-      </dl>
-      {/* Cost: ai_usage records tokens + model per call but no dollar figure — none stored, so none shown. */}
+      {/* One metrics path (ExperimentMetrics) — the server-computed `metrics`
+          block, with ai_usage as the fallback for pre-metrics rows. Cost now
+          shown: it lives on metrics.cost_usd (aiCost.js), not ai_usage. */}
+      <ExperimentMetrics metrics={exp.metrics} fallbackUsage={usage} fallbackDurationMs={exp.duration_ms} />
 
       {Object.keys(exp.overrides || {}).length > 0 && (
         <div>

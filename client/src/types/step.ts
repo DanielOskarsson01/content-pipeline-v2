@@ -532,6 +532,31 @@ export interface WorkbenchAiUsage {
   cache_read_tokens_total: number;
 }
 
+/**
+ * A3 derived metrics persisted on every workbench_experiments row
+ * (server/lib/experimentMetrics.js). Single source of experiment metrics —
+ * rendered by ExperimentMetrics, carried on every postmortem attempt. Fields
+ * are null (not 0) when they don't apply to the submodule.
+ */
+export interface WorkbenchExperimentMetrics {
+  words: number | null;
+  h2_sections: number | null;
+  thin_sections: number | null;
+  has_h1: boolean | null;
+  marker_leak_headings: number | null;
+  dup_token_headings: number | null;
+  distinct_citations: number | null;
+  max_citation_n: number | null;
+  broken_refs: number | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  stop_reason: string | null;
+  duration_ms: number | null;
+  cost_usd: number | null;
+}
+
 export interface WorkbenchExperiment {
   id: string;
   source_run_id: string;
@@ -545,12 +570,25 @@ export interface WorkbenchExperiment {
     meta?: { status?: string; error?: string; truncated?: boolean; ai_usage?: WorkbenchAiUsage };
   } | null;
   ai_usage: WorkbenchAiUsage | null;
+  /** A3: derived metrics (words/cost/tokens/…), computed at insert. */
+  metrics?: WorkbenchExperimentMetrics | null;
   duration_ms: number | null;
   status: 'completed' | 'error' | 'timeout';
   error: string | null;
   /** U8: set when this experiment chained from a previous experiment's output */
   parent_experiment_id?: string | null;
   created_at: string;
+}
+
+/**
+ * T2 session block riding an /experiments response in session mode — makes a
+ * pool fallback (nothing accepted upstream) unmistakable.
+ */
+export interface TuningSessionBlock {
+  session_id: string | null;
+  chained_from: string | null;
+  chained_from_step: number | null;
+  note: string;
 }
 
 export interface WorkbenchExperimentResponse {
@@ -561,7 +599,15 @@ export interface WorkbenchExperimentResponse {
   /** U8: what the run read — always present on current servers ('pool' when unchained) */
   source?: 'chained' | 'pool';
   /** U8: overlay stats when chained; explicit null when the run scored the pool */
-  chain?: { parent_experiment_id: string; pool_items_dropped: number; pool_items_kept: number } | null;
+  chain?: {
+    parent_experiment_id: string | null;
+    read_from?: string[];
+    pool_items_dropped: number;
+    pool_items_kept: number;
+    warning?: string;
+  } | null;
+  /** T2: present in session mode — the auto-chain decision (or pool fallback). */
+  session?: TuningSessionBlock | null;
 }
 
 export interface CreateWorkbenchExperimentInput {
@@ -572,6 +618,106 @@ export interface CreateWorkbenchExperimentInput {
   overrides?: Record<string, unknown>;
   /** U8: run with a completed experiment's output overlaid onto the frozen pool */
   parent_experiment_id?: string;
+  /** T2: auto-chain from the accepted experiment at the nearest upstream step. */
+  session?: boolean;
+}
+
+// ---- Tuning sessions (T2/T3/T6) ----
+
+/** One accepted step in a tuning session (tuning_session_steps row). */
+export interface TuningSessionStep {
+  id?: string;
+  session_id: string;
+  step_index: number;
+  experiment_id: string;
+  submodule_id: string;
+  accepted_at?: string;
+}
+
+/** GET /sessions/:runId/:entityName — the accepted chain (or empty shell). */
+export interface TuningSessionResponse {
+  session_id: string | null;
+  source_run_id?: string;
+  entity_name?: string;
+  steps: TuningSessionStep[];
+}
+
+/** POST /sessions/accept response. */
+export interface AcceptExperimentResponse {
+  session_id: string;
+  accepted: { session_id: string; step_index: number; experiment_id: string; submodule_id: string };
+  erased: TuningSessionStep[];
+  steps: TuningSessionStep[];
+  postmortem: { key: string; bytes: number; location: string } | null;
+}
+
+/** One attempt in a step's postmortem (metrics only — no article body). */
+export interface TuningPostmortemAttempt {
+  experiment_id: string;
+  accepted: boolean;
+  status: string;
+  overrides: Record<string, unknown>;
+  metrics: WorkbenchExperimentMetrics | null;
+  parent_experiment_id: string | null;
+  created_at: string;
+  changed_from_previous: string[];
+  metric_deltas: Record<string, number> | null;
+}
+
+export interface TuningPostmortemStep {
+  step_index: number;
+  submodule_id: string | null;
+  accepted_experiment_id: string | null;
+  attempt_count: number;
+  attempts: TuningPostmortemAttempt[];
+}
+
+/** GET /sessions/:runId/:entityName/summary — the T6 step-10 digest. */
+export interface TuningPostmortem {
+  schema?: string;
+  session_id: string | null;
+  source_run_id?: string;
+  entity_name?: string;
+  template_id?: string | null;
+  template_name?: string | null;
+  created_at?: string;
+  updated_at?: string | null;
+  step_count?: number;
+  steps: TuningPostmortemStep[];
+}
+
+/** POST /promote-settings — dry-run or real result (or 409 shadow refusal). */
+export interface PromoteSettingsResult {
+  target_layer: string;
+  template_id: string;
+  template_name?: string | null;
+  submodule_id: string;
+  preset_names?: string[];
+  plan: { submodule_id: string; option: string; old: unknown; new: unknown; changes: boolean }[];
+  // Optional: the "no overrides to promote" early return (promoteSettings.js)
+  // omits both — every OTHER return spreads them. Consumers must default to [].
+  conflicts?: { option: string; layer: string; preset_name: string; row_id: string; would_resolve_to: unknown; blocked_new: unknown }[];
+  warnings?: { option: string; layer: string; scope?: string; row_id: string; project_id?: string; note: string }[];
+  promoted: number;
+  refused?: boolean;
+  reason?: string;
+  dry_run?: boolean;
+  concurrency_conflict?: boolean;
+  resolved_proof?: { option: string; fresh_run_resolves_to: unknown; matches_new: boolean }[];
+  message?: string;
+}
+
+export interface AcceptExperimentInput {
+  source_run_id: string;
+  entity_name: string;
+  step_index: number;
+  experiment_id: string;
+}
+
+export interface PromoteSettingsInput {
+  experiment_id: string;
+  template_id: string;
+  dry_run?: boolean;
 }
 
 // ---- A2 forward chains ----

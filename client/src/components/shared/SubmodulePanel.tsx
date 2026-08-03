@@ -9,6 +9,7 @@ import { computeOverrides } from '../../api/workbenchOverrides';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../api/client';
 import { ExperimentResultView } from './ExperimentResultView';
+import { TuningSessionControls } from './TuningSessionControls';
 import type { SubmoduleManifest, SubmoduleConfig, DownloadableField, SubmoduleRun, SubmoduleRunBatch, EntityRunStatus, ProjectMode, TemplateExecutionPlan, WorkbenchExperimentResponse } from '../../types/step';
 import { isPerEntityRun } from '../../types/step';
 import { CsvUploadInput, type UploadResult } from '../primitives/CsvUploadInput';
@@ -496,6 +497,10 @@ export function SubmodulePanel({
         step_index: stepIndex,
         submodule_id: submodule.id,
         entity_name: tryItEntity,
+        // T2: session mode auto-chains from the accepted upstream step and
+        // returns the source/session block. An explicit parent_experiment_id
+        // (manual chainFromLast override) still wins server-side.
+        session: true,
         ...(Object.keys(tryItOverrides).length > 0 ? { overrides: tryItOverrides } : {}),
         ...(chainFromLast && chainableParent ? { parent_experiment_id: chainableParent.id } : {}),
       },
@@ -970,16 +975,10 @@ export function SubmodulePanel({
                   </span>
                 </label>
               )}
-              <p className="text-[11px] text-gray-500">
-                Next run will read:{' '}
-                {chainFromLast && chainableParent ? (
-                  <span className="font-medium text-sky-800">
-                    experiment {chainableParent.id.slice(0, 8)} ({chainableParent.submodule_id}) overlaid on the pool
-                  </span>
-                ) : (
-                  <span className="font-medium">the run&apos;s frozen pool</span>
-                )}
-              </p>
+              {/* Authoritative "what the next run reads" + the tuning-session
+                  actions (accept / erase-downstream / promote) live in
+                  TuningSessionControls below, which accounts for both the
+                  session auto-chain and this manual override. */}
 
               {tryItMutation.isPending && (
                 <div className="flex items-center gap-3 py-2">
@@ -997,6 +996,20 @@ export function SubmodulePanel({
               )}
 
               {tryItResult && <ExperimentResultView result={tryItResult} />}
+
+              {/* U3 — tuning-session surface: accepted chain, next-reads,
+                  accept (+ erase-downstream confirm), promote-to-template. */}
+              {runId && (
+                <TuningSessionControls
+                  runId={runId}
+                  stepIndex={stepIndex}
+                  entityName={tryItEntity}
+                  templateId={templateId}
+                  tryItResult={tryItResult}
+                  disabled={isAutoExecuting}
+                  manualOverride={chainFromLast && chainableParent ? { id: chainableParent.id, submodule_id: chainableParent.submodule_id } : null}
+                />
+              )}
             </div>
           </PanelAccordionItem>
         </div>
