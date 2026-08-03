@@ -592,7 +592,7 @@ export function createWorkbenchRouter(deps) {
         return res.status(409).json({ error: 'only an accepted experiment can be promoted — accept it for its step first' });
       }
       const { data: template, error: tErr } = await db
-        .from('templates').select('id, name, preset_map').eq('id', template_id).maybeSingle();
+        .from('templates').select('id, name, preset_map, updated_at').eq('id', template_id).maybeSingle();
       if (tErr) return res.status(500).json({ error: `template lookup failed: ${tErr.message}` });
       if (!template) return res.status(404).json({ error: `template ${template_id} not found` });
 
@@ -600,7 +600,8 @@ export function createWorkbenchRouter(deps) {
         .from('pipeline_runs').select('project_id').eq('id', experiment.source_run_id).maybeSingle();
 
       const result = await promoteExperimentSettings({
-        experiment, template, projectId: run?.project_id || null, dryRun: !!dry_run, db,
+        experiment, template, projectId: run?.project_id || null,
+        priorUpdatedAt: template.updated_at || null, dryRun: !!dry_run, db,
       });
       return res.status(result.refused ? 409 : 200).json(result);
     } catch (err) {

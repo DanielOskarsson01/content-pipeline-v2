@@ -963,7 +963,9 @@ function remapPresetMapDocIds(presetMap, docIdMap) {
  * Returns: { submoduleId: { optionName: resolvedValue } }
  */
 export async function resolvePresetMap(presetMap, projectId, dbClient = db) {
-  // Delegates to the db-free resolver (server/services/presetResolution.js).
+  // Thin shim. The resolution LOGIC lives in server/services/presetResolution.js
+  // — add any new resolution rule THERE, never here, so promote-settings' fresh
+  // run proof stays byte-identical to what a real run resolves.
   // dbClient defaults to the module db so existing 2-arg callers are unchanged;
   // promote-settings / hermetic tests inject a fake or scoped client.
   return resolvePresetMapWith(presetMap, projectId, dbClient);
