@@ -16,7 +16,7 @@ import templatesRouter from './routes/templates.js';
 import seedRouter from './routes/seed.js';
 import csvUploadRouter from './routes/csvUpload.js';
 import { createWorkbenchRouter } from './routes/workbench.js';
-import providersRouter from './routes/providers.js';
+import { createProvidersRouter } from './routes/providers.js';
 import { logPostmortemStoreStatus } from './services/postmortemStore.js';
 import { loadModules } from './services/moduleLoader.js';
 import { startRetention } from './services/retention.js';
@@ -73,7 +73,7 @@ app.use('/api/templates', templatesRouter);
 app.use('/api/seed', seedRouter);
 app.use('/api/projects/:projectId/csv-upload', csvUploadRouter);
 app.use('/api/workbench', createWorkbenchRouter({ db }));
-app.use('/api/providers', providersRouter);
+app.use('/api/providers', createProvidersRouter({ db }));
 
 // Metrics endpoint — execution stats per submodule
 app.get('/api/metrics/summary', async (_req, res, next) => {

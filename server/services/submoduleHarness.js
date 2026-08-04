@@ -36,7 +36,8 @@ import { parseAnthropicSSE } from './aiStream.js';
 import { applyPromptOverride } from '../utils/promptOverrides.js';
 import { anthropicAcceptsTemperature, anthropicAcceptsThinking, anthropicAcceptsEffort } from '../lib/aiModelParams.js';
 import { applyAiCallMeta } from '../utils/aiCallMeta.js';
-import { resolveModel } from '../config/llmRegistry.js';
+import { resolveModel, PROVIDERS } from '../config/llmRegistry.js';
+import { resolveApiKey } from './apiKeys.js';
 import { hydrateFrozenInput } from './poolHydration.js';
 
 // Model resolution is shared with stageWorker via the LLM registry
@@ -71,7 +72,7 @@ function withTimeout(fn, ms) {
  * writes and minus browser/unlocker/storage (no module the workbench targets
  * uses them; storage would WRITE stored_assets, which this path must not do).
  */
-export function buildHarnessTools(submoduleId, logs = []) {
+export function buildHarnessTools(submoduleId, logs = [], db = undefined) {
   const log = (level, message) => {
     console.error(`[${submoduleId}] ${message}`);
     logs.push({ level, message, timestamp: new Date().toISOString() });
@@ -130,9 +131,12 @@ export function buildHarnessTools(submoduleId, logs = []) {
       }
 
       async function callProvider() {
+        // #49 Unit 7: .env wins, DB-stored key fills the gap (stageWorker parity).
+        // db is optional here (CLI harness → env-only); prod passes the injected db.
+        const apiKey = await resolveApiKey(provider, db);
+        if (!apiKey) throw new Error(`No API key for provider "${provider}" — set ${PROVIDERS[provider]?.envVar ?? 'its API key'} in the environment or add one in settings`);
+
         if (provider === 'anthropic') {
-          const apiKey = process.env.ANTHROPIC_API_KEY;
-          if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
 
           const streamed = await withTimeout(async (signal) => {
             const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -195,10 +199,7 @@ export function buildHarnessTools(submoduleId, logs = []) {
           perplexity: 'https://api.perplexity.ai/chat/completions',
           gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
         };
-        const keyNames = { openai: 'OPENAI_API_KEY', perplexity: 'PERPLEXITY_API_KEY', gemini: 'GOOGLE_AI_API_KEY' };
         if (!endpoints[provider]) throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity, gemini`);
-        const apiKey = process.env[keyNames[provider]];
-        if (!apiKey) throw new Error(`${keyNames[provider]} not set in environment`);
 
         // Gemini has no Anthropic-style cache_control blocks; inline the stable
         // prefix into the prompt (string concat — byte-identical to the split the
@@ -361,7 +362,7 @@ export async function runSubmoduleOnce(spec, deps = {}) {
   }
 
   const logs = [];
-  const tools = buildHarnessTools(spec.submodule_id, logs);
+  const tools = buildHarnessTools(spec.submodule_id, logs, deps.db);
 
   // stageWorker parity: legacyInput carries BOTH `entity` and `entities`, and
   // the entity keeps its extra keys (website, linkedin, loop_count, …) — prod

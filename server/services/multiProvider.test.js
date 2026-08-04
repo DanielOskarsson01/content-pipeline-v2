@@ -106,7 +106,7 @@ test('stageWorker prod copy carries the same gemini branch (source parity)', () 
 // ── #49: both copies resolve via the shared registry, no local MODEL_MAP ──
 test('both copies resolve via the registry (resolveModel), MODEL_MAP is gone', () => {
   for (const [name, src] of [['stageWorker', STAGEWORKER], ['submoduleHarness', HARNESS]]) {
-    assert.match(src, /import \{ resolveModel \} from '\.\.\/config\/llmRegistry\.js'/, `${name} imports resolveModel from the registry`);
+    assert.match(src, /import \{[^}]*\bresolveModel\b[^}]*\} from '\.\.\/config\/llmRegistry\.js'/, `${name} imports resolveModel from the registry`);
     assert.match(src, /resolveModel\(provider, model\)/, `${name} resolves via resolveModel(provider, model)`);
     assert.ok(!/const MODEL_MAP = \{/.test(src), `${name} no longer declares a local MODEL_MAP`);
   }
@@ -116,6 +116,15 @@ test('both copies flag empty_completion + carry finish_reason (source parity)', 
   for (const [name, src] of [['stageWorker', STAGEWORKER], ['submoduleHarness', HARNESS]]) {
     assert.match(src, /empty_completion: !res\.text \|\| res\.text\.trim\(\) === ''/, `${name} flags empty completions into the ledger`);
     assert.match(src, /finish_reason: res\.finish_reason \?\? res\.stop_reason \?\? null/, `${name} carries finish_reason`);
+  }
+});
+
+// #49 Unit 7: both copies resolve the key via resolveApiKey (.env wins, DB fills gap),
+// no longer reading provider keys straight from process.env.
+test('both copies resolve the API key via resolveApiKey, not process.env directly', () => {
+  for (const [name, src] of [['stageWorker', STAGEWORKER], ['submoduleHarness', HARNESS]]) {
+    assert.match(src, /resolveApiKey\(provider, db\)/, `${name} resolves via resolveApiKey`);
+    assert.ok(!/process\.env\.(ANTHROPIC|OPENAI|PERPLEXITY|GOOGLE_AI)_API_KEY/.test(src), `${name} no longer reads a provider key straight from process.env`);
   }
 });
 

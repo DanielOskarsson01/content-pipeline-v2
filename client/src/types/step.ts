@@ -159,11 +159,20 @@ export interface ProviderInfo {
   id: string;
   displayName: string;
   configured: boolean; // is the key present so this provider actually works
+  source?: 'env' | 'db' | null; // where the active key comes from (Unit 7)
+  last4?: string | null; // last-4 of the active key, never the value (Unit 7)
   reason: string | null; // why unavailable, when !configured
   models: ProviderModel[];
 }
 export interface ProvidersResponse {
   providers: ProviderInfo[];
+}
+// POST/DELETE /api/providers/:id/key response — presence/source/last4 only, never the value.
+export interface ProviderKeyStatus {
+  provider: string;
+  configured: boolean;
+  source: 'env' | 'db' | null;
+  last4: string | null;
 }
 
 // Phase 12a: Option presets

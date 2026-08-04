@@ -19,7 +19,8 @@ import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { anthropicAcceptsTemperature, anthropicAcceptsThinking, anthropicAcceptsEffort } from '../lib/aiModelParams.js';
 import { COST_CONFIG } from '../config/timeouts.js';
-import { resolveModel } from '../config/llmRegistry.js';
+import { resolveModel, PROVIDERS } from '../config/llmRegistry.js';
+import { resolveApiKey } from '../services/apiKeys.js';
 import { hydrateItems } from '../services/poolBlobs.js';
 import { hydrateRequiresColumns } from '../services/poolHydration.js';
 import { convertXlsxInDir } from '../utils/xlsxConverter.js';
@@ -179,9 +180,12 @@ function buildTools(runId, submoduleId) {
 
       // Inner function that makes a single API call with timeout
       async function callProvider(attempt) {
+        // #49 Unit 7: .env wins, DB-stored key (settings) fills the gap. Read
+        // per-call so a pasted key reaches this running worker without a restart.
+        const apiKey = await resolveApiKey(provider, db);
+        if (!apiKey) throw new Error(`No API key for provider "${provider}" — set ${PROVIDERS[provider]?.envVar ?? 'its API key'} in the environment or add one in settings`);
+
         if (provider === 'anthropic') {
-          const apiKey = process.env.ANTHROPIC_API_KEY;
-          if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
 
           // STREAM the response. A non-streamed long generation idles the socket
           // past undici's hidden ~300s body/headers timeout → bare "fetch failed"
@@ -253,9 +257,6 @@ function buildTools(runId, submoduleId) {
           return result;
 
         } else if (provider === 'openai') {
-          const apiKey = process.env.OPENAI_API_KEY;
-          if (!apiKey) throw new Error('OPENAI_API_KEY not set in environment');
-
           const { status, body } = await withTimeout(async (signal) => {
             const res = await fetch('https://api.openai.com/v1/chat/completions', {
               method: 'POST',
@@ -296,9 +297,6 @@ function buildTools(runId, submoduleId) {
           return result;
 
         } else if (provider === 'perplexity') {
-          const apiKey = process.env.PERPLEXITY_API_KEY;
-          if (!apiKey) throw new Error('PERPLEXITY_API_KEY not set in environment');
-
           const { status, body } = await withTimeout(async (signal) => {
             const res = await fetch('https://api.perplexity.ai/chat/completions', {
               method: 'POST',
@@ -339,9 +337,6 @@ function buildTools(runId, submoduleId) {
           return result;
 
         } else if (provider === 'gemini') {
-          const apiKey = process.env.GOOGLE_AI_API_KEY;
-          if (!apiKey) throw new Error('GOOGLE_AI_API_KEY not set in environment');
-
           // Google Gemini via its OpenAI-compatible endpoint — the openai/perplexity
           // request shape ports verbatim. cache_prefix is INLINED into the content
           // (string concat — byte-identical to the two-block split the model would

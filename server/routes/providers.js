@@ -1,46 +1,75 @@
 /**
- * GET /api/providers — model-picker availability (BACKLOG #49).
+ * /api/providers — model-picker availability + settings key management (BACKLOG #49).
  *
- * The single source the picker renders. Per provider: is it configured (does the
- * box have its key), its models with prices, and — when unavailable — the reason.
- * This kills the current footgun: openai is selectable in the dropdown but has no
- * key on the box, so choosing it 500s mid-run. Here it comes back configured:false
- * with a reason, so the picker can grey it out instead of offering a broken choice.
+ * GET  /api/providers            → per provider: configured?, key source (env/db),
+ *                                  last-4, models with prices, and the unavailable
+ *                                  reason. The single source the picker renders;
+ *                                  kills the openai footgun (selectable-but-keyless).
+ * POST /api/providers/:id/key    → store a DB key for a provider (Unit 7). Body
+ *                                  { api_key }. Never echoes the value back.
+ * DELETE /api/providers/:id/key  → remove the DB key.
  *
- * Pure + read-only: imports only the registry (no db.js — safe to mount in a
- * hermetic harness without the SUPABASE env guard tripping).
+ * db-injected factory (like the workbench router) so the key store is testable and
+ * this file never imports db.js.
  */
 import { Router } from 'express';
 import { PROVIDERS } from '../config/llmRegistry.js';
+import { providerKeyStatus, invalidateApiKeyCache } from '../services/apiKeys.js';
 
-const router = Router();
+export function createProvidersRouter({ db } = {}) {
+  const router = Router();
 
-// Is this provider usable right now? Unit 3 = env-only (mirrors exactly what the
-// two ai.complete copies check today: process.env[KEY]). Unit 7 extends this seam
-// to "env OR a DB-stored key" — the ONE place that computation should live.
-function providerConfigured(provider) {
-  return Boolean(process.env[provider.envVar]);
+  router.get('/', async (_req, res) => {
+    // env OR DB key (Unit 7) — the seam Unit 3 left env-only.
+    const status = await providerKeyStatus(db);
+    const providers = Object.values(PROVIDERS).map((p) => {
+      const s = status[p.id] || { configured: false, source: null, last4: null };
+      return {
+        id: p.id,
+        displayName: p.displayName,
+        configured: s.configured,
+        source: s.source,          // 'env' | 'db' | null — where the active key comes from
+        last4: s.last4,            // last-4 of the active key, never the value
+        reason: s.configured ? null : `No API key configured (${p.envVar} not set, and no key saved in settings)`,
+        models: Object.entries(p.models).map(([key, m]) => ({
+          key, id: m.id, displayName: m.displayName, input: m.input, output: m.output, alias: Boolean(m.alias),
+        })),
+      };
+    });
+    res.json({ providers });
+  });
+
+  // ── Unit 7: store / remove a DB-stored key. Never returns the value. ──
+  router.post('/:id/key', async (req, res) => {
+    const { id } = req.params;
+    if (!PROVIDERS[id]) return res.status(400).json({ error: `Unknown provider "${id}"` });
+    const apiKey = req.body?.api_key;
+    if (typeof apiKey !== 'string' || apiKey.trim() === '') {
+      return res.status(400).json({ error: 'api_key must be a non-empty string' });
+    }
+    if (!db) return res.status(503).json({ error: 'key store unavailable' });
+    const { error } = await db
+      .from('provider_api_keys')
+      .upsert({ provider: id, api_key: apiKey.trim(), updated_at: new Date().toISOString() }, { onConflict: 'provider' });
+    if (error) return res.status(500).json({ error: error.message });
+    invalidateApiKeyCache();
+    const status = await providerKeyStatus(db);
+    // presence / source / last-4 only — never the value
+    return res.json({ provider: id, ...status[id] });
+  });
+
+  router.delete('/:id/key', async (req, res) => {
+    const { id } = req.params;
+    if (!PROVIDERS[id]) return res.status(400).json({ error: `Unknown provider "${id}"` });
+    if (!db) return res.status(503).json({ error: 'key store unavailable' });
+    const { error } = await db.from('provider_api_keys').delete().eq('provider', id);
+    if (error) return res.status(500).json({ error: error.message });
+    invalidateApiKeyCache();
+    const status = await providerKeyStatus(db);
+    return res.json({ provider: id, ...status[id] });
+  });
+
+  return router;
 }
 
-router.get('/', (_req, res) => {
-  const providers = Object.values(PROVIDERS).map((p) => {
-    const configured = providerConfigured(p);
-    return {
-      id: p.id,
-      displayName: p.displayName,
-      configured,
-      reason: configured ? null : `No API key configured (${p.envVar} not set)`,
-      models: Object.entries(p.models).map(([key, m]) => ({
-        key,                 // dropdown value the picker sends back as ai_model
-        id: m.id,            // resolved API id
-        displayName: m.displayName,
-        input: m.input,      // $ per Mtok — shown at the point of choice
-        output: m.output,
-        alias: Boolean(m.alias), // '-latest' → model + price can shift
-      })),
-    };
-  });
-  res.json({ providers });
-});
-
-export default router;
+export default createProvidersRouter;
