@@ -19,6 +19,7 @@ import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { anthropicAcceptsTemperature, anthropicAcceptsThinking, anthropicAcceptsEffort } from '../lib/aiModelParams.js';
 import { COST_CONFIG } from '../config/timeouts.js';
+import { resolveModel } from '../config/llmRegistry.js';
 import { hydrateItems } from '../services/poolBlobs.js';
 import { hydrateRequiresColumns } from '../services/poolHydration.js';
 import { convertXlsxInDir } from '../utils/xlsxConverter.js';
@@ -31,27 +32,11 @@ import { applyAiCallMeta } from '../utils/aiCallMeta.js';
 loadModules();
 
 /**
- * Model name → API model ID mapping.
- * Adding a new model is one line.
+ * Model name → API model id resolution now lives in the shared LLM registry
+ * (server/config/llmRegistry.js): resolveModel(provider, model) is PROVIDER-scoped
+ * and throws on a bad pair, so a gemini+sonnet mix can no longer silently POST
+ * claude-sonnet-5 to the gemini endpoint. Adding a model is one entry there.
  */
-const MODEL_MAP = {
-  // Anthropic
-  haiku: 'claude-haiku-4-5-20251001',
-  sonnet: 'claude-sonnet-5',
-  opus: 'claude-opus-4-8',
-  // OpenAI
-  'gpt-4o-mini': 'gpt-4o-mini',
-  'gpt-4o': 'gpt-4o',
-  // Perplexity
-  sonar: 'sonar',
-  'sonar-pro': 'sonar-pro',
-  // Google Gemini (OpenAI-compatible endpoint). Pinned to the -latest aliases:
-  // the dated ids (gemini-2.5-flash, -flash-lite, -2.0-flash, -2.5-pro) 404 with
-  // "no longer available to new users" on this project's key (verified live
-  // 2026-08-03); the -latest aliases are the only reliably callable ids.
-  'gemini-flash': 'gemini-flash-latest',
-  'gemini-pro': 'gemini-pro-latest',
-};
 
 /**
  * Build the tools object that gets passed to execute().
@@ -168,7 +153,9 @@ function buildTools(runId, submoduleId) {
   const ai = {
     complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens, cache_prefix, thinking, effort }) => {
       const startTime = Date.now();
-      const modelId = MODEL_MAP[model] || model;
+      // Provider-scoped resolution — throws loudly on an unknown provider or an
+      // unknown model-for-provider (before any HTTP call, outside the retry loop).
+      const modelId = resolveModel(provider, model);
 
       // BACKLOG #53: caller asked for a control the model family doesn't
       // accept → omit it silently (never 400), but leave a trace. (This logger
@@ -301,6 +288,8 @@ function buildTools(runId, submoduleId) {
             tokens_out: data.usage?.completion_tokens || 0,
             model: modelId,
             provider: 'openai',
+            // #49: carried for the empty/refused fail-closed reason string
+            finish_reason: data.choices?.[0]?.finish_reason ?? null,
             duration_ms,
           };
           logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms`);
@@ -343,6 +332,7 @@ function buildTools(runId, submoduleId) {
             model: modelId,
             provider: 'perplexity',
             citations: data.citations || [],
+            finish_reason: data.choices?.[0]?.finish_reason ?? null,
             duration_ms,
           };
           logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms, ${result.citations.length} citations`);
@@ -404,6 +394,9 @@ function buildTools(runId, submoduleId) {
             tokens_total: data.usage?.total_tokens || 0,
             model: modelId,
             provider: 'gemini',
+            // #49: a safety refusal 200s with an empty message + a content-filter
+            // finish_reason — carried so applyAiCallMeta names the reason.
+            finish_reason: data.choices?.[0]?.finish_reason ?? null,
             duration_ms,
           };
           logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out (total ${result.tokens_total}), ${duration_ms}ms`);
@@ -428,6 +421,11 @@ function buildTools(runId, submoduleId) {
             cache_write_tokens: res.cache_write_tokens || 0,
             cache_read_tokens: res.cache_read_tokens || 0,
             stop_reason: res.stop_reason ?? null,
+            // #49: a 200-OK with empty text is a safety refusal (gemini) or a
+            // content filter — flag it so applyAiCallMeta fails closed instead of
+            // publishing a blank as success. finish_reason feeds the reason string.
+            empty_completion: !res.text || res.text.trim() === '',
+            finish_reason: res.finish_reason ?? res.stop_reason ?? null,
           });
           return res;
         } catch (err) {

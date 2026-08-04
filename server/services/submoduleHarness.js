@@ -4,7 +4,7 @@
  * Runs ONE submodule's execute() in-process against a supplied (or hydrated)
  * pool, with a tools object faithful to stageWorker.buildTools: the SAME module
  * loader, the SAME #21 prompt-cache helper (buildCachedUserContent) and SSE
- * parser (parseAnthropicSSE), the SAME MODEL_MAP, the SAME retry/timeout
+ * parser (parseAnthropicSSE), the SAME registry resolution (resolveModel), the SAME retry/timeout
  * semantics, the SAME aiModelParams gating (anthropicAcceptsTemperature /
  * anthropicAcceptsThinking / anthropicAcceptsEffort) and the SAME _aiCalls →
  * applyAiCallMeta cost/token/stop_reason capture incl. the truncation
@@ -36,22 +36,12 @@ import { parseAnthropicSSE } from './aiStream.js';
 import { applyPromptOverride } from '../utils/promptOverrides.js';
 import { anthropicAcceptsTemperature, anthropicAcceptsThinking, anthropicAcceptsEffort } from '../lib/aiModelParams.js';
 import { applyAiCallMeta } from '../utils/aiCallMeta.js';
+import { resolveModel } from '../config/llmRegistry.js';
 import { hydrateFrozenInput } from './poolHydration.js';
 
-// Mirror of stageWorker.MODEL_MAP — keep in sync (adding a model is one line).
-const MODEL_MAP = {
-  haiku: 'claude-haiku-4-5-20251001',
-  sonnet: 'claude-sonnet-5',
-  opus: 'claude-opus-4-8',
-  'gpt-4o-mini': 'gpt-4o-mini',
-  'gpt-4o': 'gpt-4o',
-  sonar: 'sonar',
-  'sonar-pro': 'sonar-pro',
-  // Google Gemini (OpenAI-compatible endpoint) — -latest aliases only (dated ids
-  // 404 "no longer available to new users" on this key, verified 2026-08-03).
-  'gemini-flash': 'gemini-flash-latest',
-  'gemini-pro': 'gemini-pro-latest',
-};
+// Model resolution is shared with stageWorker via the LLM registry
+// (server/config/llmRegistry.js) — resolveModel(provider, model) is
+// provider-scoped and throws on a bad pair. One source, no more hand-synced map.
 
 const AI_REQUEST_TIMEOUT_MS = 600_000;
 const AI_MAX_RETRIES = 3;
@@ -118,7 +108,9 @@ export function buildHarnessTools(submoduleId, logs = []) {
     // Mirror of stageWorker ai.complete (stageWorker.js:162-369).
     complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens, cache_prefix, thinking, effort }) => {
       const startTime = Date.now();
-      const modelId = MODEL_MAP[model] || model;
+      // Provider-scoped resolution — throws on an unknown provider/model pair
+      // before any HTTP call (stageWorker parity).
+      const modelId = resolveModel(provider, model);
 
       // BACKLOG #53: caller asked for a control the model family doesn't
       // accept → omit it silently (never 400), but leave a trace.
@@ -247,6 +239,8 @@ export function buildHarnessTools(submoduleId, logs = []) {
           // Gemini 2.5 counts internal thinking tokens in total_tokens (not in
           // completion_tokens) — carry total so cost math isn't undercounted.
           ...(provider === 'gemini' && { tokens_total: data.usage?.total_tokens || 0 }),
+          // #49: carried for the empty/refused fail-closed reason string.
+          finish_reason: data.choices?.[0]?.finish_reason ?? null,
           duration_ms,
         };
         logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms`);
@@ -268,6 +262,10 @@ export function buildHarnessTools(submoduleId, logs = []) {
             cache_write_tokens: res.cache_write_tokens || 0,
             cache_read_tokens: res.cache_read_tokens || 0,
             stop_reason: res.stop_reason ?? null,
+            // #49: 200-OK with empty text = safety refusal / content filter →
+            // flag so applyAiCallMeta fails closed (stageWorker parity).
+            empty_completion: !res.text || res.text.trim() === '',
+            finish_reason: res.finish_reason ?? res.stop_reason ?? null,
           });
           return res;
         } catch (err) {

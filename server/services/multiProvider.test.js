@@ -26,8 +26,10 @@ const STAGEWORKER = readFileSync(path.join(__dirname, '../workers/stageWorker.js
 const HARNESS = readFileSync(path.join(__dirname, 'submoduleHarness.js'), 'utf8');
 
 // Drive one non-anthropic ai.complete call with fetch stubbed; return the
-// captured request (url + parsed JSON body) and the ai.complete result.
-async function capture(completeArgs) {
+// captured request (url + parsed JSON body), the ai.complete result, and the
+// tools ledger (_aiCalls). `content` overrides the stubbed completion text so a
+// safety-refusal (empty text) can be simulated.
+async function capture(completeArgs, { content = 'RESP', finish_reason = 'stop' } = {}) {
   const orig = globalThis.fetch;
   const keys = ['OPENAI_API_KEY', 'PERPLEXITY_API_KEY', 'GOOGLE_AI_API_KEY'];
   const savedKeys = keys.map((k) => process.env[k]);
@@ -38,7 +40,7 @@ async function capture(completeArgs) {
     return {
       status: 200,
       text: async () => JSON.stringify({
-        choices: [{ message: { content: 'RESP' }, finish_reason: 'stop' }],
+        choices: [{ message: { content }, finish_reason }],
         usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 42 },
         model: 'stub',
         citations: ['https://x'],
@@ -49,7 +51,7 @@ async function capture(completeArgs) {
     const tools = buildHarnessTools('t', []);
     const result = await tools.ai.complete(completeArgs);
     assert.equal(captured.length, 1, 'exactly one fetch per call');
-    return { req: captured[0], body: JSON.parse(captured[0].opts.body), result };
+    return { req: captured[0], body: JSON.parse(captured[0].opts.body), result, calls: tools._aiCalls };
   } finally {
     globalThis.fetch = orig;
     keys.forEach((k, i) => { if (savedKeys[i] === undefined) delete process.env[k]; else process.env[k] = savedKeys[i]; });
@@ -57,9 +59,12 @@ async function capture(completeArgs) {
 }
 
 // ── openai / perplexity stay byte-identical: cache_prefix is NOT inlined ──
-for (const provider of ['openai', 'perplexity']) {
+// (models are now provider-scoped: gpt-4o for openai, sonar for perplexity — the
+// old test paired perplexity+gpt-4o, a cross-provider mismatch the registry now
+// correctly rejects.)
+for (const [provider, model] of [['openai', 'gpt-4o'], ['perplexity', 'sonar']]) {
   test(`${provider}: cache_prefix is NOT sent (content === prompt, byte-identical to pre-#49)`, async () => {
-    const { req, body } = await capture({ provider, model: 'gpt-4o', prompt: 'PROMPT', cache_prefix: 'BIG-STABLE-DOCS' });
+    const { req, body } = await capture({ provider, model, prompt: 'PROMPT', cache_prefix: 'BIG-STABLE-DOCS' });
     assert.equal(body.messages[0].content, 'PROMPT', 'content must be the bare prompt — no prefix');
     assert.ok(!('cache_prefix' in body) && !('thinking' in body) && !('output_config' in body), 'no anthropic-only keys leak into the body');
     assert.match(req.url, provider === 'openai' ? /api\.openai\.com/ : /api\.perplexity\.ai/);
@@ -98,11 +103,54 @@ test('stageWorker prod copy carries the same gemini branch (source parity)', () 
   assert.match(STAGEWORKER, /Supported: anthropic, openai, perplexity, gemini/, 'stageWorker unknown-provider message lists gemini');
 });
 
-test('MODEL_MAP gemini entries are in sync across both copies', () => {
-  for (const line of ["'gemini-flash': 'gemini-flash-latest'", "'gemini-pro': 'gemini-pro-latest'"]) {
-    assert.ok(STAGEWORKER.includes(line), `stageWorker MODEL_MAP must contain ${line}`);
-    assert.ok(HARNESS.includes(line), `submoduleHarness MODEL_MAP must contain ${line}`);
+// ── #49: both copies resolve via the shared registry, no local MODEL_MAP ──
+test('both copies resolve via the registry (resolveModel), MODEL_MAP is gone', () => {
+  for (const [name, src] of [['stageWorker', STAGEWORKER], ['submoduleHarness', HARNESS]]) {
+    assert.match(src, /import \{ resolveModel \} from '\.\.\/config\/llmRegistry\.js'/, `${name} imports resolveModel from the registry`);
+    assert.match(src, /resolveModel\(provider, model\)/, `${name} resolves via resolveModel(provider, model)`);
+    assert.ok(!/const MODEL_MAP = \{/.test(src), `${name} no longer declares a local MODEL_MAP`);
   }
+});
+
+test('both copies flag empty_completion + carry finish_reason (source parity)', () => {
+  for (const [name, src] of [['stageWorker', STAGEWORKER], ['submoduleHarness', HARNESS]]) {
+    assert.match(src, /empty_completion: !res\.text \|\| res\.text\.trim\(\) === ''/, `${name} flags empty completions into the ledger`);
+    assert.match(src, /finish_reason: res\.finish_reason \?\? res\.stop_reason \?\? null/, `${name} carries finish_reason`);
+  }
+});
+
+// ── provider-scoped resolution: a bad pair throws BEFORE any HTTP call ──
+test('resolveModel: gemini + a sonnet key throws at resolution, before the key check or any fetch', async () => {
+  const orig = globalThis.fetch;
+  let fetched = false;
+  globalThis.fetch = async () => { fetched = true; return { status: 200, text: async () => '{}' }; };
+  try {
+    const tools = buildHarnessTools('t', []);
+    await assert.rejects(
+      () => tools.ai.complete({ provider: 'gemini', model: 'sonnet', prompt: 'x' }),
+      /not valid for provider "gemini"/, // NOT the GOOGLE_AI_API_KEY message → resolution runs first
+    );
+    assert.equal(fetched, false, 'a bad pair must never reach the network');
+  } finally { globalThis.fetch = orig; }
+});
+
+// ── empty/refused completion end-to-end: 200-empty → ledger flag → fail closed ──
+test('gemini 200-with-empty-text → empty_completion flagged → applyAiCallMeta fails closed', async () => {
+  const { result, calls } = await capture(
+    { provider: 'gemini', model: 'gemini-flash', prompt: 'write gambling copy' },
+    { content: '', finish_reason: 'content_filter' },
+  );
+  assert.equal(result.text, '', 'a safety refusal returns HTTP 200 with empty text');
+  assert.equal(calls[0].empty_completion, true, 'empty completion flagged in the ledger');
+  assert.equal(calls[0].finish_reason, 'content_filter');
+  const out = applyAiCallMeta({ items: [] }, calls);
+  assert.equal(out.meta.status, 'error', 'a refused blank must fail closed, not publish as success');
+  assert.match(out.meta.error, /empty\/refused completion on gemini\/gemini-flash-latest.*content_filter/);
+});
+
+test('non-empty completion is NOT flagged (success path unchanged)', async () => {
+  const { calls } = await capture({ provider: 'openai', model: 'gpt-4o', prompt: 'hi' });
+  assert.equal(calls[0].empty_completion, false);
 });
 
 // ── cost wiring: tokens_total reaches ai_usage AND is priced (review WARNING) ──
