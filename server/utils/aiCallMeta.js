@@ -96,6 +96,19 @@ export function applyAiCallMeta(result, aiCalls) {
   //    so fail closed with a named reason — same override-the-module philosophy as
   //    the truncation guard. Distinct from truncation: a truncated response HAS
   //    text (cut off); a refused one has none, so the two guards never collide.
+  //
+  //    SCOPE (deliberate, like the truncation guard):
+  //    - RUN GRANULARITY: fires if ANY call in the run is empty, overriding a
+  //      module's own salvage — a multi-call module that tolerates an empty
+  //      auxiliary call still fails. In practice the only tolerant path is
+  //      seo-planner's perplexity keyword-research (Promise.allSettled), and (a)
+  //      perplexity effectively never 200s with 0-char text, (b) a hollow plan is
+  //      already failed by seo-planner's own content gate — so the over-fire is a
+  //      rare, defensible fail-closed, not a silent break.
+  //    - EMPTY-TEXT ONLY: a VERBOSE refusal ("I can't help with that") is
+  //      non-empty → not caught here. A follow-up could add refusal-phrase /
+  //      finish_reason==='content_filter' detection; empty-text is the primary
+  //      gemini-safety-block signal the brief named.
   const refused = calls.find(c => c.empty_completion);
   if (refused) {
     result.meta.refused = true;
