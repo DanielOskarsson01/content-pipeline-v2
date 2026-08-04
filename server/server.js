@@ -16,6 +16,7 @@ import templatesRouter from './routes/templates.js';
 import seedRouter from './routes/seed.js';
 import csvUploadRouter from './routes/csvUpload.js';
 import { createWorkbenchRouter } from './routes/workbench.js';
+import { logPostmortemStoreStatus } from './services/postmortemStore.js';
 import { loadModules } from './services/moduleLoader.js';
 import { startRetention } from './services/retention.js';
 import db from './services/db.js';
@@ -240,4 +241,7 @@ app.use((err, _req, res, _next) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Server running on :${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server running on :${PORT}`);
+  logPostmortemStoreStatus(); // loud boot signal: tuning postmortems on/off
+});

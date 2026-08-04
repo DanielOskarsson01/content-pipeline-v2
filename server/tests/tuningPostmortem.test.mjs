@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildPostmortem, writePostmortem, postmortemKey, POSTMORTEM_SCHEMA } from '../services/tuningPostmortem.js';
-import { createMemoryStore, createPostmortemStore } from '../services/postmortemStore.js';
+import { createMemoryStore, createPostmortemStore, describePostmortemStore, logPostmortemStoreStatus } from '../services/postmortemStore.js';
 
 // ---------- fake db with eq / gte / order ----------
 function makeDb(seed = {}) {
@@ -135,4 +135,22 @@ test('T5: filesystem store round-trips atomically and leaves no .tmp', async () 
 
 test('T5: no store configured -> createPostmortemStore returns null (caller skips + logs)', () => {
   assert.equal(createPostmortemStore({ db: null, env: {} }), null);
+});
+
+test('T5: describePostmortemStore reports the selected backend (or unconfigured)', () => {
+  assert.deepEqual(describePostmortemStore({}), { configured: false, kind: null, target: null });
+  assert.deepEqual(describePostmortemStore({ POSTMORTEM_DIR: '/x' }), { configured: true, kind: 'fs', target: '/x' });
+  assert.deepEqual(describePostmortemStore({ POSTMORTEM_BUCKET: 'b' }), { configured: true, kind: 'supabase', target: 'b' });
+});
+
+test('T5: unconfigured store is LOUD at startup (warns, never silent)', () => {
+  let warned = null, logged = null;
+  const spy = { warn: (m) => { warned = m; }, log: (m) => { logged = m; } };
+  logPostmortemStoreStatus({}, spy);
+  assert.match(warned, /postmortem store UNCONFIGURED/);
+  assert.equal(logged, null);
+  warned = null;
+  logPostmortemStoreStatus({ POSTMORTEM_BUCKET: 'tuning-postmortems' }, spy);
+  assert.equal(warned, null, 'configured store does not warn');
+  assert.match(logged, /postmortem store configured: supabase -> tuning-postmortems/);
 });

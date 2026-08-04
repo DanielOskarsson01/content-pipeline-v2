@@ -77,3 +77,28 @@ export function createPostmortemStore({ db, env = process.env } = {}) {
   if (env.POSTMORTEM_BUCKET && db?.storage) return createSupabaseStorageStore(db, env.POSTMORTEM_BUCKET);
   return null;
 }
+
+/**
+ * Which durable backend the env selects, for a LOUD startup signal. Mirrors
+ * createPostmortemStore's DIR-wins-over-BUCKET precedence (env presence only —
+ * it does NOT re-check db.storage, so it reports intent, not reachability) so an
+ * unconfigured store (writer = guaranteed no-op) is announced at boot rather
+ * than only discovered when a postmortem silently fails to appear.
+ * Returns { configured, kind, target }.
+ */
+export function describePostmortemStore(env = process.env) {
+  if (env.POSTMORTEM_DIR) return { configured: true, kind: 'fs', target: env.POSTMORTEM_DIR };
+  if (env.POSTMORTEM_BUCKET) return { configured: true, kind: 'supabase', target: env.POSTMORTEM_BUCKET };
+  return { configured: false, kind: null, target: null };
+}
+
+/** Emit the loud boot-time line. Extracted so a test can assert both branches. */
+export function logPostmortemStoreStatus(env = process.env, log = console) {
+  const s = describePostmortemStore(env);
+  if (s.configured) {
+    log.log(`[tuning] postmortem store configured: ${s.kind} -> ${s.target}`);
+  } else {
+    log.warn('[tuning] ⚠️  postmortem store UNCONFIGURED — tuning postmortems will NOT be written. Set POSTMORTEM_BUCKET (Supabase Storage bucket) or POSTMORTEM_DIR in .env and restart pipeline-api.');
+  }
+  return s;
+}
