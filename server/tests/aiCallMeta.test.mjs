@@ -77,6 +77,46 @@ test('complete output (end_turn) is NOT failed — round-2 supersedes normally',
   assert.equal(result.meta.ai_usage.tokens_out_total, 6698);
 });
 
+// ── BACKLOG #49: empty / refused completion fails closed (Gemini safety block) ──
+// The adapter flags a 200-with-empty-text response empty_completion:true.
+const geminiRefusal = { provider: 'gemini', model: 'gemini-flash-latest', tokens_in: 812, tokens_out: 0, empty_completion: true, finish_reason: 'content_filter' };
+
+test('empty/refused completion → meta.status=error + named reason (not an empty success)', () => {
+  const result = { items: [], meta: {} };
+  applyAiCallMeta(result, [geminiRefusal]);
+
+  assert.equal(result.meta.status, 'error', 'a safety refusal must fail closed, not publish empty');
+  assert.equal(result.meta.refused, true);
+  assert.equal(result.meta.refused_by, 'gemini/gemini-flash-latest');
+  assert.match(result.meta.error, /empty\/refused completion/);
+  assert.match(result.meta.error, /content_filter/, 'reason names the finish_reason');
+  // same downstream chain as truncation: entity fails, supersede gate preserves prior round
+  assert.equal(isFailedRun(result), true);
+  assert.equal(deriveEntityRunStatus(result).status, 'failed');
+});
+
+test('empty completion with no finish_reason still fails closed (bare empty text)', () => {
+  const result = { items: [], meta: {} };
+  applyAiCallMeta(result, [{ provider: 'gemini', model: 'gemini-flash-latest', tokens_in: 5, tokens_out: 0, empty_completion: true }]);
+  assert.equal(result.meta.status, 'error');
+  assert.match(result.meta.error, /empty\/refused completion on gemini\/gemini-flash-latest —/);
+});
+
+test('refused: module’s own error is not clobbered, but refused flag still set', () => {
+  const result = { items: [], meta: { status: 'error', error: 'parse failed' } };
+  applyAiCallMeta(result, [geminiRefusal]);
+  assert.equal(result.meta.error, 'parse failed', 'do not clobber the module’s own error');
+  assert.equal(result.meta.refused, true);
+});
+
+test('non-empty successful call is NOT refused (empty_completion falsy → no change)', () => {
+  const result = { items: [{ body: 'real content' }], meta: {} };
+  applyAiCallMeta(result, [{ provider: 'gemini', model: 'gemini-flash-latest', tokens_in: 5, tokens_out: 40, empty_completion: false }]);
+  assert.notEqual(result.meta.status, 'error');
+  assert.equal(result.meta.refused, undefined);
+  assert.equal(isFailedRun(result), false);
+});
+
 test('no AI calls → meta untouched (non-LLM module keeps its result)', () => {
   const result = { items: [{ url: 'x' }], meta: { status: 'ok', count: 1 } };
   applyAiCallMeta(result, []);

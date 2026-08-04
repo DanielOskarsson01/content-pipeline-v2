@@ -60,7 +60,7 @@ export interface ApiError extends Error {
 import type {
   Project, CreateProjectInput, CreateProjectResponse,
   RunWithStages, PipelineStage, StepApproveResponse, StepSkipResponse,
-  CategoryGroups, SubmoduleConfig, SubmoduleManifest,
+  CategoryGroups, SubmoduleConfig, SubmoduleManifest, ProvidersResponse, ProviderKeyStatus,
   SubmoduleRun, SubmoduleRunPolled, SubmoduleLatestRunMap,
   ApproveSubmoduleRunResponse, ApproveSubmoduleRunPerEntityResponse,
   EntityRunDetail, ExecuteSubmoduleResponse,
@@ -74,6 +74,14 @@ import type {
 } from '../types/step';
 
 export const api = {
+  // LLM providers/models availability for the model picker (BACKLOG #49)
+  getProviders: () => apiFetch<ProvidersResponse>('/api/providers'),
+  // Unit 7: store / remove a DB-stored provider key. Response never carries the value.
+  setProviderKey: (id: string, apiKey: string) =>
+    apiFetch<ProviderKeyStatus>(`/api/providers/${id}/key`, { method: 'POST', body: JSON.stringify({ api_key: apiKey }) }),
+  deleteProviderKey: (id: string) =>
+    apiFetch<ProviderKeyStatus>(`/api/providers/${id}/key`, { method: 'DELETE' }),
+
   // Projects
   getProjects: () => apiFetch<Project[]>('/api/projects'),
   getProject: (id: string) => apiFetch<Project>(`/api/projects/${id}`),

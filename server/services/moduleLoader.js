@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { PROVIDERS } from '../config/llmRegistry.js';
 
 const REQUIRED_FIELDS = ['id', 'name', 'description', 'version', 'step', 'category', 'cost', 'data_operation_default', 'requires_columns', 'item_key', 'output_schema'];
 const VALID_STEPS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -9,6 +10,36 @@ const VALID_POOL_PRECONDITIONS = ['empty_ok', 'requires_items'];
 
 // In-memory registry: Map<submoduleId, manifest>
 const registry = new Map();
+
+/**
+ * Resolve a manifest option's `values_from` spec to a list of dropdown keys drawn
+ * from the shared LLM registry (BACKLOG #49). Generic mechanism — any option can
+ * declare it; nothing here is submodule-specific.
+ *   "registry.providers" → provider ids  ['anthropic','openai','perplexity','gemini']
+ *   "registry.models"    → all model keys (flat, every provider)
+ * Returns null for an unrecognised spec (leaves the option without values — a
+ * visibly-empty dropdown, not a silent wrong list).
+ */
+function registryValues(spec) {
+  if (spec === 'registry.providers') return Object.keys(PROVIDERS);
+  if (spec === 'registry.models') return Object.values(PROVIDERS).flatMap((p) => Object.keys(p.models));
+  return null;
+}
+
+/**
+ * Populate `option.values` for any option declaring `values_from`, in place.
+ * The worker ignores option.values (it resolves via resolveModel); this exists so
+ * the served manifest drives the client dropdown from the registry.
+ */
+export function applyRegistryOptionValues(manifest) {
+  for (const opt of manifest.options || []) {
+    if (opt && typeof opt.values_from === 'string') {
+      const vals = registryValues(opt.values_from);
+      if (vals) opt.values = vals;
+    }
+  }
+  return manifest;
+}
 
 /**
  * Validate a manifest before registering it. Throws on any violation —
@@ -118,6 +149,13 @@ export function loadModules() {
 
       // Throws on any violation — fail-closed (no try/catch, invalid manifest = startup failure)
       validateManifest(manifest, manifestPath);
+
+      // BACKLOG #49: the skeleton supplies option lists from the shared LLM
+      // registry at load time. A manifest option declaring values_from:"registry.*"
+      // (instead of a hardcoded values array) gets its values populated here, so
+      // every AI submodule offers the SAME registry-driven provider/model list —
+      // no per-manifest enumeration to drift, gemini/perplexity now selectable.
+      applyRegistryOptionValues(manifest);
 
       // Store manifest with its filesystem path for later execute.js loading
       manifest._path = path.join(stepPath, subDir.name);

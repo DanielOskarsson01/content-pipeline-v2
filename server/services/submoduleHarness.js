@@ -4,7 +4,7 @@
  * Runs ONE submodule's execute() in-process against a supplied (or hydrated)
  * pool, with a tools object faithful to stageWorker.buildTools: the SAME module
  * loader, the SAME #21 prompt-cache helper (buildCachedUserContent) and SSE
- * parser (parseAnthropicSSE), the SAME MODEL_MAP, the SAME retry/timeout
+ * parser (parseAnthropicSSE), the SAME registry resolution (resolveModel), the SAME retry/timeout
  * semantics, the SAME aiModelParams gating (anthropicAcceptsTemperature /
  * anthropicAcceptsThinking / anthropicAcceptsEffort) and the SAME _aiCalls →
  * applyAiCallMeta cost/token/stop_reason capture incl. the truncation
@@ -36,22 +36,13 @@ import { parseAnthropicSSE } from './aiStream.js';
 import { applyPromptOverride } from '../utils/promptOverrides.js';
 import { anthropicAcceptsTemperature, anthropicAcceptsThinking, anthropicAcceptsEffort } from '../lib/aiModelParams.js';
 import { applyAiCallMeta } from '../utils/aiCallMeta.js';
+import { resolveModel, PROVIDERS } from '../config/llmRegistry.js';
+import { resolveApiKey } from './apiKeys.js';
 import { hydrateFrozenInput } from './poolHydration.js';
 
-// Mirror of stageWorker.MODEL_MAP — keep in sync (adding a model is one line).
-const MODEL_MAP = {
-  haiku: 'claude-haiku-4-5-20251001',
-  sonnet: 'claude-sonnet-5',
-  opus: 'claude-opus-4-8',
-  'gpt-4o-mini': 'gpt-4o-mini',
-  'gpt-4o': 'gpt-4o',
-  sonar: 'sonar',
-  'sonar-pro': 'sonar-pro',
-  // Google Gemini (OpenAI-compatible endpoint) — -latest aliases only (dated ids
-  // 404 "no longer available to new users" on this key, verified 2026-08-03).
-  'gemini-flash': 'gemini-flash-latest',
-  'gemini-pro': 'gemini-pro-latest',
-};
+// Model resolution is shared with stageWorker via the LLM registry
+// (server/config/llmRegistry.js) — resolveModel(provider, model) is
+// provider-scoped and throws on a bad pair. One source, no more hand-synced map.
 
 const AI_REQUEST_TIMEOUT_MS = 600_000;
 const AI_MAX_RETRIES = 3;
@@ -81,7 +72,7 @@ function withTimeout(fn, ms) {
  * writes and minus browser/unlocker/storage (no module the workbench targets
  * uses them; storage would WRITE stored_assets, which this path must not do).
  */
-export function buildHarnessTools(submoduleId, logs = []) {
+export function buildHarnessTools(submoduleId, logs = [], db = undefined) {
   const log = (level, message) => {
     console.error(`[${submoduleId}] ${message}`);
     logs.push({ level, message, timestamp: new Date().toISOString() });
@@ -118,7 +109,9 @@ export function buildHarnessTools(submoduleId, logs = []) {
     // Mirror of stageWorker ai.complete (stageWorker.js:162-369).
     complete: async ({ prompt, model = 'haiku', provider = 'anthropic', temperature, max_tokens, cache_prefix, thinking, effort }) => {
       const startTime = Date.now();
-      const modelId = MODEL_MAP[model] || model;
+      // Provider-scoped resolution — throws on an unknown provider/model pair
+      // before any HTTP call (stageWorker parity).
+      const modelId = resolveModel(provider, model);
 
       // BACKLOG #53: caller asked for a control the model family doesn't
       // accept → omit it silently (never 400), but leave a trace.
@@ -138,9 +131,12 @@ export function buildHarnessTools(submoduleId, logs = []) {
       }
 
       async function callProvider() {
+        // #49 Unit 7: .env wins, DB-stored key fills the gap (stageWorker parity).
+        // db is optional here (CLI harness → env-only); prod passes the injected db.
+        const apiKey = await resolveApiKey(provider, db);
+        if (!apiKey) throw new Error(`No API key for provider "${provider}" — set ${PROVIDERS[provider]?.envVar ?? 'its API key'} in the environment or add one in settings`);
+
         if (provider === 'anthropic') {
-          const apiKey = process.env.ANTHROPIC_API_KEY;
-          if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
 
           const streamed = await withTimeout(async (signal) => {
             const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -203,10 +199,7 @@ export function buildHarnessTools(submoduleId, logs = []) {
           perplexity: 'https://api.perplexity.ai/chat/completions',
           gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
         };
-        const keyNames = { openai: 'OPENAI_API_KEY', perplexity: 'PERPLEXITY_API_KEY', gemini: 'GOOGLE_AI_API_KEY' };
         if (!endpoints[provider]) throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity, gemini`);
-        const apiKey = process.env[keyNames[provider]];
-        if (!apiKey) throw new Error(`${keyNames[provider]} not set in environment`);
 
         // Gemini has no Anthropic-style cache_control blocks; inline the stable
         // prefix into the prompt (string concat — byte-identical to the split the
@@ -247,6 +240,8 @@ export function buildHarnessTools(submoduleId, logs = []) {
           // Gemini 2.5 counts internal thinking tokens in total_tokens (not in
           // completion_tokens) — carry total so cost math isn't undercounted.
           ...(provider === 'gemini' && { tokens_total: data.usage?.total_tokens || 0 }),
+          // #49: carried for the empty/refused fail-closed reason string.
+          finish_reason: data.choices?.[0]?.finish_reason ?? null,
           duration_ms,
         };
         logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out, ${duration_ms}ms`);
@@ -268,6 +263,10 @@ export function buildHarnessTools(submoduleId, logs = []) {
             cache_write_tokens: res.cache_write_tokens || 0,
             cache_read_tokens: res.cache_read_tokens || 0,
             stop_reason: res.stop_reason ?? null,
+            // #49: 200-OK with empty text = safety refusal / content filter →
+            // flag so applyAiCallMeta fails closed (stageWorker parity).
+            empty_completion: !res.text || res.text.trim() === '',
+            finish_reason: res.finish_reason ?? res.stop_reason ?? null,
           });
           return res;
         } catch (err) {
@@ -363,7 +362,7 @@ export async function runSubmoduleOnce(spec, deps = {}) {
   }
 
   const logs = [];
-  const tools = buildHarnessTools(spec.submodule_id, logs);
+  const tools = buildHarnessTools(spec.submodule_id, logs, deps.db);
 
   // stageWorker parity: legacyInput carries BOTH `entity` and `entities`, and
   // the entity keeps its extra keys (website, linkedin, loop_count, …) — prod

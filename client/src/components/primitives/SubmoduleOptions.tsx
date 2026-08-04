@@ -6,6 +6,7 @@ import { TagListEditor } from './TagListEditor';
 import { ProviderEditor } from './ProviderEditor';
 import { KeyValueEditor } from './KeyValueEditor';
 import { CsvDiscoveryUpload } from './CsvDiscoveryUpload';
+import { ModelPicker } from './ModelPicker';
 
 interface SubmoduleOptionsProps {
   options: SubmoduleOption[];
@@ -40,10 +41,33 @@ export function SubmoduleOptions({
     );
   }
 
+  // BACKLOG #49: the registry-driven ai_provider + ai_model pair renders as ONE
+  // coupled, priced picker. Detect the pair so the ai_provider slot renders the
+  // ModelPicker (managing both values) and the standalone ai_model slot is skipped.
+  const registryProviderOpt = options.find((o) => o.name === 'ai_provider' && o.values_from);
+  const registryModelOpt = options.find((o) => o.name === 'ai_model' && o.values_from);
+  const usePicker = Boolean(registryProviderOpt && registryModelOpt);
+
   return (
     <div className="space-y-3">
       {options.map((option) => {
         const value = values[option.name] ?? option.default;
+
+        // The coupled ai_provider/ai_model picker replaces both plain selects.
+        if (usePicker && option.name === 'ai_model') return null; // handled by the picker on ai_provider
+        if (usePicker && option.name === 'ai_provider') {
+          return (
+            <ModelPicker
+              key="model-picker"
+              provider={String(values['ai_provider'] ?? registryProviderOpt!.default ?? 'anthropic')}
+              model={String(values['ai_model'] ?? registryModelOpt!.default ?? 'haiku')}
+              label={registryModelOpt!.label}
+              description={registryModelOpt!.description}
+              onProviderChange={(p) => onChange('ai_provider', p)}
+              onModelChange={(m) => onChange('ai_model', m)}
+            />
+          );
+        }
 
         const presetDropdown = option.presets_enabled ? (
           <PresetField

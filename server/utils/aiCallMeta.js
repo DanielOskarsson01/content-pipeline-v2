@@ -19,6 +19,12 @@
  *      meta.ai_usage so cost-per-entity and truncation are queryable per run — it
  *      rides in the existing output_data JSONB, no schema migration.
  *
+ *   3. FAIL-CLOSED ON AN EMPTY / REFUSED COMPLETION (BACKLOG #49). Gemini via its
+ *      OpenAI-compat endpoint 200s with EMPTY text on a safety refusal; the
+ *      adapter flags it empty_completion:true. Set meta.status='error' so a
+ *      refused blank never publishes as success — same supersede-preserving
+ *      fail-closed as (1). See the guard below for the full rationale.
+ *
  * Mutates and returns `result`. No-op when result isn't a plain object or no AI
  * calls were made (non-LLM modules keep their meta untouched).
  *
@@ -77,6 +83,41 @@ export function applyAiCallMeta(result, aiCalls) {
       result.meta.status = 'error';
       result.meta.error = result.meta.error
         || `LLM output truncated (hit max_tokens) on ${result.meta.truncated_by} — failing closed to preserve prior round's content`;
+    }
+  }
+
+  // 3. FAIL-CLOSED ON AN EMPTY / REFUSED COMPLETION (BACKLOG #49). Gemini via its
+  //    OpenAI-compat /chat/completions endpoint returns HTTP 200 with EMPTY text
+  //    on a safety refusal — gambling copy trips it, and today it publishes as a
+  //    successful empty article. (openai/perplexity can also 200-empty on a
+  //    content filter.) The adapter flags such a call with empty_completion:true
+  //    (computed from the returned text; provider-specific in the adapter, generic
+  //    here). An empty completion is never a legitimate success for these modules,
+  //    so fail closed with a named reason — same override-the-module philosophy as
+  //    the truncation guard. Distinct from truncation: a truncated response HAS
+  //    text (cut off); a refused one has none, so the two guards never collide.
+  //
+  //    SCOPE (deliberate, like the truncation guard):
+  //    - RUN GRANULARITY: fires if ANY call in the run is empty, overriding a
+  //      module's own salvage — a multi-call module that tolerates an empty
+  //      auxiliary call still fails. In practice the only tolerant path is
+  //      seo-planner's perplexity keyword-research (Promise.allSettled), and (a)
+  //      perplexity effectively never 200s with 0-char text, (b) a hollow plan is
+  //      already failed by seo-planner's own content gate — so the over-fire is a
+  //      rare, defensible fail-closed, not a silent break.
+  //    - EMPTY-TEXT ONLY: a VERBOSE refusal ("I can't help with that") is
+  //      non-empty → not caught here. A follow-up could add refusal-phrase /
+  //      finish_reason==='content_filter' detection; empty-text is the primary
+  //      gemini-safety-block signal the brief named.
+  const refused = calls.find(c => c.empty_completion);
+  if (refused) {
+    result.meta.refused = true;
+    result.meta.refused_by = `${refused.provider ?? 'unknown'}/${refused.model ?? 'unknown'}`;
+    if (result.meta.status !== 'error') {
+      result.meta.status = 'error';
+      const fr = refused.finish_reason ? ` (finish_reason: ${refused.finish_reason})` : '';
+      result.meta.error = result.meta.error
+        || `LLM returned an empty/refused completion on ${result.meta.refused_by}${fr} — failing closed; a safety refusal must not publish as an empty success`;
     }
   }
 

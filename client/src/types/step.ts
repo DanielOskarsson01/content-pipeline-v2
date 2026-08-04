@@ -137,10 +137,42 @@ export interface SubmoduleOption {
   min?: number;
   max?: number;
   values?: string[];
+  // BACKLOG #49: option values come from the shared LLM registry, not a static
+  // list. The server injects `values` from it; the ModelPicker keys off this.
+  values_from?: string;
   maxLength?: number;
   presets_enabled?: boolean;
   accept?: string;
   upload_endpoint?: string;
+}
+
+// ── BACKLOG #49: GET /api/providers (model-picker availability) ──
+export interface ProviderModel {
+  key: string;         // dropdown value sent back as ai_model
+  id: string;          // resolved API id
+  displayName: string;
+  input: number;       // $ per Mtok
+  output: number;      // $ per Mtok
+  alias: boolean;      // '-latest' → model + price can shift
+}
+export interface ProviderInfo {
+  id: string;
+  displayName: string;
+  configured: boolean; // is the key present so this provider actually works
+  source?: 'env' | 'db' | null; // where the active key comes from (Unit 7)
+  last4?: string | null; // last-4 of the active key, never the value (Unit 7)
+  reason: string | null; // why unavailable, when !configured
+  models: ProviderModel[];
+}
+export interface ProvidersResponse {
+  providers: ProviderInfo[];
+}
+// POST/DELETE /api/providers/:id/key response — presence/source/last4 only, never the value.
+export interface ProviderKeyStatus {
+  provider: string;
+  configured: boolean;
+  source: 'env' | 'db' | null;
+  last4: string | null;
 }
 
 // Phase 12a: Option presets
