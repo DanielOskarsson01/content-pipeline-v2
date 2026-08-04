@@ -12,6 +12,7 @@ import { SubmodulePanel } from '../shared/SubmodulePanel';
 import { VariantPane } from '../shared/VariantPane';
 import { CloneVariantDialog } from '../shared/CloneVariantDialog';
 import { Step7RoutingBody } from './Step7RoutingBody';
+import { TuningSessionSummary } from '../shared/TuningSessionSummary';
 import { StepSummary } from '../shared/StepSummary';
 import { StepApprovalFooter } from '../shared/StepApprovalFooter';
 import { ContentRenderer, type RenderSchema } from '../primitives/ContentRenderer';
@@ -131,6 +132,11 @@ export function UniversalStepTemplate({ stage, projectId, onApprove, onSkip, onR
           stepIndex={stage.step_index}
         />
       )}
+
+      {/* U2 — step-10 (Review) is the publication gate: surface the per-entity
+          tuning session summary here (settings tried, accepted vs discarded,
+          cumulative cost) before the human decides. */}
+      {stage.step_index === 10 && <TuningSessionSummary runId={stage.run_id} />}
 
       {/* StepSummary */}
       <div className="mb-4">

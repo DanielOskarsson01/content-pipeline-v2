@@ -67,6 +67,8 @@ import type {
   DecisionLogEntry, OptionPreset, RunReport,
   WorkbenchSourceRun, WorkbenchRunTree, WorkbenchExperimentResponse, CreateWorkbenchExperimentInput,
   WorkbenchChainResponse, RunWorkbenchChainInput, WorkbenchChainTree,
+  TuningSessionResponse, TuningPostmortem, AcceptExperimentResponse, AcceptExperimentInput,
+  PromoteSettingsResult, PromoteSettingsInput,
   Template, TemplateDetail, TemplatePresetMap, TemplateExecutionPlan, TemplateSeedConfig,
   SeedPreviewResult,
 } from '../types/step';
@@ -346,4 +348,32 @@ export const api = {
     }),
   getWorkbenchChainTree: (startExperimentId: string) =>
     apiFetch<WorkbenchChainTree>(`/api/workbench/chains/${startExperimentId}`),
+
+  // Tuning sessions (T2/T3/T6). session/summary GETs return an empty shell
+  // ({ session_id: null, steps: [] }) when no session exists yet — never 404.
+  getTuningSession: (runId: string, entityName: string) =>
+    apiFetch<TuningSessionResponse>(`/api/workbench/sessions/${runId}/${encodeURIComponent(entityName)}`),
+  getTuningSummary: (runId: string, entityName: string) =>
+    apiFetch<TuningPostmortem>(`/api/workbench/sessions/${runId}/${encodeURIComponent(entityName)}/summary`),
+  acceptExperiment: (data: AcceptExperimentInput) =>
+    apiFetch<AcceptExperimentResponse>('/api/workbench/sessions/accept', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  /**
+   * Raw fetch (createWorkbenchExperiment precedent): a 409 shadow-refusal is a
+   * FIRST-CLASS result the UI must render — it names the blocking option_presets
+   * row in `conflicts[].row_id`. apiFetch would throw the body away. Resolve any
+   * response carrying the promote shape (`plan`); only a shapeless error throws.
+   */
+  promoteSettings: (data: PromoteSettingsInput) =>
+    fetch(`${API_BASE}/api/workbench/promote-settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok && !body.plan) throw new Error(body.error || `HTTP ${r.status}`);
+      return body as PromoteSettingsResult;
+    }),
 };
