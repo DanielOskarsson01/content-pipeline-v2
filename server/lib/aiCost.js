@@ -1,31 +1,19 @@
 /**
  * USD cost of AI usage, from the meta.ai_usage shape applyAiCallMeta persists.
  *
- * Prices are $ per MILLION tokens, verified against platform.claude.com
- * 2026-08-03 (Anthropic) — cache reads bill ~0.1x base input, cache writes
- * 1.25x (5-minute TTL; the pipeline never requests the 1h tier). claude-sonnet-5
- * has an intro price ($2/$10) through 2026-08-31; the standard price is used
- * here deliberately — a cost CAP computed on the higher price refuses earlier,
- * never later. Non-Anthropic rows are the providers' published token rates;
- * Perplexity sonar additionally bills PER-SEARCH FEES that are invisible in
- * token counts (measured 2026-07-28: fees, not tokens, are its cost floor),
- * so sonar totals here are a floor, not the bill.
+ * Prices per MILLION tokens now live in ONE place — the LLM registry
+ * (server/config/llmRegistry.js), keyed by API model id. This re-export keeps the
+ * historical name/shape for aiCost's own consumers while killing the duplicated
+ * price table (BACKLOG #49: single source of truth for models AND prices). The
+ * caveats still hold and are documented at the registry: claude-sonnet-5 standard
+ * price used deliberately (a cap on the higher price refuses earlier); Perplexity
+ * sonar bills per-search fees invisible in token counts (floor, not bill); Gemini
+ * has no native prompt caching (cache_* tokens always 0, rates inert).
  */
-export const MODEL_PRICES_PER_MTOK = {
-  'claude-sonnet-5': { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
-  'claude-haiku-4-5-20251001': { input: 1, output: 5, cache_read: 0.1, cache_write: 1.25 },
-  'claude-opus-4-8': { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
-  'gpt-4o': { input: 2.5, output: 10, cache_read: 1.25, cache_write: 2.5 },
-  'gpt-4o-mini': { input: 0.15, output: 0.6, cache_read: 0.075, cache_write: 0.15 },
-  sonar: { input: 1, output: 1, cache_read: 1, cache_write: 1 },
-  'sonar-pro': { input: 3, output: 15, cache_read: 3, cache_write: 3 },
-  // Google Gemini (BACKLOG #49). Public list rates for the 2.5 Flash/Pro tier
-  // the -latest aliases resolve to (verify: the aliases can shift the underlying
-  // model + its price). No native prompt caching → cache_* never billed (the
-  // ledger's cache_*_tokens are always 0 for gemini); mirror input to be safe.
-  'gemini-flash-latest': { input: 0.30, output: 2.50, cache_read: 0.30, cache_write: 0.30 },
-  'gemini-pro-latest': { input: 1.25, output: 10, cache_read: 1.25, cache_write: 10 },
-};
+import { PRICES_BY_ID } from '../config/llmRegistry.js';
+
+// Keep the historical export name/shape for aiCost's own consumers.
+export const MODEL_PRICES_PER_MTOK = PRICES_BY_ID;
 
 // Unknown model → priced as the most expensive row so a cap can only
 // over-refuse, never silently under-count.
