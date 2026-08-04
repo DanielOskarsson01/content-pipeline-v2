@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useAppStore } from '../../stores/appStore';
 import { useTuningSession, useTuningSummary, useAcceptExperiment, usePromoteSettings } from '../../hooks/useWorkbench';
-import { nextStepReads, downstreamToErase } from '../../api/tuningSession';
+import { nextStepReads, downstreamToErase, promotableExperimentId } from '../../api/tuningSession';
 import type { WorkbenchExperimentResponse, PromoteSettingsResult } from '../../types/step';
 
 /**
@@ -58,6 +58,10 @@ export function TuningSessionControls({
 
   const acceptedHere = steps.find((s) => s.step_index === stepIndex) ?? null;
   const thisIsAccepted = resultMatchesHere && acceptedHere?.experiment_id === exp!.id;
+  // Promote acts on the accepted experiment for this step, read from the
+  // persisted session — so it stays reachable after the Try-It result is gone
+  // (modal close / panel reopen clears tryItResult).
+  const promoteExpId = promotableExperimentId(steps, stepIndex);
 
   // What the next run reads, stated BEFORE running (unless the manual override wins).
   const reads = nextStepReads(steps, stepIndex);
@@ -99,10 +103,10 @@ export function TuningSessionControls({
   };
 
   const openPromote = () => {
-    if (!exp) return;
+    if (!promoteExpId) return;
     setPromotePreview(null);
     promoteMutation.mutate(
-      { experiment_id: exp.id, template_id: templateId!, dry_run: true },
+      { experiment_id: promoteExpId, template_id: templateId!, dry_run: true },
       {
         onSuccess: (res) => setPromotePreview(res),
         onError: (e) => showToast(e instanceof Error ? e.message : 'Promote preview failed', 'error'),
@@ -111,9 +115,9 @@ export function TuningSessionControls({
   };
 
   const doPromote = () => {
-    if (!exp) return;
+    if (!promoteExpId) return;
     promoteMutation.mutate(
-      { experiment_id: exp.id, template_id: templateId! },
+      { experiment_id: promoteExpId, template_id: templateId! },
       {
         onSuccess: (res) => {
           if (res.refused) { setPromotePreview(res); showToast('Promote refused — see details', 'error'); return; }
@@ -210,8 +214,9 @@ export function TuningSessionControls({
         <p className="text-[11px] text-green-700 font-medium">✓ This result is accepted for step {stepIndex}.</p>
       )}
 
-      {/* 4. Promote settings to template (only a vetted/accepted experiment) */}
-      {thisIsAccepted && templateId && (
+      {/* 4. Promote settings to template (the accepted experiment for this step —
+          reachable whether or not the live Try-It result is still on screen). */}
+      {promoteExpId && templateId && (
         <div>
           <button
             onClick={openPromote}
