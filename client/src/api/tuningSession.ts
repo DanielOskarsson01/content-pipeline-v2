@@ -41,3 +41,14 @@ export function downstreamToErase(steps: TuningSessionStep[], stepIndex: number)
     .filter((s) => s.step_index > stepIndex)
     .sort((a, b) => a.step_index - b.step_index);
 }
+
+/**
+ * The experiment "Promote to template" acts on at `stepIndex`: the accepted
+ * experiment for this step from the persisted session — NOT the live Try-It
+ * result. Returning it independently of any in-memory result is what lets the
+ * promote entry point survive a modal close / panel reopen. null when this step
+ * has nothing accepted (promote must not offer).
+ */
+export function promotableExperimentId(steps: TuningSessionStep[], stepIndex: number): string | null {
+  return (steps || []).find((s) => s.step_index === stepIndex)?.experiment_id ?? null;
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nextStepReads, downstreamToErase } from './tuningSession.ts';
+import { nextStepReads, downstreamToErase, promotableExperimentId } from './tuningSession.ts';
 import type { TuningSessionStep } from '../types/step';
 
 const step = (step_index: number, submodule_id = `mod-${step_index}`): TuningSessionStep => ({
@@ -39,5 +39,16 @@ describe('downstreamToErase', () => {
   it('excludes the step being re-accepted itself', () => {
     const erased = downstreamToErase([step(5), step(6)], 5);
     expect(erased.map((s) => s.step_index)).toEqual([6]);
+  });
+});
+
+describe('promotableExperimentId', () => {
+  it('returns the accepted experiment id for the step (independent of any live result)', () => {
+    expect(promotableExperimentId([step(4), step(5)], 5)).toBe('e5');
+  });
+
+  it('returns null when the step has nothing accepted — promote must not offer', () => {
+    expect(promotableExperimentId([step(4)], 5)).toBeNull();
+    expect(promotableExperimentId([], 5)).toBeNull();
   });
 });

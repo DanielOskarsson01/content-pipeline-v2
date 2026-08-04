@@ -39,21 +39,33 @@ function getStatusBadgeClass(status: StepStatus): string {
   }
 }
 
-function getContainerClass(status: StepStatus): string {
+/**
+ * Which steps open on click. A skipped step is expandable too: its body still
+ * carries information the user needs — the step-10 (Review) tuning-session
+ * summary lives there, and any skipped step's footer offers Reopen. Excluding
+ * 'skipped' made those unreachable (U2 summary never mounted on skipped runs).
+ * Only 'pending' (a future step with nothing to show) stays closed.
+ */
+export function isStepExpandable(status: StepStatus): boolean {
+  return status === 'active' || status === 'completed' || status === 'approved' || status === 'skipped';
+}
+
+function getContainerClass(status: StepStatus, isExpanded: boolean): string {
   const base = 'rounded-lg border overflow-hidden transition-all';
   if (status === 'active') return `${base} bg-white border-sky-500 shadow-md ring-1 ring-sky-200`;
   if (status === 'completed' || status === 'approved') return `${base} bg-white border-gray-200`;
-  if (status === 'skipped') return `${base} bg-gray-50 border-gray-200 opacity-40`;
+  // Muted in the list, but full-opacity once opened so the body (e.g. the U2 summary) is readable.
+  if (status === 'skipped') return `${base} bg-gray-50 border-gray-200 ${isExpanded ? '' : 'opacity-40'}`;
   return `${base} bg-gray-50 border-gray-200 opacity-60`;
 }
 
 export function StepContainer({ step, title, description, status, children }: StepContainerProps) {
   const { expandedStep, toggleStep } = usePipelineStore();
   const isExpanded = expandedStep === step;
-  const isClickable = status === 'active' || status === 'completed' || status === 'approved';
+  const isClickable = isStepExpandable(status);
 
   return (
-    <div className={getContainerClass(status)}>
+    <div className={getContainerClass(status, isExpanded)}>
       <div
         className={`flex items-center gap-3 px-4 py-3 select-none ${isClickable ? 'cursor-pointer' : 'cursor-default'}`}
         onClick={() => isClickable && toggleStep(step)}
