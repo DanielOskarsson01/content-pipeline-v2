@@ -60,7 +60,7 @@ export interface ApiError extends Error {
 import type {
   Project, CreateProjectInput, CreateProjectResponse,
   RunWithStages, PipelineStage, StepApproveResponse, StepSkipResponse,
-  CategoryGroups, SubmoduleConfig, SubmoduleManifest,
+  CategoryGroups, SubmoduleConfig, SubmoduleManifest, ProvidersResponse,
   SubmoduleRun, SubmoduleRunPolled, SubmoduleLatestRunMap,
   ApproveSubmoduleRunResponse, ApproveSubmoduleRunPerEntityResponse,
   EntityRunDetail, ExecuteSubmoduleResponse,
@@ -74,6 +74,9 @@ import type {
 } from '../types/step';
 
 export const api = {
+  // LLM providers/models availability for the model picker (BACKLOG #49)
+  getProviders: () => apiFetch<ProvidersResponse>('/api/providers'),
+
   // Projects
   getProjects: () => apiFetch<Project[]>('/api/projects'),
   getProject: (id: string) => apiFetch<Project>(`/api/projects/${id}`),
