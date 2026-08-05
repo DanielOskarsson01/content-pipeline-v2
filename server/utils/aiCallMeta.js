@@ -66,6 +66,11 @@ export function applyAiCallMeta(result, aiCalls) {
       // rate. Carry it so costOfUsage prices the true output; 0 for providers that
       // don't report a total.
       tokens_total: c.tokens_total || 0,
+      // BACKLOG #54: OpenRouter reports the REAL billed USD for the call in
+      // usage.cost — carried here (null for providers that don't) so a true billed
+      // number is queryable alongside the registry-priced estimate costOfUsage
+      // computes. A real number beats an estimate for cross-model cost comparison.
+      provider_cost: c.provider_cost ?? null,
       stop_reason: c.stop_reason ?? null,
     })),
     tokens_in_total: calls.reduce((s, c) => s + (c.tokens_in || 0), 0),
@@ -73,6 +78,14 @@ export function applyAiCallMeta(result, aiCalls) {
     tokens_total_total: calls.reduce((s, c) => s + (c.tokens_total || 0), 0),
     cache_write_tokens_total: calls.reduce((s, c) => s + (c.cache_write_tokens || 0), 0),
     cache_read_tokens_total: calls.reduce((s, c) => s + (c.cache_read_tokens || 0), 0),
+    // Sum of real billed cost — only a TRUE total when EVERY call reported a cost
+    // (all-openrouter run). On a mixed run (e.g. one openrouter + one anthropic call)
+    // some costs are null, so a sum would be a misleading PARTIAL — return null there
+    // so a consumer falls back to the full registry estimate (costOfUsage) rather than
+    // comparing an incomplete billed figure. null also distinguishes "none reported".
+    provider_cost_total: calls.length > 0 && calls.every(c => c.provider_cost != null)
+      ? calls.reduce((s, c) => s + (c.provider_cost || 0), 0)
+      : null,
   };
 
   const truncated = calls.find(c => c.stop_reason === 'max_tokens');
@@ -105,11 +118,14 @@ export function applyAiCallMeta(result, aiCalls) {
   //      perplexity effectively never 200s with 0-char text, (b) a hollow plan is
   //      already failed by seo-planner's own content gate — so the over-fire is a
   //      rare, defensible fail-closed, not a silent break.
-  //    - EMPTY-TEXT ONLY: a VERBOSE refusal ("I can't help with that") is
-  //      non-empty → not caught here. A follow-up could add refusal-phrase /
-  //      finish_reason==='content_filter' detection; empty-text is the primary
-  //      gemini-safety-block signal the brief named.
-  const refused = calls.find(c => c.empty_completion);
+  //    - TWO SIGNALS (BACKLOG #54): an EMPTY completion (empty_completion) OR an
+  //      explicit finish_reason==='content_filter'. The empty-text signal is the
+  //      gemini-safety-block case; the content_filter signal catches an OpenRouter-
+  //      proxied vendor (Llama/Mistral/DeepSeek/Qwen/GLM) that refuses iGaming copy
+  //      with a NON-empty apology but flags the block via finish_reason. A verbose
+  //      refusal that sets NEITHER (plain prose, finish_reason 'stop') still slips —
+  //      a refusal-phrase classifier would be the next layer; out of scope here.
+  const refused = calls.find(c => c.empty_completion || c.finish_reason === 'content_filter');
   if (refused) {
     result.meta.refused = true;
     result.meta.refused_by = `${refused.provider ?? 'unknown'}/${refused.model ?? 'unknown'}`;

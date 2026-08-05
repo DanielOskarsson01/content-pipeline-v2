@@ -11,6 +11,10 @@ const providers: ProviderInfo[] = [
     { key: 'gemini-flash', id: 'gemini-flash-latest', displayName: 'Gemini Flash', input: 0.3, output: 2.5, alias: true },
   ]},
   { id: 'openai', displayName: 'OpenAI', configured: false, reason: 'no key', models: [] },
+  { id: 'openrouter', displayName: 'OpenRouter', configured: true, reason: null, models: [
+    { key: 'gpt-oss-120b', id: 'openai/gpt-oss-120b', displayName: 'gpt-oss-120b', input: 0.037, output: 0.17, alias: false },
+    { key: 'qwen3.5-flash', id: 'qwen/qwen3.5-flash-02-23', displayName: 'Qwen3.5-Flash', input: 0.065, output: 0.26, alias: false },
+  ]},
 ];
 
 describe('nextModelForProvider (coupling — a mismatched pair cannot be built)', () => {
@@ -26,5 +30,17 @@ describe('nextModelForProvider (coupling — a mismatched pair cannot be built)'
   });
   it('returns null for a provider with no models (e.g. unconfigured openai)', () => {
     expect(nextModelForProvider(providers, 'openai', 'gpt-4o')).toBeNull();
+  });
+
+  // #54: switching to/from openrouter must re-point the model, never leave an
+  // anthropic key selected while provider=openrouter (the 18-model footgun).
+  it('provider→openrouter while model is an anthropic key re-points to the first openrouter model', () => {
+    expect(nextModelForProvider(providers, 'openrouter', 'sonnet')).toBe('gpt-oss-120b');
+  });
+  it('keeps a valid openrouter model when it belongs to openrouter', () => {
+    expect(nextModelForProvider(providers, 'openrouter', 'qwen3.5-flash')).toBe('qwen3.5-flash');
+  });
+  it('provider→anthropic while model is an openrouter key re-points to an anthropic model', () => {
+    expect(nextModelForProvider(providers, 'anthropic', 'gpt-oss-120b')).toBe('haiku');
   });
 });

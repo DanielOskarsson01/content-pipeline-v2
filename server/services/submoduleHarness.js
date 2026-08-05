@@ -49,6 +49,11 @@ const AI_MAX_RETRIES = 3;
 const AI_BASE_DELAY_MS = 2000; // 2s → 4s → 8s exponential backoff (stageWorker parity)
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 529]);
 
+// Providers whose adapter INLINES cache_prefix into the prompt (no Anthropic
+// cache_control block on their OpenAI-compat endpoint). Keep in sync with the
+// stageWorker.js copy of this set. (stageWorker parity)
+const PROVIDER_INLINES_CACHE_PREFIX = new Set(['gemini', 'openrouter']);
+
 // stageWorker parity: e.isTimeout marks duration-driven timeouts NOT retryable
 // (a retry just re-hits the same wall).
 function withTimeout(fn, ms) {
@@ -124,8 +129,8 @@ export function buildHarnessTools(submoduleId, logs = [], db = undefined) {
         if (thinking != null) logger.info(`[ai] thinking control dropped — provider '${provider}' has no thinking config`);
         if (effort != null) logger.info(`[ai] effort control dropped — provider '${provider}' has no output_config.effort`);
         if (cache_prefix != null) {
-          logger.info(provider === 'gemini'
-            ? `[ai] prompt-cache not honored on gemini — cache_prefix inlined into the prompt (no caching savings)`
+          logger.info(PROVIDER_INLINES_CACHE_PREFIX.has(provider)
+            ? `[ai] prompt-cache not honored on ${provider} — cache_prefix inlined into the prompt (no caching savings)`
             : `[ai] cache_prefix DROPPED — provider '${provider}' sends the prompt WITHOUT the cache prefix (content decapitated)`);
         }
       }
@@ -193,19 +198,20 @@ export function buildHarnessTools(submoduleId, logs = [], db = undefined) {
           return result;
         }
 
-        // openai / perplexity / gemini (non-streamed), mirroring stageWorker's branches.
+        // openai / perplexity / gemini / openrouter (non-streamed), mirroring stageWorker's branches.
         const endpoints = {
           openai: 'https://api.openai.com/v1/chat/completions',
           perplexity: 'https://api.perplexity.ai/chat/completions',
           gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
+          openrouter: 'https://openrouter.ai/api/v1/chat/completions',
         };
-        if (!endpoints[provider]) throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity, gemini`);
+        if (!endpoints[provider]) throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity, gemini, openrouter`);
 
-        // Gemini has no Anthropic-style cache_control blocks; inline the stable
-        // prefix into the prompt (string concat — byte-identical to the split the
-        // model would otherwise see) so a cache_prefix caller is never decapitated.
+        // gemini/openrouter have no Anthropic-style cache_control blocks; inline the
+        // stable prefix into the prompt (string concat — byte-identical to the split
+        // the model would otherwise see) so a cache_prefix caller is never decapitated.
         // openai / perplexity keep content = prompt (byte-identical to pre-#49).
-        const content = (provider === 'gemini' && typeof cache_prefix === 'string' && cache_prefix.length > 0)
+        const content = (PROVIDER_INLINES_CACHE_PREFIX.has(provider) && typeof cache_prefix === 'string' && cache_prefix.length > 0)
           ? cache_prefix + prompt
           : prompt;
 
@@ -218,6 +224,8 @@ export function buildHarnessTools(submoduleId, logs = [], db = undefined) {
               messages: [{ role: 'user', content }],
               ...(max_tokens && { max_tokens }),
               ...(temperature != null && { temperature }),
+              // #54: OpenRouter returns the real billed USD in usage.cost when asked.
+              ...(provider === 'openrouter' && { usage: { include: true } }),
             }),
           });
           return { status: res.status, body: await res.text() };
@@ -240,6 +248,8 @@ export function buildHarnessTools(submoduleId, logs = [], db = undefined) {
           // Gemini 2.5 counts internal thinking tokens in total_tokens (not in
           // completion_tokens) — carry total so cost math isn't undercounted.
           ...(provider === 'gemini' && { tokens_total: data.usage?.total_tokens || 0 }),
+          // #54: OpenRouter's real billed USD (usage.cost) when present; null otherwise.
+          ...(provider === 'openrouter' && { provider_cost: typeof data.usage?.cost === 'number' ? data.usage.cost : null }),
           // #49: carried for the empty/refused fail-closed reason string.
           finish_reason: data.choices?.[0]?.finish_reason ?? null,
           duration_ms,
@@ -262,6 +272,7 @@ export function buildHarnessTools(submoduleId, logs = [], db = undefined) {
             tokens_total: res.tokens_total || 0, // #49: gemini's billed-output incl. thinking; 0 elsewhere
             cache_write_tokens: res.cache_write_tokens || 0,
             cache_read_tokens: res.cache_read_tokens || 0,
+            provider_cost: res.provider_cost ?? null, // #54: OpenRouter's real billed USD; null elsewhere
             stop_reason: res.stop_reason ?? null,
             // #49: 200-OK with empty text = safety refusal / content filter →
             // flag so applyAiCallMeta fails closed (stageWorker parity).
