@@ -13,28 +13,44 @@ const registry = new Map();
 
 /**
  * Resolve a manifest option's `values_from` spec to a list of dropdown keys drawn
- * from the shared LLM registry (BACKLOG #49). Generic mechanism — any option can
- * declare it; nothing here is submodule-specific.
- *   "registry.providers" → provider ids  ['anthropic','openai','perplexity','gemini']
- *   "registry.models"    → all model keys (flat, every provider)
+ * from the shared LLM registry (BACKLOG #49, coupling hardened #54). Generic
+ * mechanism — any option can declare it; nothing here is submodule-specific.
+ *   "registry.providers" → provider ids  ['anthropic','openai','perplexity','gemini','openrouter']
+ *   "registry.models"    → the DEFAULT provider's model keys — PROVIDER-COUPLED,
+ *                          never a flat cross-provider merge (#54: with 5 providers
+ *                          and 29 models a flat list is unusable and lets a wrong
+ *                          pair be built). The live per-selection filter is GET
+ *                          /api/providers (models nested per provider) which the
+ *                          ModelPicker renders; this static list is the coherent
+ *                          fallback for the manifest's default provider.
  * Returns null for an unrecognised spec (leaves the option without values — a
  * visibly-empty dropdown, not a silent wrong list).
+ * @param {string} spec
+ * @param {string} [defaultProvider]  the manifest's ai_provider default; scopes
+ *   'registry.models' to that provider (falls back to anthropic if absent/unknown).
  */
-function registryValues(spec) {
+function registryValues(spec, defaultProvider) {
   if (spec === 'registry.providers') return Object.keys(PROVIDERS);
-  if (spec === 'registry.models') return Object.values(PROVIDERS).flatMap((p) => Object.keys(p.models));
+  if (spec === 'registry.models') {
+    const p = PROVIDERS[defaultProvider] || PROVIDERS.anthropic;
+    return Object.keys(p.models);
+  }
   return null;
 }
 
 /**
  * Populate `option.values` for any option declaring `values_from`, in place.
  * The worker ignores option.values (it resolves via resolveModel); this exists so
- * the served manifest drives the client dropdown from the registry.
+ * the served manifest drives the client dropdown from the registry. The ai_model
+ * list is coupled to this manifest's ai_provider default (#54) so it is never a
+ * flat cross-provider dump.
  */
 export function applyRegistryOptionValues(manifest) {
+  const providerOpt = (manifest.options || []).find((o) => o && o.name === 'ai_provider');
+  const defaultProvider = providerOpt?.default;
   for (const opt of manifest.options || []) {
     if (opt && typeof opt.values_from === 'string') {
-      const vals = registryValues(opt.values_from);
+      const vals = registryValues(opt.values_from, defaultProvider);
       if (vals) opt.values = vals;
     }
   }

@@ -80,6 +80,51 @@ export const PROVIDERS = {
       'gemini-pro':   { id: 'gemini-pro-latest',   displayName: 'Gemini Pro (latest)',   input: 1.25, output: 10,   cache_read: 1.25, cache_write: 10,   alias: true },
     },
   },
+  openrouter: {
+    id: 'openrouter',
+    displayName: 'OpenRouter',
+    envVar: 'OPENROUTER_API_KEY',
+    // OpenRouter is an OpenAI-compatible PROXY over many vendors (Moonshot, MiniMax,
+    // DeepSeek, Qwen, Z.ai, Mistral, Meta, OpenAI, Google …). The adapter reuses the
+    // OpenAI-compatible branch — no new request/response plumbing (BACKLOG #54).
+    //
+    // Prices are $/MILLION tokens as OpenRouter LISTED THEM 2026-08-05 (resolved live
+    // from GET /api/v1/models), NOT the screening roster's — 10 of 18 drifted from the
+    // roster's 2026-08-04 figures because OpenRouter routes each call to the cheapest
+    // available host and per-host prices move. Treat every price here as a SNAPSHOT:
+    // re-resolve against /api/v1/models before trusting a cost delta. The real billed
+    // number is captured per-call from usage.cost (usage:{include:true}) and beats
+    // this table; these rates are the fallback estimate + the picker's at-a-glance cost.
+    //
+    // cache_* rates are INERT: the adapter sends no Anthropic cache_control blocks
+    // (cache_prefix is INLINED into the prompt like gemini), so cache_read/cache_write
+    // tokens are always 0. Set equal to `input` so a stray cached token could only be
+    // priced sanely, never at $0 or a wild rate.
+    //
+    // `alias: true` marks a '-preview' or undated slug whose underlying build AND price
+    // can shift without notice (gemini-3-flash-preview; deepseek-v4-flash tracks a
+    // dated snapshot) — surfaced in the picker so a choice is never blindly durable.
+    models: {
+      'kimi-k2.6':              { id: 'moonshotai/kimi-k2.6', displayName: 'Kimi K2.6', input: 0.589, output: 2.48, cache_read: 0.589, cache_write: 0.589 },
+      'kimi-k2.5':              { id: 'moonshotai/kimi-k2.5', displayName: 'Kimi K2.5', input: 0.57, output: 2.85, cache_read: 0.57, cache_write: 0.57 },
+      'minimax-m2.7':           { id: 'minimax/minimax-m2.7', displayName: 'MiniMax M2.7', input: 0.27, output: 1.08, cache_read: 0.27, cache_write: 0.27 },
+      'minimax-m2.5':           { id: 'minimax/minimax-m2.5', displayName: 'MiniMax M2.5', input: 0.15, output: 0.9, cache_read: 0.15, cache_write: 0.15 },
+      'deepseek-v4-pro':        { id: 'deepseek/deepseek-v4-pro', displayName: 'DeepSeek V4-Pro', input: 0.435, output: 0.87, cache_read: 0.435, cache_write: 0.435 },
+      'deepseek-v4-flash':      { id: 'deepseek/deepseek-v4-flash', displayName: 'DeepSeek V4-Flash', input: 0.14, output: 0.28, cache_read: 0.14, cache_write: 0.14, alias: true },
+      'qwen3.7-plus':           { id: 'qwen/qwen3.7-plus', displayName: 'Qwen3.7 Plus', input: 0.32, output: 1.28, cache_read: 0.32, cache_write: 0.32 },
+      'qwen3.5-flash':          { id: 'qwen/qwen3.5-flash-02-23', displayName: 'Qwen3.5-Flash', input: 0.065, output: 0.26, cache_read: 0.065, cache_write: 0.065 },
+      'glm-5.2':                { id: 'z-ai/glm-5.2', displayName: 'GLM 5.2', input: 0.76, output: 2.42, cache_read: 0.76, cache_write: 0.76 },
+      'glm-4.7-flash':          { id: 'z-ai/glm-4.7-flash', displayName: 'GLM 4.7 Flash', input: 0.06, output: 0.4, cache_read: 0.06, cache_write: 0.06 },
+      'mistral-medium-3':       { id: 'mistralai/mistral-medium-3', displayName: 'Mistral Medium 3', input: 0.4, output: 2.0, cache_read: 0.4, cache_write: 0.4 },
+      'mistral-small-3.2':      { id: 'mistralai/mistral-small-3.2-24b-instruct', displayName: 'Mistral Small 3.2 24B', input: 0.0938, output: 0.25, cache_read: 0.0938, cache_write: 0.0938 },
+      'llama-4-maverick':       { id: 'meta-llama/llama-4-maverick', displayName: 'Llama 4 Maverick', input: 0.2, output: 0.8, cache_read: 0.2, cache_write: 0.2 },
+      'gpt-oss-120b':           { id: 'openai/gpt-oss-120b', displayName: 'gpt-oss-120b', input: 0.037, output: 0.17, cache_read: 0.037, cache_write: 0.037 },
+      'gpt-5.4-nano':           { id: 'openai/gpt-5.4-nano', displayName: 'GPT-5.4 Nano', input: 0.2, output: 1.25, cache_read: 0.2, cache_write: 0.2 },
+      'gpt-5-mini':             { id: 'openai/gpt-5-mini', displayName: 'GPT-5 Mini', input: 0.25, output: 2.0, cache_read: 0.25, cache_write: 0.25 },
+      'gemini-3-flash':         { id: 'google/gemini-3-flash-preview', displayName: 'Gemini 3 Flash', input: 0.5, output: 3.0, cache_read: 0.5, cache_write: 0.5, alias: true },
+      'gemini-3.5-flash-lite':  { id: 'google/gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash-Lite', input: 0.3, output: 2.5, cache_read: 0.3, cache_write: 0.3 },
+    },
+  },
 };
 
 /**

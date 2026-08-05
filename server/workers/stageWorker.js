@@ -32,6 +32,14 @@ import { applyAiCallMeta } from '../utils/aiCallMeta.js';
 // Load submodule manifests (worker is a separate process from server.js)
 loadModules();
 
+// Providers whose adapter INLINES cache_prefix into the prompt (string concat)
+// instead of sending Anthropic cache_control blocks: gemini and openrouter both
+// speak the OpenAI-compatible /chat/completions shape, which has no cache_control.
+// Inlining keeps the content whole (never decapitated); there is simply no cache
+// hit/write. MUST stay in sync with the openrouter/gemini content construction
+// below AND with submoduleHarness.js's copy.
+const PROVIDER_INLINES_CACHE_PREFIX = new Set(['gemini', 'openrouter']);
+
 /**
  * Model name → API model id resolution now lives in the shared LLM registry
  * (server/config/llmRegistry.js): resolveModel(provider, model) is PROVIDER-scoped
@@ -172,8 +180,8 @@ function buildTools(runId, submoduleId) {
         if (thinking != null) logger.info(`[ai] thinking control dropped — provider '${provider}' has no thinking config`);
         if (effort != null) logger.info(`[ai] effort control dropped — provider '${provider}' has no output_config.effort`);
         if (cache_prefix != null) {
-          logger.info(provider === 'gemini'
-            ? `[ai] prompt-cache not honored on gemini — cache_prefix inlined into the prompt (no caching savings)`
+          logger.info(PROVIDER_INLINES_CACHE_PREFIX.has(provider)
+            ? `[ai] prompt-cache not honored on ${provider} — cache_prefix inlined into the prompt (no caching savings)`
             : `[ai] cache_prefix DROPPED — provider '${provider}' sends the prompt WITHOUT the cache prefix (content decapitated)`);
         }
       }
@@ -397,8 +405,75 @@ function buildTools(runId, submoduleId) {
           logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out (total ${result.tokens_total}), ${duration_ms}ms`);
           return result;
 
+        } else if (provider === 'openrouter') {
+          // OpenRouter (BACKLOG #54) via its OpenAI-compatible endpoint — the same
+          // request/response shape as openai/gemini, no new plumbing. cache_prefix is
+          // INLINED into the content (string concat, like gemini) because OpenRouter's
+          // /chat/completions has no Anthropic cache_control block — so a caller passing
+          // reference docs via cache_prefix is never silently decapitated. No prompt-
+          // cache savings are claimed (cache_* tokens stay 0).
+          const content = (typeof cache_prefix === 'string' && cache_prefix.length > 0)
+            ? cache_prefix + prompt
+            : prompt;
+
+          // ponytail: non-streamed, matching openai/gemini. Same undici idle-socket
+          // caveat as the gemini branch — fine for short-output checkers; stream or
+          // fail-fast before pointing this at a long-output step (5) at volume.
+          const { status, body } = await withTimeout(async (signal) => {
+            const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+              method: 'POST',
+              signal,
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+              },
+              body: JSON.stringify({
+                model: modelId,
+                messages: [{ role: 'user', content }],
+                ...(max_tokens && { max_tokens }),
+                // temperature is an OpenAI-compat param OpenRouter forwards; it silently
+                // drops it for a model that doesn't accept it (no 400). thinking/effort
+                // are Anthropic-only and are dropped-with-a-log above (OpenRouter's
+                // reasoning knob is `reasoning_effort`, deliberately not wired here).
+                ...(temperature != null && { temperature }),
+                // Ask OpenRouter to return the REAL billed cost (USD) in usage.cost —
+                // a true number beats the registry estimate for cross-model comparison.
+                usage: { include: true },
+              }),
+            });
+            return { status: res.status, body: await res.text() };
+          }, AI_REQUEST_TIMEOUT_MS);
+
+          if (status !== 200) {
+            const err = new Error(`OpenRouter API error ${status}: ${body.slice(0, 500)}`);
+            err.statusCode = status;
+            throw err;
+          }
+
+          const data = JSON.parse(body);
+          const duration_ms = Date.now() - startTime;
+          const result = {
+            text: data.choices?.[0]?.message?.content || '',
+            tokens_in: data.usage?.prompt_tokens || 0,
+            tokens_out: data.usage?.completion_tokens || 0,
+            model: modelId,
+            provider: 'openrouter',
+            // Real billed USD from OpenRouter (usage.cost) when present — captured
+            // alongside the registry estimate so R5 can compare the two. null if the
+            // upstream didn't report it → cost math falls back to the registry price.
+            provider_cost: typeof data.usage?.cost === 'number' ? data.usage.cost : null,
+            // #49: 200-with-empty-text = an upstream safety refusal / content filter.
+            // OpenRouter proxies vendors with their own filters and iGaming copy trips
+            // them — carried so applyAiCallMeta fails closed with a named reason.
+            finish_reason: data.choices?.[0]?.finish_reason ?? null,
+            duration_ms,
+          };
+          const costNote = result.provider_cost != null ? `, billed $${result.provider_cost}` : '';
+          logger.info(`[ai] ${provider}/${model} — ${result.tokens_in} in, ${result.tokens_out} out${costNote}, ${duration_ms}ms`);
+          return result;
+
         } else {
-          throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity, gemini`);
+          throw new Error(`Unknown AI provider: "${provider}". Supported: anthropic, openai, perplexity, gemini, openrouter`);
         }
       }
 
@@ -415,6 +490,7 @@ function buildTools(runId, submoduleId) {
             tokens_total: res.tokens_total || 0, // #49: gemini's billed-output incl. thinking; 0 elsewhere
             cache_write_tokens: res.cache_write_tokens || 0,
             cache_read_tokens: res.cache_read_tokens || 0,
+            provider_cost: res.provider_cost ?? null, // #54: OpenRouter's real billed USD; null elsewhere
             stop_reason: res.stop_reason ?? null,
             // #49: a 200-OK with empty text is a safety refusal (gemini) or a
             // content filter — flag it so applyAiCallMeta fails closed instead of
