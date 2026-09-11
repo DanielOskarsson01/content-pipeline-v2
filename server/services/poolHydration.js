@@ -21,6 +21,98 @@
 // convention — see cardInstructions.js et al). This keeps the module import-safe
 // for hermetic tests, which never touch db.js or its env guard.
 
+// ── GSC hydration (PIECE 3, specs template-v3/keyword-data/KEYWORD_DATA.md §6) ──
+// Fill keyword_data.gsc_terms — the site's own Search Console queries — for any item
+// carrying the keyword-data module's keyword_data field. The module leaves gsc_terms:[]
+// (Rule 2: modules can't touch the DB); we fill it here during §7b hydration, before
+// the consuming module (seo-planner) executes. Data-shape routing (same as Step 8):
+// keyed on the field being present, never on source_submodule. Inert until a consumer
+// declares keyword_data in requires_columns (§7) — the loop then finds no field, no-ops.
+// The aggregation runs server-side in gsc_terms_slice() (sql/gsc_terms_slice_function.sql):
+// category slices match 115K–198K raw rows, so a client-side pull is not viable — the RPC
+// returns ≤p_limit bounded rows, so there is no client-side read to range-paginate; the
+// hydration-fix lesson is honored by the throw-on-error + count log below.
+
+const GSC_RPC = 'gsc_terms_slice';
+
+// Mirror of storage.slugifyEntity — copied (4 lines), not imported, to keep this module
+// import-safe (no side-effecting imports) for hermetic tests. Returns '' for empty.
+function gscSlugify(name) {
+  return String(name ?? '')
+    .normalize('NFKD').replace(/\p{M}/gu, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+// Candidate category slugs from keyword_data.terms, in the module's derived order
+// (brand first, then primary categories, then tags — keyword-data deriveTerms). First
+// slug that returns GSC rows wins => the entity's primary category that has data.
+function gscCategoryCandidates(kd, max) {
+  const out = [];
+  const seen = new Set();
+  for (const t of (kd.terms || [])) {
+    const slug = gscSlugify(t && t.term);
+    if (slug && !seen.has(slug)) { seen.add(slug); out.push(slug); }
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+async function gscSlice(db, scope, slug, days, limit) {
+  if (!slug) return [];
+  const { data, error } = await db.rpc(GSC_RPC, { p_scope: scope, p_slug: slug, p_days: days, p_limit: limit });
+  // Throw on error so a broken read fails loudly — never a silent empty fill.
+  if (error) {
+    throw new Error(`[poolHydration] GSC ${scope} slice failed (slug "${slug}"): ${error.message}`);
+  }
+  // impressions/clicks come back as bigint (string over REST); position as numeric.
+  return (data || []).map((r) => ({
+    term: r.term,
+    impressions: Number(r.impressions) || 0,
+    clicks: Number(r.clicks) || 0,
+    position: r.position == null ? null : Number(r.position),
+  }));
+}
+
+// Fill one item's keyword_data.gsc_terms in place. Entity slice first; if empty, the
+// category fallback (first candidate slug with rows). "No data" is legitimate — warn and
+// leave []; only a query error throws.
+async function fillGscTerms(item, entityName, db) {
+  let kd = item.keyword_data;
+  if (typeof kd === 'string') { try { kd = JSON.parse(kd); } catch { return; } }
+  if (!kd || typeof kd !== 'object' || Array.isArray(kd)) return;
+  if (Array.isArray(kd.gsc_terms) && kd.gsc_terms.length > 0) return; // already filled
+
+  const limit = Number(process.env.GSC_TERMS_LIMIT) || 25;
+  const days = Number(process.env.GSC_LOOKBACK_DAYS) || 0; // 0 = all-time (resolved: GSC presence is durable authority, not a trend; §6 acceptance counts are all-time)
+  const maxCats = Number(process.env.GSC_CATEGORY_MAX_ATTEMPTS) || 8;
+
+  let scope = 'entity';
+  let rows = await gscSlice(db, 'entity', gscSlugify(entityName), days, limit);
+  if (rows.length === 0) {
+    scope = 'category';
+    for (const slug of gscCategoryCandidates(kd, maxCats)) {
+      const r = await gscSlice(db, 'category', slug, days, limit);
+      if (r.length > 0) { rows = r; break; }
+    }
+  }
+
+  kd.gsc_terms = rows.map((r) => ({ ...r, scope }));
+  item.keyword_data = kd;
+
+  if (kd.gsc_terms.length > 0) {
+    console.log(`[worker:entity] gsc_terms "${entityName}": ${kd.gsc_terms.length} terms (scope ${scope})`);
+  } else {
+    console.warn(`[worker:entity] gsc_terms "${entityName}": 0 terms (no entity or category GSC rows)`);
+  }
+}
+
+async function fillGscTermsForItems(items, entityName, db) {
+  if (!db) return;
+  for (const item of (items || [])) {
+    if (item && item.keyword_data) await fillGscTerms(item, entityName, db);
+  }
+}
+
 /**
  * §7b — Enrich: merge downloadable fields from upstream for this entity's items.
  * Pure move of stageWorker.js:504-672. Mutates `items` in place.
@@ -232,6 +324,13 @@ export async function hydrateRequiresColumns({ runId, entityName, stepIndex, ite
       }
     }
   }
+
+  // §7b GSC enricher (PIECE 3): fill keyword_data.gsc_terms for any item carrying the
+  // field, independent of the requires_columns cascade above. Data-shape routed; no-op
+  // when no item has keyword_data or when db is absent (hermetic tests). See §6.
+  // Assumes keyword_data is present as a full object at §7b (it is: a downloadable field,
+  // never blob-extracted — stageWorker.js — so it isn't deferred to §7c hydrateItems).
+  await fillGscTermsForItems(items, entityName, db);
 
   return enrichedFields;
 }
