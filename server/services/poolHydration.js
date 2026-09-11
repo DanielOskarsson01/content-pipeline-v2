@@ -76,37 +76,77 @@ export async function hydrateRequiresColumns({ runId, entityName, stepIndex, ite
       const upstreamRunIds = upstreamRunList.map(r => r.id);
       // Map submodule_run_id → step_index so we can sort item_data rows
       const stepIndexMap = Object.fromEntries(upstreamRunList.map(r => [r.id, r.step_index]));
+      // Order rows by source step_index ascending: later STEPS (e.g. boilerplate-
+      // stripper step 4) overwrite earlier steps (e.g. page-scraper step 3) in the
+      // lookup map. Shared by the primary + cross-key sorts.
+      const bySourceRun = (a, b) =>
+        (stepIndexMap[a.submodule_run_id] || 0) - (stepIndexMap[b.submodule_run_id] || 0);
 
       if (upstreamRunIds.length > 0) {
         const itemKeyField = manifest.item_key || 'url';
-        const itemKeys = [...new Set(
+
+        // Fetch item_data for `fields` across THIS ENTITY's upstream runs, WITHOUT an
+        // item_key IN-filter. The runs are already per-entity (upstreamRunIds come
+        // from entity_submodule_runs filtered by entity_name), so scoping by run id
+        // returns exactly this entity's rows — the item_key list was redundant and
+        // the source of a silent-truncation bug: an .in('item_key', [...]) of ~200+
+        // page URLs (up to ~758 chars each) overran the PostgREST request-URI limit,
+        // reproduced as "fetch failed" at ~200 keys and "400 Bad Request" at 402,
+        // and the old code destructured only `data` so the failed batch silently
+        // contributed zero rows (~200 of 402 ELK pages never reached the analyzer).
+        // We range-paginate by the table PK (submodule_run_id, item_key, field_name)
+        // which also defeats PostgREST's 1000-row response cap for >1000-page
+        // entities (Play'n GO scraped 1500+), and THROW on any query error so a
+        // future truncation fails loudly instead of degrading quality invisibly.
+        // Memory is bounded to the pool via `wantedKeys` (only rows we will merge).
+        // ponytail: entity_name-keyed modules (content-analyzer et al.) fetch the
+        // corpus once per pass (primary discards it, the url fallback re-fetches it)
+        // — a ~2× transfer on the hot path. Upgrade path if it bites: one run-scoped
+        // fetch of all missingColumns into a single lookup, then merge by each key
+        // shape client-side. Deferred: transfer is bounded by the entity's scraped
+        // rows either way, and the single-fetch merge changes cascade semantics.
+        const PAGE = 1000;
+        const fetchFieldRows = async (fields, wantedKeys, label) => {
+          const out = [];
+          for (let from = 0; ; from += PAGE) {
+            const { data, error } = await db
+              .from('submodule_run_item_data')
+              .select('submodule_run_id, item_key, field_name, content')
+              .in('submodule_run_id', upstreamRunIds)
+              .in('field_name', fields)
+              .order('submodule_run_id', { ascending: true })
+              .order('item_key', { ascending: true })
+              .order('field_name', { ascending: true })
+              .range(from, from + PAGE - 1);
+            if (error) {
+              throw new Error(`[poolHydration] item_data fetch failed (${label}, run ${runId}, entity "${entityName}", fields ${fields.join(',')}): ${error.message}`);
+            }
+            if (!data || data.length === 0) break;
+            for (const row of data) {
+              if (!wantedKeys || wantedKeys.has(row.item_key)) out.push(row);
+            }
+            if (data.length < PAGE) break;
+          }
+          return out;
+        };
+
+        // Build item_key → { field: value } from fetched rows, applying the source-run
+        // ordering (by source step_index) so later steps overwrite earlier steps.
+        const buildLookup = (rows) => {
+          rows.sort(bySourceRun);
+          const map = new Map();
+          for (const row of rows) {
+            if (!map.has(row.item_key)) map.set(row.item_key, {});
+            map.get(row.item_key)[row.field_name] = parseContent(row.content);
+          }
+          return map;
+        };
+
+        // --- Pass 1: primary key ---
+        const primaryKeys = new Set(
           entityItems.map(item => String(item[itemKeyField] ?? '')).filter(Boolean)
-        )];
-
-        const ENRICH_BATCH = 200;
-        const lookup = new Map();
-        const allItemDataRows = [];
-        for (let i = 0; i < itemKeys.length; i += ENRICH_BATCH) {
-          const keyBatch = itemKeys.slice(i, i + ENRICH_BATCH);
-          const { data: itemData } = await db
-            .from('submodule_run_item_data')
-            .select('submodule_run_id, item_key, field_name, content')
-            .in('submodule_run_id', upstreamRunIds)
-            .in('field_name', missingColumns)
-            .in('item_key', keyBatch);
-
-          if (itemData) allItemDataRows.push(...itemData);
-        }
-        // Sort by step_index ascending so later steps (e.g. boilerplate-stripper step 4)
-        // overwrite earlier steps (e.g. page-scraper step 3) in the lookup map
-        allItemDataRows.sort((a, b) =>
-          (stepIndexMap[a.submodule_run_id] || 0) - (stepIndexMap[b.submodule_run_id] || 0)
         );
-        for (const row of allItemDataRows) {
-          if (!lookup.has(row.item_key)) lookup.set(row.item_key, {});
-          lookup.get(row.item_key)[row.field_name] = parseContent(row.content);
-        }
-
+        const lookup = buildLookup(await fetchFieldRows(missingColumns, primaryKeys, 'primary'));
         let mergedCount = 0;
         for (const item of entityItems) {
           const key = String(item[itemKeyField] ?? '');
@@ -128,36 +168,16 @@ export async function hydrateRequiresColumns({ runId, entityName, stepIndex, ite
         );
 
         if (stillMissing.length > 0) {
-          // Try url-based lookup (for entity_name-keyed modules needing url-keyed data)
+          // --- Pass 2: url cross-key (for entity_name-keyed modules needing url-keyed data) ---
           if (itemKeyField !== 'url') {
-            const urlKeys = [...new Set(
+            const urlKeys = new Set(
               entityItems.map(item => String(item.url ?? '')).filter(Boolean)
-            )];
-            if (urlKeys.length > 0) {
-              const lookup2 = new Map();
-              const crossRows = [];
-              for (let i = 0; i < urlKeys.length; i += ENRICH_BATCH) {
-                const keyBatch = urlKeys.slice(i, i + ENRICH_BATCH);
-                const { data: itemData } = await db
-                  .from('submodule_run_item_data')
-                  .select('submodule_run_id, item_key, field_name, content')
-                  .in('submodule_run_id', upstreamRunIds)
-                  .in('field_name', stillMissing)
-                  .in('item_key', keyBatch);
-                if (itemData) crossRows.push(...itemData);
-              }
-              // Sort by step_index ascending so later steps overwrite earlier
-              crossRows.sort((a, b) =>
-                (stepIndexMap[a.submodule_run_id] || 0) - (stepIndexMap[b.submodule_run_id] || 0)
-              );
-              for (const row of crossRows) {
-                if (!lookup2.has(row.item_key)) lookup2.set(row.item_key, {});
-                lookup2.get(row.item_key)[row.field_name] = parseContent(row.content);
-              }
+            );
+            if (urlKeys.size > 0) {
+              const lookup2 = buildLookup(await fetchFieldRows(stillMissing, urlKeys, 'url-fallback'));
               let crossCount = 0;
               for (const item of entityItems) {
-                const urlVal = String(item.url ?? '');
-                const extra = lookup2.get(urlVal);
+                const extra = lookup2.get(String(item.url ?? ''));
                 if (extra) {
                   for (const k of Object.keys(extra)) enrichedFields.add(k);
                   Object.assign(item, extra);
@@ -170,40 +190,44 @@ export async function hydrateRequiresColumns({ runId, entityName, stepIndex, ite
             }
           }
 
-          // Try entity_name-based lookup (for url-keyed modules needing entity_name-keyed data)
+          // --- Pass 3: entity_name cross-key (for url-keyed modules needing entity_name-keyed data) ---
           if (itemKeyField !== 'entity_name') {
             const stillMissing2 = stillMissing.filter(col =>
               entityItems.some(item => item[col] === undefined || item[col] === null)
             );
             if (stillMissing2.length > 0) {
-              const entityKeys = [...new Set(
+              const entityKeys = new Set(
                 entityItems.map(item => String(item.entity_name ?? '')).filter(Boolean)
-              )];
-              if (entityKeys.length > 0) {
-                const { data: itemData } = await db
-                  .from('submodule_run_item_data')
-                  .select('item_key, field_name, content')
-                  .in('submodule_run_id', upstreamRunIds)
-                  .in('field_name', stillMissing2)
-                  .in('item_key', entityKeys);
-                const entLookup = {};
-                for (const row of (itemData || [])) {
-                  entLookup[row.field_name] = parseContent(row.content);
-                }
-                if (Object.keys(entLookup).length > 0) {
-                  let entCount = 0;
-                  for (const item of entityItems) {
-                    if (item.entity_name && entityKeys.includes(item.entity_name)) {
-                      Object.assign(item, entLookup);
-                      entCount++;
-                    }
+              );
+              if (entityKeys.size > 0) {
+                const lookup3 = buildLookup(await fetchFieldRows(stillMissing2, entityKeys, 'entity_name-fallback'));
+                let entCount = 0;
+                for (const item of entityItems) {
+                  const extra = lookup3.get(String(item.entity_name ?? ''));
+                  if (extra) {
+                    for (const k of Object.keys(extra)) enrichedFields.add(k);
+                    Object.assign(item, extra);
+                    entCount++;
                   }
-                  for (const k of Object.keys(entLookup)) enrichedFields.add(k);
+                }
+                if (entCount > 0) {
                   console.log(`[worker:entity] Cross-key enriched ${entCount}/${entityItems.length} items for "${entityName}" (entity_name fallback, fields: ${stillMissing2.join(', ')})`);
                 }
               }
             }
           }
+        }
+
+        // Loud coverage report so a future silent truncation is visible in logs:
+        // how many pool items ended up with each originally-missing field. (Partial
+        // coverage can be legitimate — some pages genuinely have no text_content —
+        // so this logs rather than throws; the hard guarantee against silent
+        // truncation is the throw-on-query-error in fetchFieldRows above.)
+        for (const col of missingColumns) {
+          const have = entityItems.filter(
+            it => it[col] !== undefined && it[col] !== null && String(it[col]).length > 0
+          ).length;
+          console.log(`[worker:entity] hydration coverage "${entityName}" ${col}: ${have}/${entityItems.length} items`);
         }
       }
     }

@@ -23,15 +23,22 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // ---------------------------------------------------------------------------
 // Mini-Supabase mock — filters fixtures by the exact .eq/.in calls the code makes.
 // ---------------------------------------------------------------------------
-function buildMockDb({ runs = [], itemData = [] }) {
+function buildMockDb({ runs = [], itemData = [], errorOn = null }) {
   function makeQuery(table) {
     const eqf = {}, inf = {};
+    const orderCols = [];
+    let rangeVal = null;
     const q = {
       select() { return q; },
       eq(col, val) { eqf[col] = val; return q; },
       in(col, vals) { inf[col] = vals; return q; },
+      order(col) { orderCols.push(col); return q; },
+      range(a, b) { rangeVal = [a, b]; return q; },
       then(resolve, reject) {
         try {
+          // Simulate a PostgREST-layer failure (the real bug: oversized item_key
+          // IN-list → "fetch failed"/"400"). The code must THROW, not swallow.
+          if (errorOn === table) { resolve({ data: null, error: { message: 'simulated query error' } }); return; }
           let rows = [];
           if (table === 'entity_submodule_runs') {
             rows = runs
@@ -39,7 +46,7 @@ function buildMockDb({ runs = [], itemData = [] }) {
                 (eqf.run_id === undefined || r.run_id === eqf.run_id) &&
                 (eqf.entity_name === undefined || r.entity_name === eqf.entity_name) &&
                 (inf.status === undefined || inf.status.includes(r.status)))
-              .map(r => ({ id: r.id, step_index: r.step_index }));
+              .map(r => ({ id: r.id, step_index: r.step_index, completed_at: r.completed_at }));
           } else if (table === 'submodule_run_item_data') {
             rows = itemData
               .filter(d =>
@@ -47,6 +54,19 @@ function buildMockDb({ runs = [], itemData = [] }) {
                 (inf.field_name === undefined || inf.field_name.includes(d.field_name)) &&
                 (inf.item_key === undefined || inf.item_key.includes(d.item_key)))
               .map(d => ({ submodule_run_id: d.submodule_run_id, item_key: d.item_key, field_name: d.field_name, content: d.content }));
+            // Model PostgREST: deterministic order by the requested columns, then
+            // apply the range window. This lets the range-pagination path be tested
+            // for real (Test 9), not stubbed.
+            if (orderCols.length) {
+              rows.sort((a, b) => {
+                for (const c of orderCols) {
+                  if (a[c] < b[c]) return -1;
+                  if (a[c] > b[c]) return 1;
+                }
+                return 0;
+              });
+            }
+            if (rangeVal) rows = rows.slice(rangeVal[0], rangeVal[1] + 1);
           }
           resolve({ data: rows });
         } catch (e) { reject(e); }
@@ -160,6 +180,65 @@ console.log('\n── Test 6: excludeRunId removes a run from the upstream set �
   const enriched = await hydrateRequiresColumns({ runId: 'run1', entityName: 'E', items, manifest, db, excludeRunId: 'rX' });
   assert(items[0].text_content === undefined, 'excluded run contributes nothing');
   assert(enriched.size === 0, 'nothing enriched when the only upstream run is excluded');
+}
+
+// ===========================================================================
+console.log('\n── Test 7: >200 url keys all hydrate (regression: request-URI truncation) ──');
+{
+  // The exact ELK shape: item_key=entity_name, text_content stored per url. Pre-fix,
+  // batching these urls into a single .in('item_key', [...]) overran the request URI
+  // at ~200 keys and silently dropped ~half. All keys must now hydrate.
+  const manifest = { item_key: 'entity_name', requires_columns: ['text_content'] };
+  const N = 250;
+  const items = Array.from({ length: N }, (_, i) => ({
+    entity_name: 'E', url: `http://example.com/a-realistically-long-page-path-segment-${i}`,
+  }));
+  const itemData = items.map((it, i) => ({
+    submodule_run_id: 'r3', item_key: it.url, field_name: 'text_content', content: `TXT-${i}`,
+  }));
+  const db = buildMockDb({
+    runs: [{ id: 'r3', run_id: 'run1', entity_name: 'E', step_index: 3, status: 'approved' }],
+    itemData,
+  });
+  await hydrateRequiresColumns({ runId: 'run1', entityName: 'E', items, manifest, db });
+  const hydrated = items.filter(it => typeof it.text_content === 'string').length;
+  assert(hydrated === N, `all ${N} url-keyed items hydrated (got ${hydrated})`);
+}
+
+// ===========================================================================
+console.log('\n── Test 8: a query error THROWS instead of silently truncating ──');
+{
+  const manifest = { item_key: 'url', requires_columns: ['text_content'] };
+  const items = [{ url: 'http://a' }];
+  const db = buildMockDb({
+    runs: [{ id: 'r3', run_id: 'run1', entity_name: 'E', step_index: 3, status: 'approved' }],
+    itemData: [{ submodule_run_id: 'r3', item_key: 'http://a', field_name: 'text_content', content: 'AAA' }],
+    errorOn: 'submodule_run_item_data',
+  });
+  let threw = false;
+  try { await hydrateRequiresColumns({ runId: 'run1', entityName: 'E', items, manifest, db }); }
+  catch { threw = true; }
+  assert(threw, 'throws on item_data query error (was silently swallowed → the truncation bug)');
+}
+
+// ===========================================================================
+console.log('\n── Test 9: range pagination assembles >1000 rows (Play\'n GO >1000-page case) ──');
+{
+  // PostgREST caps a single response at 1000 rows. A >1000-page entity must be
+  // assembled across range windows, not truncated at page one.
+  const manifest = { item_key: 'entity_name', requires_columns: ['text_content'] };
+  const N = 1500;
+  const items = Array.from({ length: N }, (_, i) => ({ entity_name: 'E', url: `http://x/${i}` }));
+  const itemData = items.map((it, i) => ({
+    submodule_run_id: 'r3', item_key: it.url, field_name: 'text_content', content: `T${i}`,
+  }));
+  const db = buildMockDb({
+    runs: [{ id: 'r3', run_id: 'run1', entity_name: 'E', step_index: 3, status: 'approved' }],
+    itemData,
+  });
+  await hydrateRequiresColumns({ runId: 'run1', entityName: 'E', items, manifest, db });
+  const hydrated = items.filter(it => typeof it.text_content === 'string').length;
+  assert(hydrated === N, `all ${N} items hydrated across range pages (got ${hydrated})`);
 }
 
 // ===========================================================================
