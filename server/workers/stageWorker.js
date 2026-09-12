@@ -18,6 +18,7 @@ import { createSupabaseStorage } from '../services/storage.js';
 import { redis } from '../services/queue.js';
 import { loadModules, getSubmoduleById } from '../services/moduleLoader.js';
 import { anthropicAcceptsTemperature, anthropicAcceptsThinking, anthropicAcceptsEffort } from '../lib/aiModelParams.js';
+import { extractTagSuggestions, writeTaxonomySuggestions } from '../services/taxonomySuggestions.js';
 import { COST_CONFIG } from '../config/timeouts.js';
 import { resolveModel, PROVIDERS } from '../config/llmRegistry.js';
 import { resolveApiKey } from '../services/apiKeys.js';
@@ -788,6 +789,14 @@ async function handleEntityJob(job) {
     clearInterval(abortInterval);
   }
 
+  // 8b. Capture out-of-vocabulary tag PROPOSALS (analysis_json.tags.suggested_new[])
+  //     NOW — step 9 below strips analysis_json off result.items (content-analyzer
+  //     declares it a downloadable_field), so read it before the strip. The write to
+  //     the taxonomy_suggestions review queue happens just before the completed-status
+  //     update (§12), gated on entityStatus==='completed'. Data-shape routing: [] for
+  //     any output that doesn't carry the path (inert for non-analyzer submodules).
+  const tagSuggestions = extractTagSuggestions(result);
+
   // 9. Store downloadable fields (same logic, but for single entity result)
   const downloadFieldDefs = manifest.output_schema?.downloadable_fields || [];
   if (downloadFieldDefs.length > 0 && result?.items) {
@@ -903,6 +912,17 @@ async function handleEntityJob(job) {
   if (entityStatus === 'failed') {
     console.warn(`[worker:entity] ${submodule_id}/${entity_name} returned an ERROR result (not thrown) — marking failed: ${entityError}`);
   }
+
+  // Route out-of-vocabulary tag proposals to the taxonomy_suggestions review queue
+  // BEFORE the completed-status write below. Order is deliberate: a DB failure throws
+  // → the job retries → the entity is still 'running' (the §12 completed write hasn't
+  // happened) → the idempotency skip guard doesn't fire → clean re-run. Writing after
+  // completion would let a retry skip and silently drop proposals.
+  if (entityStatus === 'completed' && tagSuggestions.length > 0) {
+    const written = await writeTaxonomySuggestions({ db, runId: entityRun.run_id, entityName: entity_name, suggestions: tagSuggestions });
+    console.log(`[worker:entity] ${submodule_id}/${entity_name}: routed ${written} taxonomy suggestion(s) to review queue`);
+  }
+
   const { error: writeErr } = await db
     .from('entity_submodule_runs')
     .update({
