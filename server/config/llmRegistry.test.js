@@ -75,6 +75,15 @@ test('gotcha #2: gemini + a sonnet key/id ERRORS instead of falling through', ()
   assert.throws(() => resolveModel('anthropic', 'gpt-4o'), /not valid for provider "anthropic"/);
 });
 
+test('gemini-3.8-flash is pinned as a stable non-alias GA id at $0.75/$3.75 (template-v3 analyzer)', () => {
+  assert.equal(resolveModel('gemini', 'gemini-3.8-flash'), 'gemini-3.8-flash');
+  const m = PROVIDERS.gemini.models['gemini-3.8-flash'];
+  assert.equal(m.id, 'gemini-3.8-flash', 'pins the stable GA id, not a -latest alias');
+  assert.notEqual(m.alias, true, 'must NOT be an alias (the -latest alias hot-swapped mid-sweep)');
+  assert.equal(m.input, 0.75);
+  assert.equal(m.output, 3.75);
+});
+
 test('prices: registry is the single source aiCost reads from', () => {
   assert.equal(MODEL_PRICES_PER_MTOK, PRICES_BY_ID, 'aiCost re-exports the registry price map');
   // a live model prices identically through both paths

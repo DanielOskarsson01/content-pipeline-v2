@@ -78,6 +78,12 @@ export const PROVIDERS = {
     models: {
       'gemini-flash': { id: 'gemini-flash-latest', displayName: 'Gemini Flash (latest)', input: 0.30, output: 2.50, cache_read: 0.30, cache_write: 0.30, alias: true },
       'gemini-pro':   { id: 'gemini-pro-latest',   displayName: 'Gemini Pro (latest)',   input: 1.25, output: 10,   cache_read: 1.25, cache_write: 10,   alias: true },
+      // Pinned STABLE GA id (NOT the gemini-flash-latest alias — that alias hot-swapped
+      // two generations mid-sweep, which is why this is pinned). Settled analyzer model
+      // (template-v3 sweep Unit 5b / DECISIONS_SWEEP §TASK 3): gemini-3.8-flash at
+      // $0.75/$3.75 per M, verified live on this project's key 2026-09-10. No native
+      // prompt caching → cache_* inert (= input). Price doubles to $1.50/$7.50 on 2027-01-01.
+      'gemini-3.8-flash': { id: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', input: 0.75, output: 3.75, cache_read: 0.75, cache_write: 0.75 },
     },
   },
   openrouter: {
