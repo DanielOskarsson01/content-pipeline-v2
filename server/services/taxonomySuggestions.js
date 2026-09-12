@@ -8,11 +8,12 @@
  * as Step 8): keyed on the field being present, never on source_submodule — so this is
  * inert for any submodule output that doesn't carry the path.
  *
- * Identity: the pipeline knows entities by NAME only. run_entities is dead and the seed's
- * company_id does NOT survive to the Step-5 hook (verified 2026-09-12 on run 94baa6f6: the
- * entity object at the hook is {name, entity_name}). So entity_name is the stored identity;
- * company_id (a nullable fossil of the retired CMS design) and cms_id (the future Strapi
- * publishing key) are both left null by this hook.
+ * Identity: the pipeline knows entities by NAME only, so entity_name is the stored identity.
+ * The seed's company_id/cms_id are now persisted per (run_id, entity_name) in run_entities
+ * (seedPersistence.js, 2026-09-12) and are hydratable via poolHydration §7b — but THIS hook
+ * is not yet wired to read them, so company_id (a nullable fossil of the retired CMS design)
+ * and cms_id (the future Strapi publishing key) are still left null here. Wiring this hook to
+ * hydrate them from the seed store is the follow-up that closes the loop.
  *
  * DI `db` (no top-level import) — keeps the module import-safe for hermetic tests.
  */

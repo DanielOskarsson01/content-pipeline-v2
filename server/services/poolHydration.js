@@ -17,6 +17,10 @@
  *                                  full "frozen input" a run actually saw.
  */
 
+// Import-safe: seedPersistence uses DI db too (no top-level db import), so this stays
+// hermetic-test-safe — same invariant as below.
+import { fillSeedFieldsForItems } from './seedPersistence.js';
+
 // No top-level db import: `db` is passed in (the repo's dependency-injection
 // convention — see cardInstructions.js et al). This keeps the module import-safe
 // for hermetic tests, which never touch db.js or its env guard.
@@ -321,6 +325,20 @@ export async function hydrateRequiresColumns({ runId, entityName, stepIndex, ite
           ).length;
           console.log(`[worker:entity] hydration coverage "${entityName}" ${col}: ${have}/${entityItems.length} items`);
         }
+      }
+
+      // --- Pass 4: seed fallback ---
+      // Fill any still-missing requires_columns from the persisted seed row (run_entities).
+      // Nothing rides between steps in memory, so a module that declares a seed field
+      // (company_id/cms_id/website) in requires_columns gets it hydrated here — the same
+      // split as the GSC fill below. Runs whether or not upstream runs existed; no-op when
+      // the field isn't in the seed or no seed row exists. See seedPersistence.js.
+      const seedMissing = missingColumns.filter((col) =>
+        entityItems.some((item) => item[col] === undefined || item[col] === null || item[col] === '')
+      );
+      if (seedMissing.length > 0) {
+        const seedFilled = await fillSeedFieldsForItems({ items: entityItems, entityName, runId, wantedFields: seedMissing, db });
+        for (const f of seedFilled) enrichedFields.add(f);
       }
     }
   }

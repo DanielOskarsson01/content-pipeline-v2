@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import db from '../services/db.js';
+import { persistSeedEntities } from '../services/seedPersistence.js';
 import { getSubmoduleById } from '../services/moduleLoader.js';
 import { validateExecutionPlan, mergeCardWorkFromSourcePlan } from '../services/executionPlanUtils.js';
 import { sortSubmoduleIds } from '../services/moduleOrder.js';
@@ -822,6 +823,12 @@ router.post('/:id/launch', upload.single('file'), async (req, res, next) => {
         created_at: new Date().toISOString(),
       }, { onConflict: 'run_id,step_index' });
     }
+
+    // 9a. Persist the full seed row per entity into the durable store (run_entities),
+    //     keyed (run_id, entity_name). This is what lets company_id/cms_id/website survive
+    //     to Step 5+: later modules hydrate it back via poolHydration §7b (seed fallback).
+    //     Idempotent; LOUD on error; no-op in seedless mode (entities = []).
+    await persistSeedEntities({ runId: run.id, entities, db });
 
     // 9b. Seed entity_stage_pool at step 1 for each entity. The auto-executor
     //     reads entity_stage_pool (not step_context) via getEntityCount() —
