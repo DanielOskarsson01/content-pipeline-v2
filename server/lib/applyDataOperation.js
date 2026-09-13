@@ -50,6 +50,49 @@ export function isFailedRun(outputData) {
   return outputData?.meta?.status === 'error';
 }
 
+/**
+ * The status the approve endpoint must stamp on an entity_submodule_run.
+ *
+ * A module-level execution failure (meta.status='error' — see isFailedRun) must
+ * be recorded as 'failed', NOT 'approved'. The approve loop previously stamped
+ * 'approved' UNCONDITIONALLY, even inside the preserve-on-failure branch that had
+ * just detected the failure — so a submodule where every entity failed (e.g. every
+ * LinkedIn api-fetcher call 401'd → meta.status='error') reported a clean, fully-
+ * approved run. Keeping the status honest lets evaluateStepResult, the polling
+ * endpoint's failed_count, and pipeline_stages surface the failure. Centralized so
+ * the branch decision and the persisted status can never disagree.
+ */
+export function deriveApprovalStatus(outputData) {
+  return isFailedRun(outputData) ? 'failed' : 'approved';
+}
+
+/**
+ * Roll a step's entity_submodule_runs up to per-entity status and tally.
+ *
+ * An entity is 'failed' if ANY of its submodule runs at the step failed;
+ * 'skipped_no_input' only if it was skipped and never failed. Mirrors
+ * autoExecutor.evaluateStepResult's grouping so the pipeline_stages counts the
+ * approve endpoint writes AGREE with the halt decision and are not masked by a
+ * later same-step submodule's entity_stage_pool overwrite (batchWorker derives
+ * its counts from the last-writer pool status — BACKLOG #26). `completed` counts
+ * approved+completed (batchWorker parity); `failed`/`skipped`/`approved` are the
+ * distinct-entity tallies. Pure: [{ entity_name, status }] in, counts out.
+ */
+export function tallyStepStatuses(runs) {
+  const byEntity = new Map();
+  for (const r of runs || []) {
+    const cur = byEntity.get(r.entity_name);
+    if (r.status === 'failed') byEntity.set(r.entity_name, 'failed');
+    else if (r.status === 'skipped_no_input' && cur !== 'failed') byEntity.set(r.entity_name, 'skipped_no_input');
+    else if (cur !== 'failed' && cur !== 'skipped_no_input') byEntity.set(r.entity_name, r.status);
+  }
+  const vals = [...byEntity.values()];
+  const failed = vals.filter(s => s === 'failed').length;
+  const skipped = vals.filter(s => s === 'skipped_no_input').length;
+  const approved = vals.filter(s => s === 'approved').length;
+  return { total: vals.length, failed, skipped, approved, completed: vals.length - failed - skipped };
+}
+
 export function applyDataOperation(entityPool, approvedItems, dataOperation, itemKey, approvedKeySet) {
   const ops = { added: 0, kept: 0, removed: 0, replaced: 0 };
 

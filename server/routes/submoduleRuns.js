@@ -13,7 +13,7 @@ import { randomUUID } from 'crypto';
 import db from '../services/db.js';
 import { getSubmoduleById, getSubmodules } from '../services/moduleLoader.js';
 import { enqueueEntityBatch, redis } from '../services/queue.js';
-import { applyDataOperation, isFailedRun } from '../lib/applyDataOperation.js';
+import { applyDataOperation, isFailedRun, deriveApprovalStatus, tallyStepStatuses } from '../lib/applyDataOperation.js';
 import { resolveBatchLoopIteration } from '../utils/loopIteration.js';
 
 // --- Execute router (mounted at /api/runs/:runId/steps/:stepIndex/submodules/:submoduleId) ---
@@ -1161,11 +1161,17 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
       }
 
       let totalApproved = 0;
+      let failedEntityCount = 0;
 
       // Process each entity's approval
       for (const [entityName, approvedKeys] of Object.entries(entity_approvals)) {
         const entityRun = entityRuns.find(r => r.entity_name === entityName);
         if (!entityRun) continue;
+
+        // LOUD-FAIL: a module-level failure (meta.status='error') must be recorded
+        // as 'failed', not silently 'approved'. Decide once; the preserve-on-failure
+        // branch and the persisted status both key off this so they can't disagree.
+        const finalStatus = deriveApprovalStatus(entityRun.output_data);
 
         const outputItems = entityRun.output_data?.items || [];
 
@@ -1258,7 +1264,7 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
 
           console.log(`[approve:entity_production] ${entityName}: produced ${producedEntities.length} entities at step ${targetStep}`);
 
-        } else if (isFailedRun(entityRun.output_data)) {
+        } else if (finalStatus === 'failed') {
           // ── PRESERVE-ON-FAILURE ──
           // Replace-on-success, preserve-on-failure. A module-level execution
           // failure (e.g. a round-2 content-writer Anthropic 400) emits a
@@ -1290,10 +1296,14 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
           poolMap.set(entityName, entityPool);
         }
 
-        // Update entity_submodule_runs status
+        // Update entity_submodule_runs status — HONEST: a failed run (meta.status=
+        // 'error') is stamped 'failed', not silently 'approved' (loud-fail). This is
+        // the exact class that let 12 entities read 'approved' while every LinkedIn
+        // api-fetcher call 401'd.
+        if (finalStatus === 'failed') failedEntityCount++;
         await db
           .from('entity_submodule_runs')
-          .update({ status: 'approved', approved_items: resolvedKeys })
+          .update({ status: finalStatus, approved_items: resolvedKeys })
           .eq('id', entityRun.id);
       }
 
@@ -1336,6 +1346,35 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         }
       }
 
+      // Surface the honest failed_count into pipeline_stages so a submodule whose
+      // entities failed (e.g. every LinkedIn api-fetcher call 401'd) is VISIBLE, not
+      // masked as a clean run. Derived from entity_submodule_runs (authoritative
+      // post-finalStatus) so it agrees with evaluateStepResult and is robust to the
+      // same-step pool last-writer overwrite batchWorker's pool-derived counts suffer
+      // (BACKLOG #26). Best-effort: logged, never blocks approval. (Note: step-approve
+      // later re-derives approved_count from pool status via approve_step_v2, so a
+      // preserve-on-failure entity may appear in BOTH approved_count and failed_count —
+      // cosmetic/display-only; no control-flow reads these counts.)
+      {
+        const psStepIndex = subRun.input_data?.step_index ?? 0;
+        const { data: stepRuns, error: stepErr } = await db
+          .from('entity_submodule_runs')
+          .select('entity_name, status')
+          .eq('run_id', subRun.run_id)
+          .eq('step_index', psStepIndex);
+        if (stepErr) {
+          console.error(`[approve] pipeline_stages failed_count update skipped (read error): ${stepErr.message}`);
+        } else {
+          const t = tallyStepStatuses(stepRuns);
+          const { error: psErr } = await db
+            .from('pipeline_stages')
+            .update({ failed_count: t.failed, approved_count: t.approved, completed_count: t.completed })
+            .eq('run_id', subRun.run_id)
+            .eq('step_index', psStepIndex);
+          if (psErr) console.error(`[approve] pipeline_stages failed_count update failed: ${psErr.message}`);
+        }
+      }
+
       // Update batch record
       await db
         .from('submodule_runs')
@@ -1364,6 +1403,7 @@ submoduleRunRouter.post('/:id/approve', async (req, res) => {
         mode: 'per_entity',
         entity_count: Object.keys(entity_approvals).length,
         total_approved: totalApproved,
+        failed_count: failedEntityCount,
       });
     }
   } catch (err) {

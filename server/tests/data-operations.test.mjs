@@ -5,7 +5,7 @@
  *
  * Run: node server/tests/data-operations.test.mjs
  */
-import { applyDataOperation, isFailedRun } from '../lib/applyDataOperation.js';
+import { applyDataOperation, isFailedRun, deriveApprovalStatus, tallyStepStatuses } from '../lib/applyDataOperation.js';
 import { validateManifest } from '../services/moduleLoader.js';
 
 let passed = 0, failed = 0;
@@ -306,6 +306,66 @@ function assert(condition, label) {
   assert(isFailedRun(goodOut) === false, 'successful retry → not a failed run (supersede proceeds)');
   const { pool } = applyDataOperation([...prior], goodApproved, 'add', 'entity_name', new Set(['Slotmill']));
   assert(pool.length === 1 && pool[0].content_markdown === '# sonnet', 'successful retry supersedes prior content');
+})();
+
+// --- LOUD-FAIL: deriveApprovalStatus (approve must not stamp a failed run 'approved') ---
+
+(function deriveApprovalStatus_failedRun_isFailed() {
+  assert(deriveApprovalStatus({ meta: { status: 'error' }, items: [] }) === 'failed',
+    'meta.status=error → approval status "failed" (not silently "approved")');
+})();
+
+(function deriveApprovalStatus_successAndUnset_isApproved() {
+  assert(deriveApprovalStatus({ meta: { status: 'success' }, items: [{}] }) === 'approved',
+    'meta.status=success → "approved"');
+  assert(deriveApprovalStatus({ items: [] }) === 'approved',
+    'no meta.status (QA-fail verdicts / normal outputs) → "approved" (not treated as failure)');
+  assert(deriveApprovalStatus(undefined) === 'approved', 'undefined output → "approved"');
+})();
+
+// --- LOUD-FAIL: tallyStepStatuses (surface failed_count; entity fails if ANY submodule failed) ---
+
+(function tally_allFailed_visible() {
+  // The exact class that masked the LinkedIn 401s: every entity's run failed.
+  const t = tallyStepStatuses([
+    { entity_name: 'A', status: 'failed' },
+    { entity_name: 'B', status: 'failed' },
+  ]);
+  assert(t.failed === 2 && t.approved === 0 && t.completed === 0 && t.total === 2,
+    '100% failed → failed=2 (visible), not a clean run');
+})();
+
+(function tally_entityFailedIfAnySubmoduleFailed() {
+  const t = tallyStepStatuses([
+    { entity_name: 'A', status: 'failed' },     // api-fetcher (LinkedIn) failed
+    { entity_name: 'A', status: 'approved' },   // page-scraper succeeded
+    { entity_name: 'B', status: 'approved' },
+  ]);
+  assert(t.total === 2, 'two distinct entities');
+  assert(t.failed === 1, 'entity A failed because ANY of its submodules failed');
+  assert(t.approved === 1 && t.completed === 1, 'entity B approved');
+})();
+
+(function tally_skippedExcluded_notAFailure() {
+  const t = tallyStepStatuses([
+    { entity_name: 'A', status: 'skipped_no_input' },
+    { entity_name: 'B', status: 'approved' },
+    { entity_name: 'C', status: 'skipped_no_input' },
+    { entity_name: 'C', status: 'failed' },       // any-failed dominates skipped
+  ]);
+  assert(t.skipped === 1 && t.failed === 1 && t.approved === 1 && t.total === 3,
+    'skipped_no_input is not a failure; any-failed dominates skipped for the same entity');
+})();
+
+(function tally_completedCountsApprovedAndCompleted() {
+  const t = tallyStepStatuses([
+    { entity_name: 'A', status: 'approved' },
+    { entity_name: 'B', status: 'completed' },
+    { entity_name: 'C', status: 'failed' },
+    { entity_name: 'D', status: 'skipped_no_input' },
+  ]);
+  assert(t.completed === 2, 'completed = total − failed − skipped (approved + completed)');
+  assert(t.failed === 1 && t.approved === 1 && t.skipped === 1 && t.total === 4, 'mixed tally consistent');
 })();
 
 console.log(`\n  ${passed} passed, ${failed} failed`);
