@@ -28,6 +28,10 @@ const PORT = process.env.PORT || 3001;
 const LOCK_TTL = 300;       // 5 min Redis lock TTL
 const LOCK_RENEW_INTERVAL = 60_000; // Renew every 60s
 const MAX_BATCH_TIMEOUT = 6 * 60 * 60; // 6 hours — safety net per submodule batch, should never fire
+// Phase 2B: an execution_mode:batch step runs an ASYNC Anthropic Message Batch that can
+// legitimately take up to 24h (the batch expires at 24h). Give the orchestrator's per-step
+// wait a 24h+ ceiling for those steps ONLY; every other step keeps the 6h net above.
+const MAX_BATCH_TIMEOUT_ASYNC = 25 * 60 * 60; // 25 hours
 
 // --- EventEmitter ---
 export const autoExecuteEvents = new EventEmitter();
@@ -550,14 +554,17 @@ async function dispatchAndAwaitGroup({ runId, stepIndex, submoduleId, cardId, cu
   }
 
   // Poll for completion — job-level timeouts (COST_CONFIG) handle per-entity limits.
-  // MAX_BATCH_TIMEOUT is a safety net only (6 hours).
-  const pollResult = await pollBatchCompletion(batchId, MAX_BATCH_TIMEOUT, signal);
+  // MAX_BATCH_TIMEOUT is a safety net only (6 hours) — except an execution_mode:batch step
+  // runs an async Message Batch that can take up to 24h, so extend the net for those only.
+  const stepTimeout = await isBatchModeStep(batchId) ? MAX_BATCH_TIMEOUT_ASYNC : MAX_BATCH_TIMEOUT;
+  const pollResult = await pollBatchCompletion(batchId, stepTimeout, signal);
 
   if (signal.aborted) return 'break';
 
   if (pollResult === 'timeout') {
-    // 6-hour safety net fired — something is catastrophically wrong
-    await haltRun(runId, state, `Submodule ${submoduleId} (card=${cardId || 'default'}, iter=${currentIteration}) at step ${stepIndex} exceeded maximum batch timeout (6 hours)`, cleanup);
+    // Safety net fired — something is catastrophically wrong
+    const hrs = Math.round(stepTimeout / 3600);
+    await haltRun(runId, state, `Submodule ${submoduleId} (card=${cardId || 'default'}, iter=${currentIteration}) at step ${stepIndex} exceeded maximum batch timeout (${hrs} hours)`, cleanup);
     return 'return';
   }
 
@@ -785,6 +792,22 @@ async function verifyEnqueueCount(batchId) {
     .select('id', { count: 'exact', head: true })
     .eq('batch_id', batchId);
   return count || 0;
+}
+
+// Phase 2B: is this batch an execution_mode:batch step? (reads one entity row's options).
+// Used only to pick the per-step wait ceiling; a false negative just applies the 6h net.
+async function isBatchModeStep(batchId) {
+  try {
+    const { data } = await db
+      .from('entity_submodule_runs')
+      .select('options')
+      .eq('batch_id', batchId)
+      .limit(1)
+      .maybeSingle();
+    return String(data?.options?.execution_mode) === 'batch';
+  } catch {
+    return false;
+  }
 }
 
 async function pollBatchCompletion(batchId, timeoutSec, signal) {

@@ -12,7 +12,7 @@ import { Router } from 'express';
 import { randomUUID } from 'crypto';
 import db from '../services/db.js';
 import { getSubmoduleById, getSubmodules } from '../services/moduleLoader.js';
-import { enqueueEntityBatch, redis } from '../services/queue.js';
+import { enqueueEntityBatch, enqueueLlmBatch, redis } from '../services/queue.js';
 import { applyDataOperation, isFailedRun, deriveApprovalStatus, tallyStepStatuses } from '../lib/applyDataOperation.js';
 import { resolveBatchLoopIteration } from '../utils/loopIteration.js';
 
@@ -746,8 +746,13 @@ executeRouter.post('/run', async (req, res) => {
     const executableInserted = insertedRuns.filter(r => r.status === 'pending');
 
     // 9. Enqueue via FlowProducer (MANDATORY: 1 Redis call, not N)
+    // Phase 2B: execution_mode:batch routes to ONE async Message-Batch job instead of N
+    // per-entity children (rows above are created identically either way). Opt-in per
+    // template/run; only the detector implements the batch entry points, and the batch
+    // worker fails loudly if a submodule set batch without them.
+    const isBatchMode = String(options?.execution_mode) === 'batch';
     try {
-      await enqueueEntityBatch({
+      const enqueueArgs = {
         batchId,
         submoduleRunId: batchRun.id,
         submoduleId,
@@ -757,7 +762,12 @@ executeRouter.post('/run', async (req, res) => {
           entitySubmoduleRunId: r.id,
           entityName: r.entity_name,
         })),
-      });
+      };
+      if (isBatchMode) {
+        await enqueueLlmBatch(enqueueArgs);
+      } else {
+        await enqueueEntityBatch(enqueueArgs);
+      }
     } catch (enqueueErr) {
       console.error(`[execute] FlowProducer enqueue failed for batch ${batchId}:`, enqueueErr);
       await db.from('submodule_runs').update({ status: 'failed', error: `Enqueue failed: ${enqueueErr.message}` }).eq('id', batchRun.id);

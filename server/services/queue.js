@@ -78,3 +78,60 @@ export async function enqueueEntityBatch({ batchId, submoduleRunId, submoduleId,
   console.log(`[queue] Enqueued entity batch ${batchId} for ${submoduleId}: ${entityRuns.length} entities (cost: ${cost})`);
   return { flowJobId: flow.job.id, entityCount: entityRuns.length };
 }
+
+/**
+ * Enqueue an execution_mode:batch submodule (Phase 2B). Same parent `batch-complete`
+ * finalizer, but instead of N per-entity children this creates ONE `entity-batch-llm`
+ * child that collects every entity's LLM calls into Anthropic Message Batches and writes
+ * all the entity rows itself. The parent then finalizes counts exactly as for a normal
+ * batch (any entity rows the child didn't write — e.g. if it threw — get zombie-swept to
+ * failed by batchWorker, which is the loud outcome). One child, so `attempts: 1`: the job
+ * submits a PAID batch, so a BullMQ retry would double-submit; idempotency (re-attach on
+ * submodule_runs.provider_batch_id) is the crash guard, not BullMQ retry.
+ *
+ * entity_submodule_runs rows are created identically by /run before this is called; the
+ * child reads them by batch_id.
+ *
+ * ponytail: this single child runs on the shared `pipeline-stages-v2` worker
+ * (concurrency 2) and holds its slot for the whole poll (typically <1h, ceiling 24h), so a
+ * stuck batch consumes half the sync worker pool. Acceptable for an opt-in, last-step
+ * pilot; a dedicated batch queue/worker is the upgrade if batch mode goes wide.
+ */
+export async function enqueueLlmBatch({ batchId, submoduleRunId, submoduleId, stepIndex, cost, entityRuns }) {
+  const config = COST_CONFIG[cost] || COST_CONFIG.medium;
+
+  const flow = await flowProducer.add({
+    name: 'batch-complete',
+    queueName: 'batch-finalization',
+    data: {
+      batch_id: batchId,
+      submodule_run_id: submoduleRunId,
+      submodule_id: submoduleId,
+      entity_count: entityRuns.length,
+    },
+    opts: {
+      removeOnComplete: 100,
+      removeOnFail: 50,
+    },
+    children: [{
+      name: 'entity-batch-llm',
+      queueName: 'pipeline-stages-v2',
+      data: {
+        batch_id: batchId,
+        submodule_run_id: submoduleRunId,
+        submodule_id: submoduleId,
+        step_index: stepIndex,
+      },
+      opts: {
+        attempts: 1,
+        priority: config.priority,
+        removeOnComplete: 100,
+        removeOnFail: 50,
+        removeDependencyOnFailure: true,
+      },
+    }],
+  });
+
+  console.log(`[queue] Enqueued LLM batch ${batchId} for ${submoduleId}: ${entityRuns.length} entities as ONE async Message-Batch job (cost: ${cost})`);
+  return { flowJobId: flow.job.id, entityCount: entityRuns.length };
+}

@@ -29,6 +29,15 @@ import { parseAnthropicSSE } from '../services/aiStream.js';
 import { buildCachedUserContent } from '../services/promptCache.js';
 import { deriveEntityRunStatus } from '../utils/entityRunStatus.js';
 import { applyAiCallMeta } from '../utils/aiCallMeta.js';
+import {
+  buildBatchRequestParams, batchLedgerEntry,
+  submitAnthropicBatch, getAnthropicBatch, pollAnthropicBatch, fetchAnthropicBatchResults,
+} from '../services/anthropicBatch.js';
+
+// Phase 2B: how long the step-6 batch job will wait for an Anthropic Message Batch to end
+// before failing loudly (the Anthropic batch itself expires at 24h). The orchestrator's
+// per-step wait (autoExecutor MAX_BATCH_TIMEOUT_ASYNC) must exceed this.
+const BATCH_POLL_MAX_MS = 24 * 60 * 60 * 1000 + 30 * 60 * 1000; // 24h + 30m margin
 
 // Load submodule manifests (worker is a separate process from server.js)
 loadModules();
@@ -964,12 +973,211 @@ async function handleEntityJob(job) {
   return result;
 }
 
-// Create the worker — per-entity only (legacy flat-pool removed)
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2B — step-6 detector batch executor (execution_mode:batch).
+//
+// One BullMQ job (`entity-batch-llm`) handles the WHOLE step across all entities: it
+// collects every entity's LLM calls into two Anthropic Message Batches (round 1
+// extractions, round 2 verifications — verification needs the extracted claims), polls
+// them to completion (up to ~24h), hands the responses back to the module's pure
+// prepare/parse entry points, and persists each entity's result exactly as the sync path
+// does. The parent `batch-complete` job (batchWorker) then finalizes counts — any entity
+// row this job did NOT write (e.g. it threw) is zombie-swept to `failed` there (loud).
+//
+// The synchronous handleEntityJob path is UNTOUCHED; batch mode is a separate job name.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A console-backed logger the pure module fns log through during a batch.
+function makeBatchLogger(prefix) {
+  const mk = (level) => (...args) => console.log(`[worker:batch:${level}] ${prefix} ${args.join(' ')}`);
+  return { info: mk('info'), warn: mk('warn'), error: mk('error') };
+}
+
+// Submit (or re-attach to) an Anthropic batch for one round, store the id on
+// submodule_runs.provider_batch_id, poll to completion, and return the results Map.
+// Re-attach (idempotency guard, #6) closes the poll-phase-restart double-submit: if
+// provider_batch_id is already set, poll+fetch that batch and — CRITICALLY — only reuse it
+// when its custom_ids actually match THIS round's (the two rounds overwrite the same column,
+// so a cross-round restart could otherwise point round 1 at round 2's batch). A custom_id
+// mismatch (wrong round, or a stale id) → discard and submit fresh. The suffix namespacing
+// (__x0 / __v{b}) plus this membership check means a re-attach can never feed one round's
+// results to another (which for extraction would silently downgrade to the regex fallback).
+async function submitOrReattachBatch(submoduleRunId, requests, apiKey, deadlineMs, logger, roundLabel) {
+  const wantIds = new Set(requests.map(r => r.custom_id));
+  const { data: srRow } = await db.from('submodule_runs').select('provider_batch_id').eq('id', submoduleRunId).maybeSingle();
+  const existing = srRow?.provider_batch_id;
+  if (existing) {
+    try {
+      const probe = await getAnthropicBatch(existing, apiKey);
+      const rc = probe?.request_counts || {};
+      const totalInBatch = (rc.processing || 0) + (rc.succeeded || 0) + (rc.errored || 0) + (rc.expired || 0) + (rc.canceled || 0);
+      if (totalInBatch === requests.length) {
+        const ended = await pollAnthropicBatch(existing, apiKey, { deadlineMs });
+        const map = await fetchAnthropicBatchResults(ended.results_url, apiKey);
+        if ([...map.keys()].some(k => wantIds.has(k))) {
+          logger.info(`re-attached to Anthropic batch ${existing} (${roundLabel})`);
+          return map;
+        }
+        logger.warn(`stored provider_batch_id ${existing} is NOT this round's batch (custom_id mismatch) — submitting fresh (${roundLabel})`);
+      }
+    } catch (err) { logger.warn(`re-attach probe failed (${err.message}) — submitting fresh (${roundLabel})`); }
+  }
+  const submitted = await submitAnthropicBatch(requests, apiKey);
+  const batchId = submitted.id;
+  const { error: upErr } = await db.from('submodule_runs').update({ provider_batch_id: batchId }).eq('id', submoduleRunId);
+  if (upErr) logger.warn(`could not persist provider_batch_id ${batchId}: ${upErr.message}`);
+  logger.info(`submitted Anthropic batch ${batchId} (${roundLabel}, ${requests.length} requests)`);
+  const ended = await pollAnthropicBatch(batchId, apiKey, { deadlineMs });
+  logger.info(`batch ${batchId} ended (${roundLabel}): ${JSON.stringify(ended.request_counts || {})}`);
+  return fetchAnthropicBatchResults(ended.results_url, apiKey);
+}
+
+// Persist one entity's batch result. Mirrors the synchronous persist spine
+// (stageWorker.js handleEntityJob §11-§12: applyAiCallMeta → deriveEntityRunStatus →
+// sanitize → write entity_submodule_runs → mirror entity_stage_pool). Deliberately does
+// NOT run the taxonomy-suggestion routing or downloadable-field strip — the detector
+// emits neither (no downloadable_fields, no suggested_new). ponytail: kept as a small dup
+// (reusing the shared applyAiCallMeta + deriveEntityRunStatus utils) so the universal sync
+// handleEntityJob stays 100% untouched; if the sync spine changes, mirror it here.
+async function persistBatchEntityResult({ row, result, aiCalls, manifest, stepIndex }) {
+  applyAiCallMeta(result, aiCalls);
+  const sanitizedResult = JSON.parse(JSON.stringify(result).replace(/\\u0000/g, ''));
+  const { status: entityStatus, error: entityError } = deriveEntityRunStatus(result);
+  if (entityStatus === 'failed') {
+    console.warn(`[worker:batch] ${manifest.id}/${row.entity_name} returned an ERROR result — marking failed: ${entityError}`);
+  }
+
+  const { error: writeErr } = await db
+    .from('entity_submodule_runs')
+    .update({
+      status: entityStatus,
+      ...(entityError ? { error: entityError } : {}),
+      output_data: sanitizedResult,
+      output_render_schema: manifest.output_schema || null,
+      logs: [],
+      progress: { current: 1, total: 1, message: entityStatus === 'failed' ? 'Failed' : 'Done' },
+      completed_at: new Date().toISOString(),
+    })
+    .eq('id', row.id);
+
+  if (writeErr) {
+    console.error(`[worker:batch] Output write failed for ${manifest.id}/${row.entity_name}: ${writeErr.message}`);
+    await db.from('entity_submodule_runs')
+      .update({ status: 'failed', error: `Output write failed: ${writeErr.message}`, completed_at: new Date().toISOString() })
+      .eq('id', row.id);
+    throw writeErr;
+  }
+
+  await db.from('entity_stage_pool')
+    .update({ status: entityStatus, updated_at: new Date().toISOString() })
+    .eq('run_id', row.run_id)
+    .eq('step_index', stepIndex)
+    .eq('entity_name', row.entity_name);
+}
+
+async function handleDetectorBatchJob(job) {
+  const { batch_id, submodule_run_id, submodule_id, step_index } = job.data;
+  const startTime = Date.now();
+  const logger = makeBatchLogger(`${submodule_id}/${batch_id}`);
+  console.log(`[worker:batch] START detector batch ${batch_id} (${submodule_id}, step ${step_index})`);
+
+  const manifest = getSubmoduleById(submodule_id);
+  if (!manifest) throw new Error(`Submodule not found in registry: ${submodule_id}`);
+  const executeFn = await loadExecuteFunction(manifest);
+
+  // The module MUST expose the batch entry points. Nothing else does, so a mis-set
+  // execution_mode:batch fails the whole batch loudly rather than silently degrading.
+  if (typeof executeFn.prepareExtractionRequests !== 'function'
+    || typeof executeFn.prepareVerificationRequests !== 'function'
+    || typeof executeFn.parseResults !== 'function') {
+    const msg = `${submodule_id} does not expose the batch entry points — execution_mode:batch unsupported for this submodule`;
+    console.error(`[worker:batch] ${msg}`);
+    await db.from('entity_submodule_runs')
+      .update({ status: 'failed', error: msg, completed_at: new Date().toISOString() })
+      .eq('batch_id', batch_id).in('status', ['pending', 'running']);
+    return;
+  }
+
+  // Load entity rows; process only the not-yet-final ones (idempotency on a re-run).
+  const { data: allRows, error: rowsErr } = await db
+    .from('entity_submodule_runs').select('*').eq('batch_id', batch_id);
+  if (rowsErr) throw rowsErr;
+  const rows = (allRows || []).filter(r => r.status === 'pending' || r.status === 'running');
+  if (rows.length === 0) {
+    console.log(`[worker:batch] batch ${batch_id}: no pending entity rows — nothing to do`);
+    return;
+  }
+
+  await db.from('entity_submodule_runs')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .in('id', rows.map(r => r.id)).eq('status', 'pending');
+
+  // Build hydrated entities in row order (same enrich+blob hydration as handleEntityJob).
+  const entities = [];
+  for (const row of rows) {
+    const input = row.input_data || {};
+    const entity = input.entity || { name: row.entity_name, items: [] };
+    const items = entity.items || [];
+    await hydrateRequiresColumns({ runId: row.run_id, entityName: row.entity_name, stepIndex: step_index, items, manifest, excludeRunId: row.id, db });
+    if (items.length > 0) await hydrateItems(items);
+    entities.push(entity);
+  }
+  // Options are submodule-level (a template preset for the detector), so every entity in
+  // the step shares them; take the first row's, merged over manifest defaults.
+  const options = { ...(manifest.options_defaults || {}), ...(rows[0].options || {}) };
+  const apiKey = await resolveApiKey('anthropic', db);
+  if (!apiKey) throw new Error(`No Anthropic API key for batch execution — set ${PROVIDERS.anthropic?.envVar ?? 'ANTHROPIC_API_KEY'}`);
+
+  const tools = { logger };
+  const deadlineMs = Date.now() + BATCH_POLL_MAX_MS;
+  const aiCallsByEntity = rows.map(() => []);
+  const cid = (entityIdx, suffix) => `${rows[entityIdx].id}__${suffix}`;
+
+  // ── ROUND 1: extractions (empty in regex mode) ──
+  const { state, extractionRequests } = executeFn.prepareExtractionRequests(entities, options, tools);
+  const extractionByEntityIdx = [];
+  if (extractionRequests.length > 0) {
+    const reqs = extractionRequests.map(r => ({ custom_id: cid(r.entityIdx, 'x0'), params: buildBatchRequestParams(r.args) }));
+    const resultsMap = await submitOrReattachBatch(submodule_run_id, reqs, apiKey, deadlineMs, logger, 'extract');
+    for (const r of extractionRequests) {
+      const norm = resultsMap.get(cid(r.entityIdx, 'x0')) || { ok: false, error: 'missing_batch_result' };
+      extractionByEntityIdx[r.entityIdx] = norm.ok ? { ok: true, text: norm.text } : { ok: false, error: norm.error };
+      if (norm.ok) aiCallsByEntity[r.entityIdx].push(batchLedgerEntry(norm));
+    }
+  }
+
+  // ── ROUND 2: verifications ──
+  const { verificationRequests } = executeFn.prepareVerificationRequests(entities, options, state, extractionByEntityIdx, tools);
+  const verificationByEntityIdx = [];
+  if (verificationRequests.length > 0) {
+    const reqs = verificationRequests.map(r => ({ custom_id: cid(r.entityIdx, `v${r.batchIdx}`), params: buildBatchRequestParams(r.args) }));
+    const resultsMap = await submitOrReattachBatch(submodule_run_id, reqs, apiKey, deadlineMs, logger, 'verify');
+    for (const r of verificationRequests) {
+      const norm = resultsMap.get(cid(r.entityIdx, `v${r.batchIdx}`)) || { ok: false, error: 'missing_batch_result' };
+      (verificationByEntityIdx[r.entityIdx] ||= [])[r.batchIdx] = norm.ok ? { ok: true, text: norm.text } : { ok: false, error: norm.error };
+      if (norm.ok) aiCallsByEntity[r.entityIdx].push(batchLedgerEntry(norm));
+    }
+  }
+
+  // ── PARSE (reuses the same stages as sync → byte-identical verdicts) ──
+  const { results } = executeFn.parseResults(entities, options, state, verificationByEntityIdx, tools);
+
+  // ── PERSIST each entity (batchWorker finalizes submodule_runs + pipeline_stages) ──
+  for (let i = 0; i < rows.length; i++) {
+    await persistBatchEntityResult({ row: rows[i], result: results[i] || { items: [], meta: { status: 'error', error: 'no_result' } }, aiCalls: aiCallsByEntity[i], manifest, stepIndex: step_index });
+  }
+
+  const failed = results.filter(r => r?.meta?.status === 'error').length;
+  console.log(`[worker:batch] DONE detector batch ${batch_id}: ${rows.length} entities (${failed} failed) in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+}
+
+// Create the worker — per-entity + the Phase 2B step-6 batch job (dispatched by name)
 const WORKER_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '2', 10);
 
 const worker = new Worker(
   'pipeline-stages-v2',
   async (job) => {
+    if (job.name === 'entity-batch-llm') return handleDetectorBatchJob(job);
     return handleEntityJob(job);
   },
   {
