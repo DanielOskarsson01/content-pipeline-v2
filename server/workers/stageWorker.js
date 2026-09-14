@@ -23,6 +23,7 @@ import { COST_CONFIG } from '../config/timeouts.js';
 import { resolveModel, PROVIDERS } from '../config/llmRegistry.js';
 import { resolveApiKey } from '../services/apiKeys.js';
 import { hydrateItems } from '../services/poolBlobs.js';
+import { archiveEntityScrape, logCorpusArchiveStatus } from '../services/corpusArchive.js';
 import { hydrateRequiresColumns } from '../services/poolHydration.js';
 import { convertXlsxInDir } from '../utils/xlsxConverter.js';
 import { parseAnthropicSSE } from '../services/aiStream.js';
@@ -791,6 +792,14 @@ async function handleEntityJob(job) {
     const metricStatus = isTimeout ? 'timeout' : (partialItems.length > 0 ? 'partial' : 'failed');
     logMetric({ run_id: entityRun.run_id, submodule_id, entity_name, status: metricStatus, duration_ms, step_index, cost: manifest.cost || 'medium', error: err.message });
 
+    // 8c (partial). Corpus Archive (U-C) — bank the pages we DID scrape before the timeout/abort.
+    //     This is exactly the mid-fleet-death case the scrape-time archive exists for.
+    try {
+      await archiveEntityScrape({ db, items: partialItems, entityName: entity_name, runId: entityRun.run_id, scraper: submodule_id, requiresColumns: manifest.requires_columns });
+    } catch (corpusErr) {
+      console.error(`[corpus] banking FAILED (partial) for "${entity_name}" (run ${entityRun.run_id}, ${submodule_id}): ${corpusErr.message}`);
+    }
+
     if (partialItems.length > 0) return; // Don't throw — partial success
     throw err;
   } finally {
@@ -805,6 +814,18 @@ async function handleEntityJob(job) {
   //     update (§12), gated on entityStatus==='completed'. Data-shape routing: [] for
   //     any output that doesn't carry the path (inert for non-analyzer submodules).
   const tagSuggestions = extractTagSuggestions(result);
+
+  // 8c. Corpus Archive (U-C) — durably bank scraped page text BEFORE §9 strips text_content
+  //     (scrapers declare it a downloadable_field, so §9 removes it from result.items).
+  //     Additive + best-effort at the call site: LOUD internally, but a corpus failure must
+  //     NEVER break the live pipeline. Data-shape routed — a no-op for any output without
+  //     text_content, and OFF entirely unless CORPUS_ARCHIVE_BUCKET is set. requiresColumns
+  //     gates out text REFINERS (boilerplate-stripper etc.) so cleaned text never overwrites raw.
+  try {
+    await archiveEntityScrape({ db, items: result?.items, entityName: entity_name, runId: entityRun.run_id, scraper: submodule_id, requiresColumns: manifest.requires_columns });
+  } catch (corpusErr) {
+    console.error(`[corpus] banking FAILED for "${entity_name}" (run ${entityRun.run_id}, ${submodule_id}): ${corpusErr.message}`);
+  }
 
   // 9. Store downloadable fields (same logic, but for single entity result)
   const downloadFieldDefs = manifest.output_schema?.downloadable_fields || [];
@@ -1203,6 +1224,7 @@ worker.on('error', (err) => {
 
 worker.on('ready', () => {
   console.log(`[worker] Pipeline stage worker ready (concurrency: ${WORKER_CONCURRENCY})`);
+  logCorpusArchiveStatus(); // loud boot signal: corpus archive on/off
 });
 
 // Graceful shutdown — close worker and browser on SIGTERM/SIGINT

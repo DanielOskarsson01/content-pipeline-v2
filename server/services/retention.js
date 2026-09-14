@@ -34,7 +34,15 @@ const STALE_ATTENDED_MS = STALE_ATTENDED_DAYS * 24 * 60 * 60 * 1000;
 // "no non-terminal row" is a sound proxy for "no live queue job".
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'approved', 'skipped', 'skipped_no_input']);
 
-// All tables with a direct run_id column (order matters: children before parents)
+// All tables with a direct run_id column (order matters: children before parents).
+//
+// DELIBERATELY EXCLUDED — do NOT add `entity_corpus` here.
+// entity_corpus (Corpus Archive, migration 20260914120000_entity_corpus.sql) is the
+// durable, purge-IMMUNE index of the scraped corpus. Its survival of the 7-day purge is
+// STRUCTURAL: it carries source_run_id as a plain column (NOT a foreign key), and its
+// absence from this list is the entire mechanism. Adding it here would silently start
+// deleting the archive on every run purge — the exact evaporation the archive exists to
+// prevent. Its own age-based lifecycle (Corpus Archive U-F) bounds it, never this sweep.
 const RUN_ID_TABLES = [
   'analysis_results',
   'approval_routing',
