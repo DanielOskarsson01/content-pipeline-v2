@@ -6,8 +6,10 @@
  * tokens_out, stop_reason } into tools._aiCalls (see buildTools in stageWorker.js).
  * After a module's execute() returns, the worker calls this to:
  *
- *   1. FAIL-CLOSED ON TRUNCATION. If any call stopped on 'max_tokens', the model's
- *      response was amputated (streamed text cut off mid-output). Set
+ *   1. FAIL-CLOSED ON TRUNCATION. If any call hit its output ceiling — Anthropic
+ *      reports stop_reason 'max_tokens'; the OpenAI-compat branches (openai,
+ *      perplexity, gemini, openrouter) report finish_reason 'length' — the
+ *      response was amputated (text cut off mid-output). Set
  *      meta.status='error' — unless the module already flagged an error — so
  *      deriveEntityRunStatus marks the entity 'failed' AND the per-entity supersede
  *      gate (isFailedRun, server/lib/applyDataOperation.js) takes the
@@ -15,9 +17,11 @@
  *      the pool instead of letting a truncated retry evict it. A truncated round-2
  *      must never supersede a complete round-1.
  *
- *   2. OBSERVABILITY. Persist token totals + per-call stop reasons into
- *      meta.ai_usage so cost-per-entity and truncation are queryable per run — it
- *      rides in the existing output_data JSONB, no schema migration.
+ *   2. OBSERVABILITY. Persist token totals + per-call stop_reason AND
+ *      finish_reason into meta.ai_usage so cost-per-entity and truncation are
+ *      queryable per run ("how often do we hit the ceiling?" is a DB query, not
+ *      a re-read of raw receipts) — it rides in the existing output_data JSONB,
+ *      no schema migration.
  *
  *   3. FAIL-CLOSED ON AN EMPTY / REFUSED COMPLETION (BACKLOG #49). Gemini via its
  *      OpenAI-compat endpoint 200s with EMPTY text on a safety refusal; the
@@ -33,13 +37,16 @@
  *     salvage of a truncated response (e.g. content-analyzer's JSON repair). An
  *     amputated output is incomplete regardless of who parses it. In practice
  *     only content-writer truncates; others emit <2k output tokens.
- *   - Truncation detection is Anthropic-only: the OpenAI/Perplexity branches in
- *     stageWorker don't surface a stop_reason, so their finish_reason:'length'
- *     is unmapped and won't trip this guard. Extend those branches if/when a
- *     non-Anthropic generation path needs the same protection.
+ *   - Truncation detection is provider-agnostic (CEILING §T2 closed the gemini
+ *     gap): Anthropic carries it as stop_reason 'max_tokens' (sync SSE and the
+ *     Message Batches ledger, anthropicBatch.js batchLedgerEntry); the four
+ *     OpenAI-compat branches in stageWorker (openai, perplexity, gemini,
+ *     openrouter) carry it as finish_reason 'length' with stop_reason null.
+ *     The guard checks BOTH fields — a new provider branch must surface one of
+ *     them or truncation goes silent again.
  *
  * @param {{items?:any[], meta?:object}} result  per-entity module result
- * @param {Array<{provider?:string, model?:string, tokens_in?:number, tokens_out?:number, cache_write_tokens?:number, cache_read_tokens?:number, stop_reason?:string}>} aiCalls
+ * @param {Array<{provider?:string, model?:string, tokens_in?:number, tokens_out?:number, cache_write_tokens?:number, cache_read_tokens?:number, stop_reason?:string, finish_reason?:string}>} aiCalls
  * @returns {object} the same `result`, mutated
  */
 export function applyAiCallMeta(result, aiCalls) {
@@ -72,6 +79,11 @@ export function applyAiCallMeta(result, aiCalls) {
       // computes. A real number beats an estimate for cross-model cost comparison.
       provider_cost: c.provider_cost ?? null,
       stop_reason: c.stop_reason ?? null,
+      // Truncation observability (CEILING §T2): finish_reason is how the four
+      // OpenAI-compat branches report truncation ('length') — persisted so
+      // ceiling hits are queryable from run history instead of raw receipts.
+      // Mirrors stop_reason on anthropic (stageWorker.js ledger push).
+      finish_reason: c.finish_reason ?? null,
     })),
     tokens_in_total: calls.reduce((s, c) => s + (c.tokens_in || 0), 0),
     tokens_out_total: calls.reduce((s, c) => s + (c.tokens_out || 0), 0),
@@ -88,14 +100,21 @@ export function applyAiCallMeta(result, aiCalls) {
       : null,
   };
 
-  const truncated = calls.find(c => c.stop_reason === 'max_tokens');
+  // Anthropic reports truncation as stop_reason 'max_tokens'; the OpenAI-compat
+  // branches (openai/perplexity/gemini/openrouter) as finish_reason 'length'
+  // with stop_reason null. Check both — a stop_reason-only predicate swallowed
+  // gemini truncation as 'success' (CEILING §T2, the fifth swallowed failure).
+  const truncated = calls.find(c => c.stop_reason === 'max_tokens' || c.finish_reason === 'length');
   if (truncated) {
     result.meta.truncated = true;
     result.meta.truncated_by = `${truncated.provider ?? 'anthropic'}/${truncated.model ?? 'unknown'}`;
     if (result.meta.status !== 'error') {
       result.meta.status = 'error';
+      const field = truncated.stop_reason === 'max_tokens'
+        ? "stop_reason 'max_tokens'"
+        : "finish_reason 'length'";
       result.meta.error = result.meta.error
-        || `LLM output truncated (hit max_tokens) on ${result.meta.truncated_by} — failing closed to preserve prior round's content`;
+        || `LLM output truncated (${field}, ${truncated.tokens_out || 0} output tokens) on ${result.meta.truncated_by} — failing closed to preserve prior round's content`;
     }
   }
 
@@ -108,7 +127,10 @@ export function applyAiCallMeta(result, aiCalls) {
   //    here). An empty completion is never a legitimate success for these modules,
   //    so fail closed with a named reason — same override-the-module philosophy as
   //    the truncation guard. Distinct from truncation: a truncated response HAS
-  //    text (cut off); a refused one has none, so the two guards never collide.
+  //    text (cut off); a refused one has none, so the two guards rarely collide.
+  //    (Edge: thinking-exhaustion can yield finish_reason 'length' with EMPTY
+  //    text — both guards fire, truncation names the error first; still an
+  //    error either way, so the collision is benign.)
   //
   //    SCOPE (deliberate, like the truncation guard):
   //    - RUN GRANULARITY: fires if ANY call in the run is empty, overriding a
