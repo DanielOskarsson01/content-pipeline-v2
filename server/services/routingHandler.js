@@ -666,6 +666,10 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
         decision: d.decision,
         terminal,
         instructions_written: 0,
+        // F-B: the outcome record (§g) must say WHY per entity — additive field,
+        // read by no control flow (runs.js filters on instructions_written /
+        // dedup_blocked / target_step only).
+        failure_reason: d.failure_reason || null,
       });
       continue;
     }
@@ -786,7 +790,7 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
   const earliest_step = routed_count > 0
     ? Math.min(...routedRows.map((r) => r.target_step))
     : null;
-  return {
+  const summary = {
     decisions_sent: decisions.length,
     instructions_written: writeResults.reduce(
       (n, r) => n + (r.instructions_written || 0), 0
@@ -799,6 +803,45 @@ export async function applyRouting(db, runId, routingStep = 10, executionPlan = 
     flagged_count: writeResults.filter((r) => r.terminal === 'flagged').length,
     per_entity: writeResults,
   };
+
+  // ── g) Record the pass outcome — a decision that resolves to no action must
+  // still leave a queryable record (F-B, VALIDATION_E2E_RUN1). Run 9821ed56
+  // decided loop_discovery ×5, routed nothing (the intended no_card_for_round
+  // flag-and-continue), and the only traces were per-entity terminal_state plus
+  // an empty routing_events — "decided X, executed nothing, because Y" was
+  // reconstructable only from absence. ONE decision_log row per routing pass,
+  // routed or not. Non-fatal by contract: the routing writes above are the
+  // load-bearing ones — losing the outcome row must never abort an
+  // already-applied pass ({error} checked + logged, §5).
+  try {
+    const noOp = routed_count === 0;
+    const noOpReasons = [...new Set(writeResults.map((r) => r.failure_reason).filter(Boolean))];
+    const { error: outcomeErr } = await db.from('decision_log').insert({
+      run_id: runId,
+      step_index: routingStep,
+      decision: 'routing_outcome',
+      reason:
+        `${summary.decisions_sent} decision(s) → ${routed_count} routed` +
+        (noOp
+          ? ` — no-op (approved ${summary.approved_count}, flagged ${summary.flagged_count}, ` +
+            `failed ${summary.failed_count}${noOpReasons.length ? `; ${noOpReasons.join(', ')}` : ''})`
+          : ` (earliest step ${earliest_step})`),
+      context: { no_op: noOp, ...summary },
+    });
+    if (outcomeErr) {
+      console.error(
+        `[routingHandler] FAILED to record routing outcome for run ${runId}: ` +
+        `${outcomeErr.message || outcomeErr}`
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[routingHandler] Unexpected error recording routing outcome for run ${runId}: ` +
+      `${err?.message || err}`
+    );
+  }
+
+  return summary;
 }
 
 export { validateCards, resolveCards, recordQaScores };

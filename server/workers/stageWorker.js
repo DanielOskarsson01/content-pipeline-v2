@@ -30,6 +30,7 @@ import { parseAnthropicSSE } from '../services/aiStream.js';
 import { buildCachedUserContent } from '../services/promptCache.js';
 import { deriveEntityRunStatus } from '../utils/entityRunStatus.js';
 import { applyAiCallMeta } from '../utils/aiCallMeta.js';
+import { extractInputTruncation, buildInputTruncationLogRow } from '../utils/inputTruncation.js';
 import {
   buildBatchRequestParams, batchLedgerEntry,
   submitAnthropicBatch, getAnthropicBatch, pollAnthropicBatch, fetchAnthropicBatchResults,
@@ -988,6 +989,31 @@ async function handleEntityJob(job) {
     .eq('step_index', step_index)
     .eq('entity_name', entity_name);
 
+  // F-D (VALIDATION_E2E_RUN1): input-side truncation must be queryable after the
+  // fact. When the module declares on its result meta that its assembled input was
+  // cut (content_truncated — the module-agnostic B029 contract), lift it into a
+  // first-class decision_log row. Run 9821ed56 delivered 61%/79% of two corpora
+  // and the only trace was 3 levels deep in output_data JSONB. Non-fatal by
+  // contract: the record is observability — a failed insert must never fail a
+  // completed entity ({error} checked + logged, §5).
+  const inputTruncation = extractInputTruncation(result);
+  if (inputTruncation) {
+    console.warn(
+      `[worker:entity] ${submodule_id}/${entity_name}: INPUT TRUNCATED — ` +
+      `${inputTruncation.content_chars_kept ?? '?'} of ${inputTruncation.content_chars_total ?? '?'} assembled chars delivered`
+    );
+    const { error: truncErr } = await db.from('decision_log').insert(
+      buildInputTruncationLogRow({
+        runId: entityRun.run_id, stepIndex: step_index,
+        submoduleId: submodule_id, entityName: entity_name,
+        truncation: inputTruncation,
+      })
+    );
+    if (truncErr) {
+      console.error(`[worker:entity] FAILED to record input truncation for ${submodule_id}/${entity_name}: ${truncErr.message}`);
+    }
+  }
+
   const duration_ms = Date.now() - startTime;
   console.log(`[worker:entity] ${entityStatus === 'failed' ? 'FAILED' : 'Completed'}: ${submodule_id} for "${entity_name}" (${(duration_ms / 1000).toFixed(1)}s)`);
   logMetric({ run_id: entityRun.run_id, submodule_id, entity_name, status: entityStatus, duration_ms, step_index, cost: manifest.cost || 'medium' });
@@ -1094,6 +1120,28 @@ async function persistBatchEntityResult({ row, result, aiCalls, manifest, stepIn
     .eq('run_id', row.run_id)
     .eq('step_index', stepIndex)
     .eq('entity_name', row.entity_name);
+
+  // F-D mirror of the sync spine (see handleEntityJob §12): lift a module-declared
+  // input truncation into decision_log. The detector emits no truncation meta today,
+  // so this is a no-op for batch mode — kept in lockstep per this function's
+  // mirror-the-spine contract.
+  const inputTruncation = extractInputTruncation(result);
+  if (inputTruncation) {
+    console.warn(
+      `[worker:batch] ${manifest.id}/${row.entity_name}: INPUT TRUNCATED — ` +
+      `${inputTruncation.content_chars_kept ?? '?'} of ${inputTruncation.content_chars_total ?? '?'} assembled chars delivered`
+    );
+    const { error: truncErr } = await db.from('decision_log').insert(
+      buildInputTruncationLogRow({
+        runId: row.run_id, stepIndex,
+        submoduleId: manifest.id, entityName: row.entity_name,
+        truncation: inputTruncation,
+      })
+    );
+    if (truncErr) {
+      console.error(`[worker:batch] FAILED to record input truncation for ${manifest.id}/${row.entity_name}: ${truncErr.message}`);
+    }
+  }
 }
 
 async function handleDetectorBatchJob(job) {

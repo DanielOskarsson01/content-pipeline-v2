@@ -347,6 +347,24 @@ export async function executeRun(runId, config, previousState = null) {
         // All entities terminal — no backward routing, run complete
         if (summary.all_terminal || summary.routed_count === 0) {
           console.log(`[auto-execute] All entities terminal after routing`);
+          // F-B (VALIDATION_E2E_RUN1): a decided-but-nothing-routed pass must be
+          // visible in run state, not only inferable from an empty routing_events
+          // (run 9821ed56: loop_discovery ×5 decided, routing_events []). No loop
+          // is consumed; earliest_step is null by definition of a no-op pass. The
+          // queryable DB record is routingHandler's decision_log 'routing_outcome'
+          // row — this is the state-level mirror.
+          if (!state.routing_events) state.routing_events = [];
+          state.routing_events.push({
+            loop: routingLoops,
+            no_op: true,
+            earliest_step: null,
+            routed: 0,
+            decisions: summary.decisions_sent ?? null,
+            approved: summary.approved_count ?? null,
+            failed: summary.failed_count ?? null,
+            flagged: summary.flagged_count ?? null,
+            timestamp: new Date().toISOString(),
+          });
           state.per_step_results[String(stepIndex)] = {
             status: 'completed', ...evalResult,
             duration_ms: Date.now() - stepStartTime,

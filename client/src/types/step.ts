@@ -38,7 +38,11 @@ export interface AutoExecuteState {
   routing_loops?: number;
   routing_events?: Array<{
     loop: number;
-    earliest_step: number;
+    // null + no_op:true = a routing pass that decided but routed nothing
+    // (F-B: previously such passes left no event at all)
+    earliest_step: number | null;
+    no_op?: boolean;
+    decisions?: number | null;
     routed: number;
     approved: number;
     failed: number;
